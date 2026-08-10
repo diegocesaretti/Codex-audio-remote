@@ -10,6 +10,8 @@ Prototype Android satellite + Windows companion for using Codex Voice remotely o
 - WebSocket link to a Windows PC
 - trigger the Codex Voice shortcut (`Ctrl+Q` by default)
 - confirm activation by watching the Windows microphone capability registry for `OpenAI.Codex_*`
+- temporarily switch the Windows default capture endpoint to the remote/virtual microphone during a Codex Voice session
+- restore the user's original microphone automatically when Voice ends, fails, disconnects, or the companion restarts after an unclean shutdown
 - stream Android microphone audio to the PC
 - later: stream PC/Codex audio back to Android and show a lightweight overlay over a Home Assistant dashboard
 
@@ -20,24 +22,37 @@ Prototype Android satellite + Windows companion for using Codex Voice remotely o
 
 ## Current prototype state
 
-The first milestone implements signaling end-to-end:
+The signaling + temporary microphone switching milestone is implemented:
 
 1. Android connects to the PC over WebSocket.
 2. Android sends a `wake` message (manual test button initially; Vosk service scaffold included).
-3. Windows sends `Ctrl+Q`.
-4. Windows polls `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone` for `OpenAI.Codex_*`.
-5. When `LastUsedTimeStart > 0 && LastUsedTimeStop == 0`, Windows replies `codex_listening`.
-6. Android displays the confirmed state and can begin PCM microphone streaming.
+3. Windows saves the current default capture endpoint IDs for Console, Multimedia and Communications.
+4. Windows changes those defaults to the configured virtual microphone (default name match: `CABLE Output`).
+5. Windows sends `Ctrl+Q`.
+6. Windows polls `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone` for `OpenAI.Codex_*`.
+7. When `LastUsedTimeStart > 0 && LastUsedTimeStop == 0`, Windows replies `codex_listening`.
+8. Android can begin PCM microphone streaming.
+9. When Codex stops using the microphone, the companion waits a short debounce period and restores the original Windows defaults.
 
-The microphone registry behavior is intentionally treated as an observed Windows behavior rather than a guaranteed public API contract.
+The microphone registry behavior is intentionally treated as an observed Windows behavior rather than a guaranteed public API contract. The default-endpoint setter is also isolated because Windows exposes public APIs for discovering/default endpoint routing, but not a supported public setter equivalent for desktop apps.
 
 ## Windows quick start
 
 Requirements: Windows, .NET 8 SDK, Codex/ChatGPT Windows application installed.
 
+For the prototype, install a virtual audio cable such as VB-CABLE. Its recording endpoint is normally named something containing `CABLE Output`.
+
+First inspect the capture devices Windows exposes:
+
 ```powershell
 cd windows/CodexAudioRemote.Server
-dotnet run -- --port 8765
+dotnet run -- --list-devices
+```
+
+Then start the server:
+
+```powershell
+dotnet run -- --port 8765 --virtual-mic "CABLE Output"
 ```
 
 Allow TCP port 8765 through Windows Firewall for the local/private network.
@@ -48,9 +63,20 @@ Optional arguments:
 --port 8765
 --shortcut ctrl+q
 --activation-timeout 6000
+--virtual-mic "CABLE Output"
+--restore-delay 800
+--list-devices
 ```
 
 The server binds to `http://+:8765/ws/`.
+
+### Safety / recovery behavior
+
+Before changing defaults, the companion writes `audio-restore.json` beside the executable. It stores the original endpoint IDs for the three Windows audio roles.
+
+Normal session end, activation timeout, client disconnect and Ctrl+C all restore the original microphone. If the process crashes while the virtual microphone is still default, the next launch sees `audio-restore.json` and restores the saved endpoints before accepting clients.
+
+The restore delay defaults to 800 ms so a short close/reopen transition inside Codex Voice does not cause the default input to flap between devices.
 
 ## Android quick start
 
@@ -70,7 +96,7 @@ Android uplink binary WebSocket frames are raw PCM:
 - mono
 - 16 kHz
 
-The Windows v0.1 server currently receives and meters these frames. Routing them into a virtual microphone and the PC-audio downlink are the next milestone.
+The Windows server currently receives and meters these frames. Feeding that PCM into the render side of the virtual cable (`CABLE Input`) and implementing the PC-audio downlink are the next milestone.
 
 ## Protocol
 
@@ -92,14 +118,15 @@ PC → Android:
 {"type":"activating"}
 {"type":"codex_listening"}
 {"type":"codex_idle"}
-{"type":"activation_failed"}
+{"type":"activation_failed","reason":"virtual_mic_not_found"}
+{"type":"activation_failed","reason":"codex_mic_timeout"}
 ```
 
 Binary frames are microphone PCM while a voice session is active.
 
 ## Next milestone
 
-- route Android PCM to a selectable Windows playback endpoint / virtual audio cable
+- feed Android PCM into a selectable Windows render endpoint / virtual audio cable (`CABLE Input`)
 - WASAPI loopback capture for Codex output → Android speaker
 - functional Vosk wake-word model loading
 - overlay states: Activating / Listening / Speaking / Error
