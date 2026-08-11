@@ -47,7 +47,7 @@ while (true)
     {
         try
         {
-            using var wsContext = await context.AcceptWebSocketAsync(null);
+            var wsContext = await context.AcceptWebSocketAsync(null);
             var socket = wsContext.WebSocket;
             Console.WriteLine($"Client connected: {context.Request.RemoteEndPoint}");
             await SendJson(socket, new { type = "hello", server = "CodexAudioRemote" });
