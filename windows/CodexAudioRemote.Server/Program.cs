@@ -17,7 +17,7 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) => switcher.RestoreNow();
 
 Console.WriteLine($"Codex Audio Remote server listening on ws://0.0.0.0:{options.Port}/ws/");
 Console.WriteLine($"Virtual microphone: '{options.VirtualMicName}' | cable playback: '{options.VirtualCableInputName}'");
-Console.WriteLine("Low-latency mode: 20 ms uplink chunks, 20 ms WASAPI output, 100 ms Codex-state polling");
+Console.WriteLine("Adaptive audio profile: quality/latency controlled by Android satellite");
 
 using var listener = new HttpListener();
 listener.Prefixes.Add($"http://+:{options.Port}/ws/");
@@ -42,8 +42,9 @@ while (true)
 
             using var cts = new CancellationTokenSource();
             var registryTask = WatchCodexMic(socket, sendGate, switcher, cts.Token);
-            var buffer = new byte[16 * 1024];
+            var buffer = new byte[32 * 1024];
             long audioBytes = 0;
+            int uplinkBytesPerSecond = 32000;
 
             async Task StopAudioSession(bool notify = true)
             {
@@ -61,7 +62,8 @@ while (true)
                 {
                     audioBytes += result.Count;
                     audioSink?.Write(buffer, 0, result.Count);
-                    if (audioBytes % 32000 < result.Count) Console.WriteLine($"Audio uplink injected: {audioBytes / 32000.0:F1}s");
+                    if (audioBytes % uplinkBytesPerSecond < result.Count)
+                        Console.WriteLine($"Audio uplink injected: {audioBytes / (double)uplinkBytesPerSecond:F1}s");
                     continue;
                 }
 
@@ -88,7 +90,12 @@ while (true)
                     case "audio_start":
                         audioBytes = 0;
                         await StopAudioSession(false);
-                        audioSink = AudioCableSink.TryCreate(options.VirtualCableInputName);
+                        var sampleRate = GetInt(doc.RootElement, "sampleRate", 16000, 8000, 48000);
+                        var chunkMs = GetInt(doc.RootElement, "chunkMs", 50, 10, 120);
+                        var quality = GetInt(doc.RootElement, "quality", 80, 0, 100);
+                        var latency = GetInt(doc.RootElement, "latency", 55, 0, 100);
+                        uplinkBytesPerSecond = sampleRate * 2;
+                        audioSink = AudioCableSink.TryCreate(options.VirtualCableInputName, sampleRate, quality, latency);
                         if (audioSink is null)
                         {
                             await SendJson(socket, sendGate, new { type = "audio_error", reason = "cable_input_not_found" });
@@ -97,7 +104,7 @@ while (true)
                         downlink = new LoopbackDownlink(async pcm => await SendBinary(socket, sendGate, pcm));
                         await SendJson(socket, sendGate, new { type = "downlink_start", sampleRate = 16000, channels = 1 });
                         downlink.Start();
-                        Console.WriteLine("Bidirectional audio session started");
+                        Console.WriteLine($"Bidirectional session: {sampleRate} Hz, chunk {chunkMs} ms, quality {quality}%, latency {latency}%");
                         break;
 
                     case "audio_stop":
@@ -115,10 +122,7 @@ while (true)
                             ShortcutSender.Send(options.Shortcut);
                             _ = ForceRestoreAfterEnd(switcher, options.EndSessionRestoreTimeoutMs);
                         }
-                        else
-                        {
-                            switcher.ScheduleRestore(force: true);
-                        }
+                        else switcher.ScheduleRestore(force: true);
                         break;
                 }
             }
@@ -139,6 +143,12 @@ while (true)
         }
         finally { sendGate.Dispose(); }
     });
+}
+
+static int GetInt(JsonElement root, string name, int fallback, int min, int max)
+{
+    if (!root.TryGetProperty(name, out var p) || !p.TryGetInt32(out var value)) return fallback;
+    return Math.Clamp(value, min, max);
 }
 
 async Task ForceRestoreAfterEnd(AudioDeviceSwitcher audioSwitcher, int timeoutMs)
@@ -266,27 +276,35 @@ sealed class AudioCableSink : IDisposable
     readonly MediaFoundationResampler resampler;
     readonly WasapiOut output;
     bool disposed;
-    AudioCableSink(MMDevice device)
+
+    AudioCableSink(MMDevice device, int sampleRate, int quality, int latency)
     {
         this.device = device;
-        source = new BufferedWaveProvider(new WaveFormat(16000, 16, 1))
+        quality = Math.Clamp(quality, 0, 100);
+        latency = Math.Clamp(latency, 0, 100);
+        var bufferMs = 300 + (quality * 3); // reservoir only; does not force this much playout delay
+        var wasapiLatencyMs = Math.Clamp(60 - (latency * 40 / 100), 20, 60);
+        var resamplerQuality = Math.Clamp(20 + (quality * 40 / 100), 20, 60);
+        source = new BufferedWaveProvider(new WaveFormat(sampleRate, 16, 1))
         {
-            BufferDuration = TimeSpan.FromMilliseconds(300),
+            BufferDuration = TimeSpan.FromMilliseconds(bufferMs),
             DiscardOnBufferOverflow = true,
             ReadFully = true
         };
         var target = device.AudioClient.MixFormat;
-        resampler = new MediaFoundationResampler(source, target) { ResamplerQuality = 40 };
-        output = new WasapiOut(device, AudioClientShareMode.Shared, true, 20);
+        resampler = new MediaFoundationResampler(source, target) { ResamplerQuality = resamplerQuality };
+        output = new WasapiOut(device, AudioClientShareMode.Shared, true, wasapiLatencyMs);
         output.Init(resampler); output.Play();
-        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} ({target.SampleRate} Hz, {target.Channels} ch)");
+        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} | {sampleRate} Hz PCM | WASAPI {wasapiLatencyMs} ms | resampler {resamplerQuality} | reservoir {bufferMs} ms");
     }
-    public static AudioCableSink? TryCreate(string namePart)
+
+    public static AudioCableSink? TryCreate(string namePart, int sampleRate, int quality, int latency)
     {
         MMDevice? d = null;
-        try { d = AudioDeviceManager.FindDevice(DataFlow.Render, namePart); return d is null ? null : new AudioCableSink(d); }
+        try { d = AudioDeviceManager.FindDevice(DataFlow.Render, namePart); return d is null ? null : new AudioCableSink(d, sampleRate, quality, latency); }
         catch (Exception ex) { Console.WriteLine($"Could not open cable playback endpoint: {ex.Message}"); d?.Dispose(); return null; }
     }
+
     public void Write(byte[] data, int offset, int count) { if (!disposed) source.AddSamples(data, offset, count); }
     public void Dispose() { if (disposed) return; disposed = true; try { output.Stop(); } catch { } output.Dispose(); resampler.Dispose(); device.Dispose(); }
 }
