@@ -55,20 +55,27 @@ public class OverlayController {
         if (Build.VERSION.SDK_INT >= 26) {
             types = new int[]{ WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY };
         } else if (Build.VERSION.SDK_INT >= 23) {
-            // Some Android 6 vendor ROMs accept only one of these legacy overlay types.
-            types = new int[]{ WindowManager.LayoutParams.TYPE_SYSTEM_ALERT, WindowManager.LayoutParams.TYPE_PHONE };
+            // Android 6 vendor ROMs can report overlay permission granted while still
+            // rejecting TYPE_SYSTEM_ALERT/TYPE_PHONE. TYPE_TOAST is a useful last-resort
+            // compatibility path on API 23.
+            types = new int[]{
+                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                    WindowManager.LayoutParams.TYPE_TOAST
+            };
         } else {
-            types = new int[]{ WindowManager.LayoutParams.TYPE_PHONE };
+            types = new int[]{ WindowManager.LayoutParams.TYPE_PHONE, WindowManager.LayoutParams.TYPE_TOAST };
         }
 
         for (int type : types) {
             OverlayView candidate = new OverlayView(context);
             candidate.setState(state);
             candidate.setOnClickListener(v -> { if (tapAction != null) tapAction.run(); });
+            int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
             WindowManager.LayoutParams candidateParams = new WindowManager.LayoutParams(
-                    dp(220), dp(80), type,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    dp(220), dp(80), type, flags,
                     android.graphics.PixelFormat.TRANSLUCENT);
             candidateParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
             candidateParams.y = dp(42);
@@ -86,6 +93,7 @@ public class OverlayController {
         }
         view = null;
         layoutParams = null;
+        AndroidDebugLog.log("Overlay unavailable after all fallbacks · API=" + Build.VERSION.SDK_INT);
         return false;
     }
 
