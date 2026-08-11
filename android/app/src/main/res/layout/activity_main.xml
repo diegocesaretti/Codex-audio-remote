@@ -53,12 +53,20 @@
         <EditText android:id="@+id/endPhrases" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="Frases de finalización separadas por coma" android:inputType="textCapSentences" android:maxLines="3" android:text="gracias sol, chau sol, adiós sol, listo sol" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Las frases se reconocen localmente durante la conversación y cierran Voice sin esperar el timeout." />
 
+        <com.bwa3d.codexremote.PreferenceCheckBox
+            android:id="@+id/transcriptCheck"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Mostrar transcripción local de la respuesta de Sol" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Opcional: usa el mismo modelo local de Vosk sobre el audio de respuesta. Consume algo más de CPU y no requiere nube." />
+
         <CheckBox android:id="@+id/autostartCheck" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Iniciar satélite al encender Android" />
         <Button android:id="@+id/overlayButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Permitir overlay sobre Home Assistant" />
         <Button android:id="@+id/connectButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:text="Conectar / iniciar servicio" />
         <Button android:id="@+id/wakeButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Probar wake" />
 
         <TextView android:id="@+id/statusText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp" android:text="Inactivo" android:textSize="17sp" />
-        <TextView android:id="@+id/helpText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:text="La primera vez descarga el modelo español de Vosk (~39 MB). Luego wake y frases de finalización funcionan localmente, incluso con Home Assistant en primer plano." />
+        <TextView android:id="@+id/helpText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:text="La primera vez descarga el modelo español de Vosk (~39 MB). Luego wake, frases de finalización y transcripción opcional funcionan localmente, incluso con Home Assistant en primer plano." />
     </LinearLayout>
 </ScrollView>
