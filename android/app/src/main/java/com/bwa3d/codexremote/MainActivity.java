@@ -45,9 +45,12 @@ public class MainActivity extends Activity {
     private Spinner audioSourceSpinner, voiceEnhancerSpinner;
     private CheckBox autostart, manualLatency, noiseSuppressor, androidAgc, aec;
     private volatile boolean audioTestRunning;
+    private boolean overlayPromptAttempted;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        AndroidDebugLog.install(this);
+        AndroidDebugLog.log("MainActivity onCreate · API " + Build.VERSION.SDK_INT);
         setContentView(R.layout.activity_main);
 
         serverIp = findViewById(R.id.serverIp);
@@ -145,13 +148,34 @@ public class MainActivity extends Activity {
             startServiceCompat(i);
             statusText.setText("Wake enviado…");
         });
-        overlay.setOnClickListener(v -> requestOverlayPermission());
+        overlay.setOnClickListener(v -> requestOverlayPermission(false));
         audioTest.setOnClickListener(v -> runLocalAudioTest());
 
-        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+        } else {
+            new android.os.Handler().postDelayed(() -> requestOverlayPermission(true), 500);
+        }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 11);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (statusText != null && Build.VERSION.SDK_INT >= 23 && Settings.canDrawOverlays(this)) {
+            statusText.setText("Overlay habilitado · listo para usar sobre Home Assistant");
+            AndroidDebugLog.log("Overlay permission granted");
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_AUDIO) {
+            boolean granted = grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+            AndroidDebugLog.log("RECORD_AUDIO permission: " + granted);
+            if (granted) new android.os.Handler().postDelayed(() -> requestOverlayPermission(true), 350);
+            else if (statusText != null) statusText.setText("Se necesita permiso de micrófono para wake y conversación");
+        }
     }
 
     private interface ProgressAction { void apply(int progress); }
@@ -197,9 +221,31 @@ public class MainActivity extends Activity {
         return ENHANCER_KEYS[p];
     }
 
-    private void requestOverlayPermission() {
-        if (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this)) { statusText.setText("Overlay habilitado"); return; }
-        startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
+    private void requestOverlayPermission(boolean automatic) {
+        if (Build.VERSION.SDK_INT < 23) {
+            if (statusText != null) statusText.setText("Overlay habilitado");
+            return;
+        }
+        if (Settings.canDrawOverlays(this)) {
+            if (statusText != null) statusText.setText("Overlay habilitado");
+            return;
+        }
+        if (automatic && overlayPromptAttempted) return;
+        overlayPromptAttempted = true;
+        AndroidDebugLog.log("Requesting overlay permission · automatic=" + automatic);
+        if (statusText != null) statusText.setText("Habilitá “Mostrar sobre otras apps” para ver el overlay");
+        try {
+            Intent direct = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
+            startActivity(direct);
+        } catch (Exception directError) {
+            AndroidDebugLog.log("Direct overlay settings failed: " + directError);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
+            } catch (Exception generalError) {
+                AndroidDebugLog.log("General overlay settings failed: " + generalError);
+                if (statusText != null) statusText.setText("No pude abrir el permiso automáticamente. Ajustes > Apps > acceso especial > Mostrar sobre otras apps.");
+            }
+        }
     }
 
     private void runLocalAudioTest() {
@@ -277,6 +323,7 @@ public class MainActivity extends Activity {
                 try { Thread.sleep(250); } catch (InterruptedException ignored) { }
                 runOnUiThread(() -> statusText.setText("Test local terminado. Compará enhancer, ganancia y efectos antes de probar Codex."));
             } catch (Exception e) {
+                AndroidDebugLog.log("Local audio test failed: " + e);
                 runOnUiThread(() -> statusText.setText("Test local falló: " + e.getClass().getSimpleName() + " · " + e.getMessage()));
             } finally {
                 if (effects != null) effects.close();
@@ -316,6 +363,7 @@ public class MainActivity extends Activity {
 
     private void startRemoteService() {
         saveSettings();
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) requestOverlayPermission(true);
         String ip = serverIp.getText().toString().trim();
         int port; try { port = Integer.parseInt(serverPort.getText().toString().trim()); } catch (Exception e) { port = 8765; }
         Intent i = new Intent(this, RemoteService.class);
