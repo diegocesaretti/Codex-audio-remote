@@ -6,6 +6,8 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
@@ -15,6 +17,7 @@ public class OverlayController {
     private final Context context;
     private final WindowManager windowManager;
     private final Runnable tapAction;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private OverlayView view;
     private WindowManager.LayoutParams layoutParams;
 
@@ -28,18 +31,40 @@ public class OverlayController {
         return Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(context);
     }
 
+    private boolean onMainThread() {
+        return Looper.myLooper() == Looper.getMainLooper();
+    }
+
     public void show(String state) {
+        if (!onMainThread()) {
+            mainHandler.post(() -> show(state));
+            return;
+        }
         if (!canShow()) {
             AndroidDebugLog.log("Overlay show skipped: Settings.canDrawOverlays=false");
             return;
         }
         if (view == null) {
+            if (!tryAddOverlay(state)) return;
+        }
+        if (view != null) view.setState(state);
+    }
+
+    private boolean tryAddOverlay(String state) {
+        int[] types;
+        if (Build.VERSION.SDK_INT >= 26) {
+            types = new int[]{ WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY };
+        } else if (Build.VERSION.SDK_INT >= 23) {
+            // Some Android 6 vendor ROMs accept only one of these legacy overlay types.
+            types = new int[]{ WindowManager.LayoutParams.TYPE_SYSTEM_ALERT, WindowManager.LayoutParams.TYPE_PHONE };
+        } else {
+            types = new int[]{ WindowManager.LayoutParams.TYPE_PHONE };
+        }
+
+        for (int type : types) {
             OverlayView candidate = new OverlayView(context);
+            candidate.setState(state);
             candidate.setOnClickListener(v -> { if (tapAction != null) tapAction.run(); });
-            int type;
-            if (Build.VERSION.SDK_INT >= 26) type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
-            else if (Build.VERSION.SDK_INT >= 23) type = WindowManager.LayoutParams.TYPE_SYSTEM_ALERT;
-            else type = WindowManager.LayoutParams.TYPE_PHONE;
             WindowManager.LayoutParams candidateParams = new WindowManager.LayoutParams(
                     dp(220), dp(80), type,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
@@ -51,25 +76,32 @@ public class OverlayController {
                 windowManager.addView(candidate, candidateParams);
                 view = candidate;
                 layoutParams = candidateParams;
-                AndroidDebugLog.log("Overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT);
+                AndroidDebugLog.log("Overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; main=true");
+                return true;
             } catch (SecurityException | WindowManager.BadTokenException e) {
                 AndroidDebugLog.log("Overlay add denied; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
-                view = null;
-                layoutParams = null;
-                return;
             } catch (RuntimeException e) {
                 AndroidDebugLog.log("Overlay add failed; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
-                view = null;
-                layoutParams = null;
-                return;
             }
         }
-        view.setState(state);
+        view = null;
+        layoutParams = null;
+        return false;
     }
 
-    public void setLevel(float level) { if (view != null) view.setLevel(level); }
+    public void setLevel(float level) {
+        if (!onMainThread()) {
+            mainHandler.post(() -> setLevel(level));
+            return;
+        }
+        if (view != null) view.setLevel(level);
+    }
 
     public void setTranscript(String text) {
+        if (!onMainThread()) {
+            mainHandler.post(() -> setTranscript(text));
+            return;
+        }
         if (view == null) return;
         view.setTranscript(text == null ? "" : text);
         if (layoutParams != null) {
@@ -84,6 +116,10 @@ public class OverlayController {
     public void clearTranscript() { setTranscript(""); }
 
     public void hide() {
+        if (!onMainThread()) {
+            mainHandler.post(this::hide);
+            return;
+        }
         if (view == null) return;
         try { windowManager.removeView(view); } catch (Exception ignored) { }
         view = null;
