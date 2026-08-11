@@ -36,12 +36,14 @@ public class MainActivity extends Activity {
     private static final String[] AUDIO_SOURCE_KEYS = {
             "voice_recognition", "voice_communication", "mic", "default", "camcorder"
     };
+    private static final String[] ENHANCER_LABELS = { "OFF", "Suave", "Normal", "Fuerte" };
+    private static final String[] ENHANCER_KEYS = { VoiceEnhancer.OFF, VoiceEnhancer.SOFT, VoiceEnhancer.NORMAL, VoiceEnhancer.STRONG };
 
     private EditText serverIp, serverPort, timeoutSeconds, endPhrases, manualChunkMs;
     private TextView statusText, sensitivityText, qualityText, latencyText, micGainText;
     private SeekBar sensitivity, quality, latency, micGain;
-    private Spinner audioSourceSpinner;
-    private CheckBox autostart, manualLatency;
+    private Spinner audioSourceSpinner, voiceEnhancerSpinner;
+    private CheckBox autostart, manualLatency, noiseSuppressor, androidAgc, aec;
     private volatile boolean audioTestRunning;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -63,6 +65,10 @@ public class MainActivity extends Activity {
         latency = findViewById(R.id.latencySeek);
         micGain = findViewById(R.id.micGainSeek);
         audioSourceSpinner = findViewById(R.id.audioSourceSpinner);
+        voiceEnhancerSpinner = findViewById(R.id.voiceEnhancerSpinner);
+        noiseSuppressor = findViewById(R.id.noiseSuppressorCheck);
+        androidAgc = findViewById(R.id.androidAgcCheck);
+        aec = findViewById(R.id.aecCheck);
         manualLatency = findViewById(R.id.manualLatencyCheck);
         autostart = findViewById(R.id.autostartCheck);
         Button connect = findViewById(R.id.connectButton);
@@ -73,6 +79,9 @@ public class MainActivity extends Activity {
         ArrayAdapter<String> sourceAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, AUDIO_SOURCE_LABELS);
         sourceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         audioSourceSpinner.setAdapter(sourceAdapter);
+        ArrayAdapter<String> enhancerAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, ENHANCER_LABELS);
+        enhancerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        voiceEnhancerSpinner.setAdapter(enhancerAdapter);
 
         SharedPreferences prefs = getSharedPreferences("settings", MODE_PRIVATE);
         serverIp.setText(prefs.getString("ip", "192.168.1.100"));
@@ -94,6 +103,10 @@ public class MainActivity extends Activity {
         updateLatencyLabel(l);
         updateMicGainLabel(gainPct);
         audioSourceSpinner.setSelection(audioSourcePosition(prefs.getString("audio_source", "voice_recognition")));
+        voiceEnhancerSpinner.setSelection(enhancerPosition(prefs.getString("voice_enhancer", VoiceEnhancer.OFF)));
+        noiseSuppressor.setChecked(prefs.getBoolean("native_ns", false));
+        androidAgc.setChecked(prefs.getBoolean("native_agc", false));
+        aec.setChecked(prefs.getBoolean("native_aec", false));
         manualLatency.setChecked(prefs.getBoolean("manual_latency", true));
         manualChunkMs.setEnabled(manualLatency.isChecked());
         autostart.setChecked(prefs.getBoolean("autostart", false));
@@ -169,11 +182,19 @@ public class MainActivity extends Activity {
         if (key != null) for (int i = 0; i < AUDIO_SOURCE_KEYS.length; i++) if (AUDIO_SOURCE_KEYS[i].equals(key)) return i;
         return 0;
     }
-
+    private static int enhancerPosition(String key) {
+        if (key != null) for (int i = 0; i < ENHANCER_KEYS.length; i++) if (ENHANCER_KEYS[i].equals(key)) return i;
+        return 0;
+    }
     private String selectedAudioSourceKey() {
         int p = audioSourceSpinner.getSelectedItemPosition();
         if (p < 0 || p >= AUDIO_SOURCE_KEYS.length) p = 0;
         return AUDIO_SOURCE_KEYS[p];
+    }
+    private String selectedEnhancerKey() {
+        int p = voiceEnhancerSpinner.getSelectedItemPosition();
+        if (p < 0 || p >= ENHANCER_KEYS.length) p = 0;
+        return ENHANCER_KEYS[p];
     }
 
     private void requestOverlayPermission() {
@@ -195,9 +216,11 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             AudioRecord record = null;
             AudioTrack player = null;
+            NativeAudioEffects effects = null;
             int requestedRate = RemoteService.sampleRateForQuality(quality.getProgress());
             int usedRate = requestedRate;
             int gainPct = micGain.getProgress() + 50;
+            String enhancerMode = selectedEnhancerKey();
             String sourceKey = selectedAudioSourceKey();
             int requestedSource = RemoteService.audioSourceForKey(sourceKey);
             int usedSource = requestedSource;
@@ -208,22 +231,23 @@ public class MainActivity extends Activity {
                     min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                 }
                 int bufferSize = Math.max(min, usedRate * 2 / 5);
-                record = new AudioRecord(usedSource, usedRate,
-                        AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
+                record = new AudioRecord(usedSource, usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
                 if (record.getState() != AudioRecord.STATE_INITIALIZED) {
                     record.release();
                     usedSource = MediaRecorder.AudioSource.VOICE_RECOGNITION;
                     if (usedRate != 16000) usedRate = 16000;
                     min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                     bufferSize = Math.max(min, usedRate * 2 / 5);
-                    record = new AudioRecord(usedSource, usedRate,
-                            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
+                    record = new AudioRecord(usedSource, usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
                 }
                 if (record.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("AudioRecord no inicializa");
 
+                effects = new NativeAudioEffects(record.getAudioSessionId(), noiseSuppressor.isChecked(), androidAgc.isChecked(), aec.isChecked());
+                VoiceEnhancer enhancer = new VoiceEnhancer(enhancerMode, usedRate);
                 final int finalRate = usedRate;
                 final int finalSource = usedSource;
-                runOnUiThread(() -> statusText.setText("Test local: 5 s · " + (finalRate / 1000) + " kHz · " + RemoteService.audioSourceName(finalSource) + " · gain " + gainPct + "%"));
+                final String fxSummary = effects.summary();
+                runOnUiThread(() -> statusText.setText("Test: " + (finalRate / 1000) + " kHz · " + RemoteService.audioSourceName(finalSource) + " · gain " + gainPct + "% · enhancer " + enhancerMode + " · " + fxSummary));
                 ByteArrayOutputStream pcm = new ByteArrayOutputStream(usedRate * 2 * 5);
                 byte[] chunk = new byte[Math.max(1024, usedRate * 2 * 45 / 1000)];
                 record.startRecording();
@@ -232,6 +256,7 @@ public class MainActivity extends Activity {
                     int n = record.read(chunk, 0, chunk.length);
                     if (n > 0) {
                         RemoteService.applyGainPcm16InPlace(chunk, n, gainPct);
+                        enhancer.processInPlace(chunk, n);
                         pcm.write(chunk, 0, n);
                     }
                 }
@@ -250,10 +275,11 @@ public class MainActivity extends Activity {
                     pos += n;
                 }
                 try { Thread.sleep(250); } catch (InterruptedException ignored) { }
-                runOnUiThread(() -> statusText.setText("Test local terminado. Compará modo y ganancia antes de probar Codex."));
+                runOnUiThread(() -> statusText.setText("Test local terminado. Compará enhancer, ganancia y efectos antes de probar Codex."));
             } catch (Exception e) {
                 runOnUiThread(() -> statusText.setText("Test local falló: " + e.getClass().getSimpleName() + " · " + e.getMessage()));
             } finally {
+                if (effects != null) effects.close();
                 if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
                 if (player != null) { try { player.stop(); } catch (Exception ignored) { } player.release(); }
                 audioTestRunning = false;
@@ -277,6 +303,10 @@ public class MainActivity extends Activity {
                 .putInt("audio_latency", latency.getProgress())
                 .putInt("mic_gain_pct", micGain.getProgress() + 50)
                 .putString("audio_source", selectedAudioSourceKey())
+                .putString("voice_enhancer", selectedEnhancerKey())
+                .putBoolean("native_ns", noiseSuppressor.isChecked())
+                .putBoolean("native_agc", androidAgc.isChecked())
+                .putBoolean("native_aec", aec.isChecked())
                 .putBoolean("manual_latency", manualLatency.isChecked())
                 .putInt("manual_chunk_ms", chunkMs)
                 .putInt("conversation_timeout", timeout)
