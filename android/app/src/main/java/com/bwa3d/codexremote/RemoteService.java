@@ -50,7 +50,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private static final int NOTIFICATION_ID = 42;
     private static final String CHANNEL_ID = "codex_remote";
     private static final String MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
-    private static final int SAMPLE_RATE = 16000;
+    private static final int WAKE_SAMPLE_RATE = 16000;
 
     private final AtomicBoolean streaming = new AtomicBoolean(false);
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -141,7 +141,6 @@ public class RemoteService extends Service implements RecognitionListener {
                 case "activation_failed":
                 case "audio_error": finishLocalSession(); updateNotification("Codex no respondió"); break;
                 case "downlink_start": startSpeaker(); break;
-                case "downlink_stop": break;
             }
         } catch (Exception ignored) { }
     }
@@ -220,8 +219,8 @@ public class RemoteService extends Service implements RecognitionListener {
     private synchronized void startWakeRecognition() {
         if (!connected || voskModel == null || speechService != null || streaming.get()) return;
         try {
-            Recognizer recognizer = new Recognizer(voskModel, SAMPLE_RATE, "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]");
-            speechService = new SpeechService(recognizer, SAMPLE_RATE); speechService.startListening(this);
+            Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]");
+            speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE); speechService.startListening(this);
         } catch (Exception e) { updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
     }
 
@@ -292,13 +291,19 @@ public class RemoteService extends Service implements RecognitionListener {
         return prev[b.length()];
     }
 
+    public static int sampleRateForQuality(int quality) {
+        if (quality >= 67) return 48000;
+        if (quality >= 34) return 24000;
+        return 16000;
+    }
+
     public static int chunkMsForLatency(int latency) {
         latency = Math.max(0, Math.min(100, latency));
         int raw = 20 + ((100 - latency) * 60 / 100);
         return Math.max(20, Math.min(80, ((raw + 5) / 10) * 10));
     }
 
-    private void startPhraseDetector() {
+    private void startPhraseDetector(final int sourceRate) {
         if (voskModel == null || (phraseThread != null && phraseThread.isAlive())) return;
         final List<String> phrases = endPhrases();
         if (phrases.isEmpty()) return;
@@ -306,7 +311,7 @@ public class RemoteService extends Service implements RecognitionListener {
         phraseThread = new Thread(() -> {
             Recognizer recognizer = null;
             try {
-                recognizer = new Recognizer(voskModel, SAMPLE_RATE, endGrammar(phrases));
+                recognizer = new Recognizer(voskModel, sourceRate, endGrammar(phrases));
                 while (streaming.get() || !phraseQueue.isEmpty()) {
                     byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
                     if (chunk == null) continue;
@@ -326,6 +331,17 @@ public class RemoteService extends Service implements RecognitionListener {
         if (!phraseQueue.offer(copy)) { phraseQueue.poll(); phraseQueue.offer(copy); }
     }
 
+    private AudioRecord createCapture(int sampleRate, int bufferBytes) {
+        try {
+            int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            if (min <= 0) return null;
+            AudioRecord record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, bufferBytes));
+            if (record.getState() != AudioRecord.STATE_INITIALIZED) { record.release(); return null; }
+            return record;
+        } catch (Exception e) { return null; }
+    }
+
     private void startMicStreaming() {
         if (!streaming.compareAndSet(false, true)) return;
         final int quality = prefs().getInt("audio_quality", 80);
@@ -333,19 +349,29 @@ public class RemoteService extends Service implements RecognitionListener {
         final boolean manualLatency = prefs().getBoolean("manual_latency", true);
         final int requestedManualMs = prefs().getInt("manual_chunk_ms", 45);
         final int chunkMs = manualLatency ? Math.max(20, Math.min(120, requestedManualMs)) : chunkMsForLatency(latency);
-        final int chunkBytes = SAMPLE_RATE * 2 * chunkMs / 1000;
-        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"capture\":\"voice_recognition\"}");
-        startPhraseDetector();
+        final int requestedRate = sampleRateForQuality(quality);
 
         audioThread = new Thread(() -> {
-            int min = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            int safetyChunks = quality >= 75 ? 6 : quality >= 40 ? 5 : 4;
-            int recordBuffer = Math.max(min, chunkBytes * safetyChunks);
             AudioRecord record = null;
             try {
-                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
-                        AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, recordBuffer);
-                byte[] buffer = new byte[chunkBytes];
+                int actualRate = requestedRate;
+                int chunkBytes = actualRate * 2 * chunkMs / 1000;
+                int safetyChunks = quality >= 75 ? 6 : quality >= 40 ? 5 : 4;
+                record = createCapture(actualRate, chunkBytes * safetyChunks);
+                if (record == null && actualRate != 16000) {
+                    actualRate = 16000;
+                    chunkBytes = actualRate * 2 * chunkMs / 1000;
+                    record = createCapture(actualRate, chunkBytes * safetyChunks);
+                }
+                if (record == null) throw new IllegalStateException("No compatible AudioRecord format");
+
+                final int finalRate = actualRate;
+                final int finalChunkBytes = chunkBytes;
+                sendText("{\"type\":\"audio_start\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"capture\":\"voice_recognition\"}");
+                startPhraseDetector(finalRate);
+                updateNotification("Codex escuchando · mic " + (finalRate / 1000) + " kHz");
+
+                byte[] buffer = new byte[finalChunkBytes];
                 record.startRecording();
                 while (streaming.get()) {
                     int read = record.read(buffer, 0, buffer.length);
@@ -369,12 +395,12 @@ public class RemoteService extends Service implements RecognitionListener {
     private synchronized void startSpeaker() {
         if (speaker != null) return;
         int latency = prefs().getInt("audio_latency", 55);
-        int min = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        int min = AudioTrack.getMinBufferSize(WAKE_SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
         int buffer;
         if (latency >= 80) buffer = Math.max(min, 2048);
         else if (latency >= 45) buffer = Math.max(min * 2, 4096);
         else buffer = Math.max(min * 3, 6144);
-        speaker = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
+        speaker = new AudioTrack(AudioManager.STREAM_MUSIC, WAKE_SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
         speaker.play();
     }
 
