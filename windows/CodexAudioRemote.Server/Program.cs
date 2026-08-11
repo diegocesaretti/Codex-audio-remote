@@ -31,6 +31,7 @@ while (true)
     _ = Task.Run(async () =>
     {
         AudioCableSink? audioSink = null;
+        CableOutputRecorder? codexInputRecorder = null;
         LoopbackDownlink? downlink = null;
         var sendGate = new SemaphoreSlim(1, 1);
         try
@@ -48,6 +49,7 @@ while (true)
 
             async Task StopAudioSession(bool notify = true)
             {
+                codexInputRecorder?.Dispose(); codexInputRecorder = null;
                 audioSink?.Dispose(); audioSink = null;
                 downlink?.Dispose(); downlink = null;
                 if (notify) await SendJson(socket, sendGate, new { type = "downlink_stop" });
@@ -101,6 +103,9 @@ while (true)
                             await SendJson(socket, sendGate, new { type = "audio_error", reason = "cable_input_not_found" });
                             break;
                         }
+                        // Record the exact capture endpoint selected as Codex's temporary microphone.
+                        // Compare this codex-input WAV with uplink-android WAV to isolate VB-CABLE/format issues.
+                        codexInputRecorder = CableOutputRecorder.TryCreate(options.VirtualMicName);
                         downlink = new LoopbackDownlink(async pcm => await SendBinary(socket, sendGate, pcm));
                         await SendJson(socket, sendGate, new { type = "downlink_start", sampleRate = 16000, channels = 1 });
                         downlink.Start();
@@ -137,7 +142,7 @@ while (true)
         }
         catch (Exception ex)
         {
-            audioSink?.Dispose(); downlink?.Dispose();
+            codexInputRecorder?.Dispose(); audioSink?.Dispose(); downlink?.Dispose();
             Console.WriteLine($"Client error: {ex.Message}");
             switcher.ScheduleRestore(force: true);
         }
@@ -282,7 +287,7 @@ sealed class AudioCableSink : IDisposable
         this.device = device;
         quality = Math.Clamp(quality, 0, 100);
         latency = Math.Clamp(latency, 0, 100);
-        var bufferMs = 300 + (quality * 3); // reservoir only; does not force this much playout delay
+        var bufferMs = 300 + (quality * 3);
         var wasapiLatencyMs = Math.Clamp(60 - (latency * 40 / 100), 20, 60);
         var resamplerQuality = Math.Clamp(20 + (quality * 40 / 100), 20, 60);
         source = new BufferedWaveProvider(new WaveFormat(sampleRate, 16, 1))
@@ -295,7 +300,7 @@ sealed class AudioCableSink : IDisposable
         resampler = new MediaFoundationResampler(source, target) { ResamplerQuality = resamplerQuality };
         output = new WasapiOut(device, AudioClientShareMode.Shared, true, wasapiLatencyMs);
         output.Init(resampler); output.Play();
-        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} | {sampleRate} Hz PCM | WASAPI {wasapiLatencyMs} ms | resampler {resamplerQuality} | reservoir {bufferMs} ms");
+        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} | source {source.WaveFormat} | cable mix {target} | WASAPI {wasapiLatencyMs} ms | resampler {resamplerQuality} | reservoir {bufferMs} ms");
     }
 
     public static AudioCableSink? TryCreate(string namePart, int sampleRate, int quality, int latency)
@@ -343,77 +348,88 @@ sealed class AudioDeviceSwitcher
     {
         lock (sync)
         {
-            if (!RemoteMicIsActive || (State == AudioSessionState.Activating && !force)) return;
-            restoreCts?.Cancel(); restoreCts = new CancellationTokenSource(); var token = restoreCts.Token;
-            _ = Task.Run(async () => { try { await Task.Delay(restoreDelayMs, token); if (force || !CodexMicDetector.IsActive()) RestoreNow(); } catch (OperationCanceledException) { } });
+            if (!RemoteMicIsActive) { State = AudioSessionState.Idle; return; }
+            if (!force && State == AudioSessionState.Activating) return;
+            CancelPendingRestore(); restoreCts = new CancellationTokenSource(); var token = restoreCts.Token;
+            _ = Task.Run(async () => { try { await Task.Delay(restoreDelayMs, token); if (!token.IsCancellationRequested) RestoreNow(); } catch (OperationCanceledException) { } });
         }
     }
-    public void CancelPendingRestore() { lock (sync) { restoreCts?.Cancel(); restoreCts?.Dispose(); restoreCts = null; } }
+    void CancelPendingRestore() { restoreCts?.Cancel(); restoreCts?.Dispose(); restoreCts = null; }
     public void RestoreNow()
     {
         lock (sync)
         {
-            CancelPendingRestore(); var s = saved ?? LoadRecovery();
-            if (s is null) { RemoteMicIsActive = false; State = AudioSessionState.Idle; return; }
+            CancelPendingRestore();
             try
             {
-                if (!string.IsNullOrWhiteSpace(s.Console)) PolicyConfig.SetDefaultEndpoint(s.Console, PolicyRole.Console);
-                if (!string.IsNullOrWhiteSpace(s.Multimedia)) PolicyConfig.SetDefaultEndpoint(s.Multimedia, PolicyRole.Multimedia);
-                if (!string.IsNullOrWhiteSpace(s.Communications)) PolicyConfig.SetDefaultEndpoint(s.Communications, PolicyRole.Communications);
-                Console.WriteLine("Original default microphone(s) restored"); if (File.Exists(recoveryPath)) File.Delete(recoveryPath);
-                saved = null; RemoteMicIsActive = false; State = AudioSessionState.Idle;
+                if (saved is null && File.Exists(recoveryPath)) saved = JsonSerializer.Deserialize<SavedDefaults>(File.ReadAllText(recoveryPath));
+                if (saved is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(saved.Console)) PolicyConfig.SetDefaultEndpoint(saved.Console, PolicyRole.Console);
+                    if (!string.IsNullOrWhiteSpace(saved.Multimedia)) PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Multimedia);
+                    if (!string.IsNullOrWhiteSpace(saved.Communications)) PolicyConfig.SetDefaultEndpoint(saved.Communications, PolicyRole.Communications);
+                }
             }
-            catch (Exception ex) { Console.WriteLine($"WARNING: could not restore original microphone: {ex.Message}"); }
+            catch (Exception ex) { Console.WriteLine($"Restore warning: {ex.Message}"); }
+            try { if (File.Exists(recoveryPath)) File.Delete(recoveryPath); } catch { }
+            saved = null; RemoteMicIsActive = false; State = AudioSessionState.Idle;
         }
     }
-    public async Task TryRecoverAsync() { if (!File.Exists(recoveryPath)) return; Console.WriteLine("Recovering previous audio defaults..."); await Task.Delay(50); RestoreNow(); }
-    SavedDefaults? LoadRecovery() { try { return File.Exists(recoveryPath) ? JsonSerializer.Deserialize<SavedDefaults>(File.ReadAllText(recoveryPath)) : null; } catch { return null; } }
-    sealed record SavedDefaults(string? Console, string? Multimedia, string? Communications);
+    public async Task TryRecoverAsync() { if (!File.Exists(recoveryPath)) return; Console.WriteLine("Recovering audio defaults from previous run..."); RestoreNow(); await Task.Delay(100); }
 }
 
-enum PolicyRole { Console = 0, Multimedia = 1, Communications = 2 }
-static class PolicyConfig
-{
-    public static void SetDefaultEndpoint(string deviceId, PolicyRole role)
-    {
-        var client = (IPolicyConfig)new PolicyConfigClient(); var hr = client.SetDefaultEndpoint(deviceId, role); Marshal.ReleaseComObject(client); if (hr != 0) Marshal.ThrowExceptionForHR(hr);
-    }
-    [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")] class PolicyConfigClient { }
-    [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    interface IPolicyConfig
-    {
-        int GetMixFormat(string deviceId, IntPtr format); int GetDeviceFormat(string deviceId, int defaultFormat, IntPtr format); int ResetDeviceFormat(string deviceId);
-        int SetDeviceFormat(string deviceId, IntPtr endpointFormat, IntPtr mixFormat); int GetProcessingPeriod(string deviceId, int defaultPeriod, IntPtr defaultPeriodPtr, IntPtr minimumPeriodPtr);
-        int SetProcessingPeriod(string deviceId, IntPtr period); int GetShareMode(string deviceId, IntPtr mode); int SetShareMode(string deviceId, IntPtr mode);
-        int GetPropertyValue(string deviceId, IntPtr key, IntPtr value); int SetPropertyValue(string deviceId, IntPtr key, IntPtr value);
-        int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string deviceId, PolicyRole role); int SetEndpointVisibility(string deviceId, int visible);
-    }
-}
+sealed record SavedDefaults(string? Console, string? Multimedia, string? Communications);
 
 static class CodexMicDetector
 {
-    const string BasePath = @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
+    const string Base = @"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone";
     public static bool IsActive()
     {
         try
         {
-            using var root = Registry.CurrentUser.OpenSubKey(BasePath); if (root is null) return false;
-            var name = root.GetSubKeyNames().FirstOrDefault(n => n.StartsWith("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase)); if (name is null) return false;
-            using var key = root.OpenSubKey(name); if (key is null) return false;
-            var start = ToInt64(key.GetValue("LastUsedTimeStart")); var stop = ToInt64(key.GetValue("LastUsedTimeStop")); return start > 0 && stop == 0;
-        }
-        catch { return false; }
+            using var root = Registry.CurrentUser.OpenSubKey(Base);
+            if (root is null) return false;
+            foreach (var name in root.GetSubKeyNames().Where(n => n.StartsWith("OpenAI.Codex_", StringComparison.OrdinalIgnoreCase)))
+            {
+                using var key = root.OpenSubKey(name); if (key is null) continue;
+                var start = ToLong(key.GetValue("LastUsedTimeStart")); var stop = ToLong(key.GetValue("LastUsedTimeStop"));
+                if (start > 0 && stop == 0) return true;
+            }
+        } catch { }
+        return false;
     }
-    static long ToInt64(object? v) => v switch { long l => l, int i => i, _ => 0 };
+    static long ToLong(object? v) => v switch { long l => l, int i => i, _ => 0 };
 }
 
 static class ShortcutSender
 {
-    const uint KEYEVENTF_KEYUP = 0x0002; const byte VK_CONTROL = 0x11;
-    [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
     public static void Send(string shortcut)
     {
-        keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero); keybd_event((byte)'Q', 0, 0, UIntPtr.Zero); keybd_event((byte)'Q', 0, KEYEVENTF_KEYUP, UIntPtr.Zero); keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-        Console.WriteLine("Sent Ctrl+Q");
+        if (!shortcut.Equals("ctrl+q", StringComparison.OrdinalIgnoreCase)) throw new NotSupportedException("Only ctrl+q is implemented");
+        keybd_event(0x11, 0, 0, UIntPtr.Zero); keybd_event(0x51, 0, 0, UIntPtr.Zero); keybd_event(0x51, 0, 2, UIntPtr.Zero); keybd_event(0x11, 0, 2, UIntPtr.Zero);
     }
+    [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+
+static class PolicyConfig
+{
+    public static void SetDefaultEndpoint(string deviceId, PolicyRole role)
+    {
+        var policy = (IPolicyConfig)new PolicyConfigClient();
+        try { Marshal.ThrowExceptionForHR(policy.SetDefaultEndpoint(deviceId, role)); }
+        finally { Marshal.ReleaseComObject(policy); }
+    }
+}
+
+enum PolicyRole { Console = 0, Multimedia = 1, Communications = 2 }
+
+[ComImport, Guid("870af99c-171d-4f9e-af0d-e63df40c2bc9")]
+class PolicyConfigClient { }
+
+[ComImport, InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("f8679f50-850a-41cf-9c72-430f290290c8")]
+interface IPolicyConfig
+{
+    [PreserveSig] int GetMixFormat(); [PreserveSig] int GetDeviceFormat(); [PreserveSig] int ResetDeviceFormat(); [PreserveSig] int SetDeviceFormat(); [PreserveSig] int GetProcessingPeriod(); [PreserveSig] int SetProcessingPeriod(); [PreserveSig] int GetShareMode(); [PreserveSig] int SetShareMode(); [PreserveSig] int GetPropertyValue(); [PreserveSig] int SetPropertyValue();
+    [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string wszDeviceId, PolicyRole role);
+    [PreserveSig] int SetEndpointVisibility();
 }
