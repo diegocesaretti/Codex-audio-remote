@@ -1,20 +1,13 @@
 using NAudio.Wave;
 using System.Buffers.Binary;
-using System.Threading;
 
-// Thin stability layer around NAudio's own BufferedWaveProvider.
-// NAudio remains responsible for the actual ring buffer. This wrapper only gates reads:
-// it waits for a small reservoir before first playout, and after starvation it returns
-// silence WITHOUT draining the remaining PCM until the reservoir is healthy again.
+// Transparent wrapper around NAudio's BufferedWaveProvider.
+// It records exactly the PCM received from Android for diagnostics, but does not
+// interfere with NAudio reads. Playout prebuffering is handled by AudioCableSink.
 sealed class BufferedWaveProvider : IWaveProvider
 {
     readonly NAudio.Wave.BufferedWaveProvider inner;
     readonly DiagnosticWavRecorder recorder;
-    readonly object readGate = new();
-    readonly TimeSpan prebuffer = TimeSpan.FromMilliseconds(180);
-    long underflowCount;
-    bool primed;
-    long lastStatusMs;
 
     public BufferedWaveProvider(WaveFormat waveFormat)
     {
@@ -44,7 +37,6 @@ sealed class BufferedWaveProvider : IWaveProvider
 
     public int BufferedBytes => inner.BufferedBytes;
     public TimeSpan BufferedDuration => inner.BufferedDuration;
-    public long UnderflowCount => Interlocked.Read(ref underflowCount);
 
     public void AddSamples(byte[] buffer, int offset, int count)
     {
@@ -52,49 +44,7 @@ sealed class BufferedWaveProvider : IWaveProvider
         recorder.Write(buffer, offset, count);
     }
 
-    public int Read(byte[] buffer, int offset, int count)
-    {
-        lock (readGate)
-        {
-            var available = inner.BufferedBytes;
-            var buffered = inner.BufferedDuration;
-
-            if (!primed)
-            {
-                if (buffered < prebuffer)
-                {
-                    Array.Clear(buffer, offset, count);
-                    MaybeLogStatus("prebuffering", buffered);
-                    return count;
-                }
-
-                primed = true;
-                Console.WriteLine($"Audio playout START · buffered {buffered.TotalMilliseconds:F0} ms");
-            }
-
-            // ReadFully normally pads a short read with zeroes while consuming whatever data
-            // remains. That creates the audible on/off pattern. Instead, keep those samples,
-            // return silence for this callback, and rebuild a healthy reservoir.
-            if (available < count)
-            {
-                Interlocked.Increment(ref underflowCount);
-                primed = false;
-                Array.Clear(buffer, offset, count);
-                Console.WriteLine($"Audio UNDERFLOW #{UnderflowCount} · had {buffered.TotalMilliseconds:F0} ms · rebuffering to {prebuffer.TotalMilliseconds:F0} ms");
-                return count;
-            }
-
-            return inner.Read(buffer, offset, count);
-        }
-    }
-
-    void MaybeLogStatus(string state, TimeSpan buffered)
-    {
-        var now = Environment.TickCount64;
-        if (now - lastStatusMs < 1000) return;
-        lastStatusMs = now;
-        Console.WriteLine($"Audio {state} · {buffered.TotalMilliseconds:F0}/{prebuffer.TotalMilliseconds:F0} ms · underflows {UnderflowCount}");
-    }
+    public int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
 }
 
 sealed class DiagnosticWavRecorder
