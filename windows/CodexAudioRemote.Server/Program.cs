@@ -1,5 +1,6 @@
 using Microsoft.Win32;
 using NAudio.CoreAudioApi;
+using NAudio.Wave;
 using System.Net;
 using System.Net.WebSockets;
 using System.Runtime.InteropServices;
@@ -10,7 +11,7 @@ var options = Options.Parse(args);
 
 if (options.ListDevices)
 {
-    AudioDeviceManager.ListCaptureDevices();
+    AudioDeviceManager.ListDevices();
     return;
 }
 
@@ -28,6 +29,7 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) => switcher.RestoreNow();
 Console.WriteLine($"Codex Audio Remote server listening on ws://0.0.0.0:{options.Port}/ws/");
 Console.WriteLine($"Shortcut: {options.Shortcut}; activation timeout: {options.ActivationTimeoutMs} ms");
 Console.WriteLine($"Virtual microphone match: '{options.VirtualMicName}'");
+Console.WriteLine($"Virtual cable playback match: '{options.VirtualCableInputName}'");
 
 using var listener = new HttpListener();
 listener.Prefixes.Add($"http://+:{options.Port}/ws/");
@@ -45,6 +47,7 @@ while (true)
 
     _ = Task.Run(async () =>
     {
+        AudioCableSink? audioSink = null;
         try
         {
             var wsContext = await context.AcceptWebSocketAsync(null);
@@ -65,8 +68,9 @@ while (true)
                 if (result.MessageType == WebSocketMessageType.Binary)
                 {
                     audioBytes += result.Count;
+                    audioSink?.Write(buffer, 0, result.Count);
                     if (audioBytes % (16000 * 2) < result.Count)
-                        Console.WriteLine($"Audio uplink received: {audioBytes / 32000.0:F1}s PCM16 mono 16kHz");
+                        Console.WriteLine($"Audio uplink injected: {audioBytes / 32000.0:F1}s PCM16 mono 16kHz");
                     continue;
                 }
 
@@ -84,31 +88,48 @@ while (true)
                             await SendJson(socket, new { type = "activation_failed", reason = "virtual_mic_not_found" });
                             break;
                         }
+                        switcher.BeginActivation();
                         await Task.Delay(150);
                         ShortcutSender.Send(options.Shortcut);
                         _ = ConfirmActivation(socket, switcher, options.ActivationTimeoutMs);
                         break;
+
                     case "audio_start":
                         audioBytes = 0;
-                        Console.WriteLine("Audio stream started");
+                        audioSink?.Dispose();
+                        audioSink = AudioCableSink.TryCreate(options.VirtualCableInputName);
+                        if (audioSink is null)
+                        {
+                            Console.WriteLine($"Virtual cable playback '{options.VirtualCableInputName}' not found or could not be opened.");
+                            await SendJson(socket, new { type = "audio_error", reason = "cable_input_not_found" });
+                        }
+                        else
+                        {
+                            Console.WriteLine("Audio stream started -> virtual cable");
+                        }
                         break;
+
                     case "audio_stop":
+                        audioSink?.Dispose();
+                        audioSink = null;
                         Console.WriteLine("Audio stream stopped");
                         break;
                 }
             }
 
+            audioSink?.Dispose();
             cts.Cancel();
             try { await registryTask; } catch (OperationCanceledException) { }
-            switcher.ScheduleRestore();
+            switcher.ScheduleRestore(force: true);
             if (socket.State != WebSocketState.Closed)
                 await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
             Console.WriteLine("Client disconnected");
         }
         catch (Exception ex)
         {
+            audioSink?.Dispose();
             Console.WriteLine($"Client error: {ex.Message}");
-            switcher.ScheduleRestore();
+            switcher.ScheduleRestore(force: true);
         }
     });
 }
@@ -118,12 +139,18 @@ async Task ConfirmActivation(WebSocket socket, AudioDeviceSwitcher audioSwitcher
     var started = Environment.TickCount64;
     while (Environment.TickCount64 - started < timeoutMs && socket.State == WebSocketState.Open)
     {
-        if (CodexMicDetector.IsActive()) return;
+        if (CodexMicDetector.IsActive())
+        {
+            audioSwitcher.MarkListening();
+            return;
+        }
         await Task.Delay(100);
     }
+
     if (socket.State == WebSocketState.Open && !CodexMicDetector.IsActive())
     {
-        audioSwitcher.ScheduleRestore();
+        audioSwitcher.ActivationFailed();
+        audioSwitcher.ScheduleRestore(force: true);
         await SendJson(socket, new { type = "activation_failed", reason = "codex_mic_timeout" });
     }
 }
@@ -139,7 +166,7 @@ async Task WatchCodexMic(WebSocket socket, AudioDeviceSwitcher audioSwitcher, Ca
             last = active;
             if (active)
             {
-                audioSwitcher.CancelPendingRestore();
+                audioSwitcher.MarkListening();
                 await SendJson(socket, new { type = "codex_listening" });
                 Console.WriteLine("Codex microphone ACTIVE");
             }
@@ -147,7 +174,8 @@ async Task WatchCodexMic(WebSocket socket, AudioDeviceSwitcher audioSwitcher, Ca
             {
                 await SendJson(socket, new { type = "codex_idle" });
                 Console.WriteLine("Codex microphone idle");
-                if (audioSwitcher.RemoteMicIsActive)
+                // Never restore while ACTIVATING. Initial idle is expected while Codex opens Voice.
+                if (audioSwitcher.State == AudioSessionState.Listening)
                     audioSwitcher.ScheduleRestore();
             }
         }
@@ -162,7 +190,14 @@ static async Task SendJson(WebSocket socket, object payload)
     await socket.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
 }
 
-sealed record Options(int Port, string Shortcut, int ActivationTimeoutMs, string VirtualMicName, int RestoreDelayMs, bool ListDevices)
+sealed record Options(
+    int Port,
+    string Shortcut,
+    int ActivationTimeoutMs,
+    string VirtualMicName,
+    string VirtualCableInputName,
+    int RestoreDelayMs,
+    bool ListDevices)
 {
     public static Options Parse(string[] args)
     {
@@ -170,6 +205,7 @@ sealed record Options(int Port, string Shortcut, int ActivationTimeoutMs, string
         var shortcut = "ctrl+q";
         var timeout = 6000;
         var virtualMic = "CABLE Output";
+        var virtualCableInput = "CABLE Input";
         var restoreDelay = 800;
         var listDevices = args.Contains("--list-devices", StringComparer.OrdinalIgnoreCase);
 
@@ -182,27 +218,32 @@ sealed record Options(int Port, string Shortcut, int ActivationTimeoutMs, string
                 case "--shortcut": shortcut = args[++i]; break;
                 case "--activation-timeout": int.TryParse(args[++i], out timeout); break;
                 case "--virtual-mic": virtualMic = args[++i]; break;
+                case "--cable-input": virtualCableInput = args[++i]; break;
                 case "--restore-delay": int.TryParse(args[++i], out restoreDelay); break;
             }
         }
-        return new(port, shortcut, timeout, virtualMic, restoreDelay, listDevices);
+        return new(port, shortcut, timeout, virtualMic, virtualCableInput, restoreDelay, listDevices);
     }
 }
 
 static class AudioDeviceManager
 {
-    public static void ListCaptureDevices()
+    public static void ListDevices()
     {
         using var enumerator = new MMDeviceEnumerator();
         Console.WriteLine("Capture devices:");
         foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active))
             Console.WriteLine($"- {device.FriendlyName}\n  {device.ID}");
+
+        Console.WriteLine("\nPlayback devices:");
+        foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+            Console.WriteLine($"- {device.FriendlyName}\n  {device.ID}");
     }
 
-    public static MMDevice? FindCaptureDevice(string namePart)
+    public static MMDevice? FindDevice(DataFlow flow, string namePart)
     {
         using var enumerator = new MMDeviceEnumerator();
-        return enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
+        return enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active)
             .FirstOrDefault(d => d.FriendlyName.Contains(namePart, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -217,6 +258,75 @@ static class AudioDeviceManager
     }
 }
 
+sealed class AudioCableSink : IDisposable
+{
+    readonly MMDevice device;
+    readonly BufferedWaveProvider source;
+    readonly MediaFoundationResampler resampler;
+    readonly WasapiOut output;
+    bool disposed;
+
+    AudioCableSink(MMDevice device)
+    {
+        this.device = device;
+        source = new BufferedWaveProvider(new WaveFormat(16000, 16, 1))
+        {
+            BufferDuration = TimeSpan.FromSeconds(2),
+            DiscardOnBufferOverflow = true,
+            ReadFully = true
+        };
+
+        var targetFormat = device.AudioClient.MixFormat;
+        resampler = new MediaFoundationResampler(source, targetFormat)
+        {
+            ResamplerQuality = 60
+        };
+
+        output = new WasapiOut(device, AudioClientShareMode.Shared, true, 50);
+        output.Init(resampler);
+        output.Play();
+        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} ({targetFormat.SampleRate} Hz, {targetFormat.Channels} ch)");
+    }
+
+    public static AudioCableSink? TryCreate(string namePart)
+    {
+        MMDevice? device = null;
+        try
+        {
+            device = AudioDeviceManager.FindDevice(DataFlow.Render, namePart);
+            return device is null ? null : new AudioCableSink(device);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Could not open cable playback endpoint: {ex.Message}");
+            device?.Dispose();
+            return null;
+        }
+    }
+
+    public void Write(byte[] data, int offset, int count)
+    {
+        if (!disposed) source.AddSamples(data, offset, count);
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        try { output.Stop(); } catch { }
+        output.Dispose();
+        resampler.Dispose();
+        device.Dispose();
+    }
+}
+
+enum AudioSessionState
+{
+    Idle,
+    Activating,
+    Listening
+}
+
 sealed class AudioDeviceSwitcher
 {
     readonly string virtualMicName;
@@ -227,6 +337,7 @@ sealed class AudioDeviceSwitcher
     SavedDefaults? saved;
 
     public bool RemoteMicIsActive { get; private set; }
+    public AudioSessionState State { get; private set; } = AudioSessionState.Idle;
 
     public AudioDeviceSwitcher(string virtualMicName, int restoreDelayMs)
     {
@@ -241,7 +352,7 @@ sealed class AudioDeviceSwitcher
             CancelPendingRestore();
             if (RemoteMicIsActive) return true;
 
-            using var target = AudioDeviceManager.FindCaptureDevice(virtualMicName);
+            using var target = AudioDeviceManager.FindDevice(DataFlow.Capture, virtualMicName);
             if (target is null)
             {
                 Console.WriteLine($"Virtual microphone '{virtualMicName}' not found. Use --list-devices.");
@@ -273,11 +384,36 @@ sealed class AudioDeviceSwitcher
         }
     }
 
-    public void ScheduleRestore()
+    public void BeginActivation()
+    {
+        lock (sync)
+        {
+            CancelPendingRestore();
+            State = AudioSessionState.Activating;
+        }
+    }
+
+    public void MarkListening()
+    {
+        lock (sync)
+        {
+            CancelPendingRestore();
+            if (RemoteMicIsActive) State = AudioSessionState.Listening;
+        }
+    }
+
+    public void ActivationFailed()
+    {
+        lock (sync) State = AudioSessionState.Idle;
+    }
+
+    public void ScheduleRestore(bool force = false)
     {
         lock (sync)
         {
             if (!RemoteMicIsActive) return;
+            if (State == AudioSessionState.Activating && !force) return;
+
             restoreCts?.Cancel();
             restoreCts = new CancellationTokenSource();
             var token = restoreCts.Token;
@@ -286,7 +422,7 @@ sealed class AudioDeviceSwitcher
                 try
                 {
                     await Task.Delay(restoreDelayMs, token);
-                    if (!CodexMicDetector.IsActive()) RestoreNow();
+                    if (force || !CodexMicDetector.IsActive()) RestoreNow();
                 }
                 catch (OperationCanceledException) { }
             });
@@ -312,6 +448,7 @@ sealed class AudioDeviceSwitcher
             if (state is null)
             {
                 RemoteMicIsActive = false;
+                State = AudioSessionState.Idle;
                 return;
             }
 
@@ -324,6 +461,7 @@ sealed class AudioDeviceSwitcher
                 if (File.Exists(recoveryPath)) File.Delete(recoveryPath);
                 saved = null;
                 RemoteMicIsActive = false;
+                State = AudioSessionState.Idle;
             }
             catch (Exception ex)
             {
