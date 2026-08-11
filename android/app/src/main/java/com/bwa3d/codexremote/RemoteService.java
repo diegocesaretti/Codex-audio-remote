@@ -29,8 +29,10 @@ import java.io.FileOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.ZipEntry;
@@ -50,15 +52,16 @@ public class RemoteService extends Service implements RecognitionListener {
     private static final String CHANNEL_ID = "codex_remote";
     private static final String MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
     private static final int SAMPLE_RATE = 16000;
-    private static final int UPLINK_CHUNK_BYTES = 640; // 20 ms PCM16 mono @ 16 kHz
 
     private final AtomicBoolean streaming = new AtomicBoolean(false);
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ArrayBlockingQueue<byte[]> phraseQueue = new ArrayBlockingQueue<>(24);
     private OkHttpClient client;
     private WebSocket socket;
     private SpeechService speechService;
     private Model voskModel;
     private Thread audioThread;
+    private Thread phraseThread;
     private AudioTrack speaker;
     private OverlayController overlay;
     private String serverIp;
@@ -256,7 +259,7 @@ public class RemoteService extends Service implements RecognitionListener {
                 if (!f.getCanonicalPath().startsWith(root)) throw new SecurityException("Bad zip path");
                 if (e.isDirectory()) { f.mkdirs(); continue; }
                 File parent = f.getParentFile(); if (parent != null) parent.mkdirs();
-                try (FileOutputStream out = new FileOutputStream(f)) { int n; while ((n = zin.read(b)) > 0) out.write(b, 0, n); }
+                try (FileOutputStream target = new FileOutputStream(f)) { int n; while ((n = zin.read(b)) > 0) target.write(b, 0, n); }
             }
         }
     }
@@ -359,42 +362,83 @@ public class RemoteService extends Service implements RecognitionListener {
         return prev[b.length()];
     }
 
+    public static int chunkMsForLatency(int latency) {
+        latency = Math.max(0, Math.min(100, latency));
+        int raw = 20 + ((100 - latency) * 60 / 100); // 20..80 ms
+        return Math.max(20, Math.min(80, ((raw + 5) / 10) * 10));
+    }
+
+    private void startPhraseDetector() {
+        if (voskModel == null || (phraseThread != null && phraseThread.isAlive())) return;
+        final List<String> phrases = endPhrases();
+        if (phrases.isEmpty()) return;
+        phraseQueue.clear();
+        phraseThread = new Thread(() -> {
+            Recognizer recognizer = null;
+            try {
+                recognizer = new Recognizer(voskModel, SAMPLE_RATE, endGrammar(phrases));
+                while (streaming.get() || !phraseQueue.isEmpty()) {
+                    byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
+                    if (chunk == null) continue;
+                    boolean finalChunk = recognizer.acceptWaveForm(chunk, chunk.length);
+                    String result = finalChunk ? recognizer.getResult() : recognizer.getPartialResult();
+                    if (!endingSession && isEndPhrase(result, phrases)) requestEndSession("phrase");
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (recognizer != null) recognizer.close();
+                phraseQueue.clear();
+                phraseThread = null;
+            }
+        }, "EndPhraseVosk");
+        phraseThread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+        phraseThread.start();
+    }
+
+    private void offerPhraseAudio(byte[] buffer, int read) {
+        if (phraseThread == null || !phraseThread.isAlive() || endingSession) return;
+        byte[] copy = Arrays.copyOf(buffer, read);
+        if (!phraseQueue.offer(copy)) {
+            phraseQueue.poll();
+            phraseQueue.offer(copy);
+        }
+    }
+
     private void startMicStreaming() {
         if (!streaming.compareAndSet(false, true)) return;
-        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":20}");
+        final int quality = prefs().getInt("audio_quality", 80);
+        final int latency = prefs().getInt("audio_latency", 55);
+        final int chunkMs = chunkMsForLatency(latency);
+        final int chunkBytes = SAMPLE_RATE * 2 * chunkMs / 1000;
+        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + "}");
+        startPhraseDetector();
+
         audioThread = new Thread(() -> {
             int min = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            int recordBuffer = Math.max(min, UPLINK_CHUNK_BYTES * 4);
+            int safetyChunks = quality >= 75 ? 6 : quality >= 40 ? 5 : 4;
+            int recordBuffer = Math.max(min, chunkBytes * safetyChunks);
             AudioRecord record = null;
             AcousticEchoCanceler aec = null;
-            Recognizer endRecognizer = null;
-            List<String> phrases = endPhrases();
             try {
-                if (voskModel != null && !phrases.isEmpty()) endRecognizer = new Recognizer(voskModel, SAMPLE_RATE, endGrammar(phrases));
                 record = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE,
                         AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, recordBuffer);
                 if (AcousticEchoCanceler.isAvailable()) {
                     aec = AcousticEchoCanceler.create(record.getAudioSessionId());
                     if (aec != null) aec.setEnabled(true);
                 }
-                byte[] buffer = new byte[UPLINK_CHUNK_BYTES];
+                byte[] buffer = new byte[chunkBytes];
                 record.startRecording();
                 while (streaming.get()) {
                     int read = record.read(buffer, 0, buffer.length);
                     if (read > 0 && socket != null) {
                         socket.send(ByteString.of(buffer, 0, read));
                         overlay.setLevel(rmsPcm16(buffer, read));
-                        if (!endingSession && endRecognizer != null) {
-                            boolean finalChunk = endRecognizer.acceptWaveForm(buffer, read);
-                            String result = finalChunk ? endRecognizer.getResult() : endRecognizer.getPartialResult();
-                            if (isEndPhrase(result, phrases)) requestEndSession("phrase");
-                        }
+                        offerPhraseAudio(buffer, read);
                     }
                 }
             } catch (Exception e) {
                 updateNotification("Audio error: " + e.getClass().getSimpleName());
             } finally {
-                if (endRecognizer != null) endRecognizer.close();
                 if (aec != null) aec.release();
                 if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
             }
@@ -405,13 +449,18 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private void stopMicStreaming() {
         if (!streaming.compareAndSet(true, false)) return;
+        phraseQueue.clear();
         sendText("{\"type\":\"audio_stop\"}");
     }
 
     private synchronized void startSpeaker() {
         if (speaker != null) return;
+        int latency = prefs().getInt("audio_latency", 55);
         int min = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        int buffer = Math.max(min * 2, 4096);
+        int buffer;
+        if (latency >= 80) buffer = Math.max(min, 2048);
+        else if (latency >= 45) buffer = Math.max(min * 2, 4096);
+        else buffer = Math.max(min * 3, 6144);
         speaker = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
         speaker.play();
