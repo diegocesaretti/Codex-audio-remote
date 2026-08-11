@@ -13,6 +13,8 @@ import android.widget.TextView;
 
 public class OverlayFallbackActivity extends Activity {
     public static final String EXTRA_STATE = "state";
+    public static final String STATE_HIDE = "__hide__";
+    private TextView label;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -29,19 +31,19 @@ public class OverlayFallbackActivity extends Activity {
         lp.y = Math.round(42 * getResources().getDisplayMetrics().density);
         w.setAttributes(lp);
 
-        TextView v = new TextView(this);
-        v.setGravity(Gravity.CENTER);
-        v.setTextColor(Color.WHITE);
-        v.setTextSize(14f);
-        v.setPadding(18, 8, 18, 8);
+        label = new TextView(this);
+        label.setGravity(Gravity.CENTER);
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(14f);
+        label.setPadding(18, 8, 18, 8);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0xE6212121);
         bg.setCornerRadius(24 * getResources().getDisplayMetrics().density);
-        v.setBackground(bg);
-        setContentView(v);
+        label.setBackground(bg);
+        setContentView(label);
         updateState(getIntent());
 
-        v.setOnClickListener(view -> {
+        label.setOnClickListener(view -> {
             AndroidDebugLog.log("Fallback overlay tapped · restarting service to end session");
             Intent service = new Intent(this, RemoteService.class);
             stopService(service);
@@ -53,6 +55,7 @@ public class OverlayFallbackActivity extends Activity {
             startService(restart);
             finish();
         });
+        AndroidDebugLog.log("Fallback overlay activity shown");
     }
 
     @Override protected void onNewIntent(Intent intent) {
@@ -63,13 +66,11 @@ public class OverlayFallbackActivity extends Activity {
 
     private void updateState(Intent intent) {
         String state = intent != null ? intent.getStringExtra(EXTRA_STATE) : null;
-        if (state == null || state.trim().isEmpty()) state = "Escuchando";
-        TextView v = (TextView) findViewById(android.R.id.content).getRootView().findViewById(android.R.id.content);
-        if (getWindow().getDecorView().findViewById(android.R.id.content) instanceof android.view.ViewGroup) {
-            android.view.ViewGroup root = (android.view.ViewGroup)getWindow().getDecorView().findViewById(android.R.id.content);
-            if (root.getChildCount() > 0 && root.getChildAt(0) instanceof TextView) {
-                ((TextView)root.getChildAt(0)).setText(state + " · tocar para finalizar");
-            }
+        if (STATE_HIDE.equals(state)) {
+            finish();
+            return;
         }
+        if (state == null || state.trim().isEmpty()) state = "Escuchando";
+        if (label != null) label.setText(state + " · tocar para finalizar");
     }
 }
