@@ -3,8 +3,11 @@ using NAudio.Wave;
 
 sealed class LoopbackDownlink : IDisposable
 {
+    const int PacketBytes = 640; // 20 ms @ PCM16 mono 16 kHz
     readonly WasapiLoopbackCapture capture;
     readonly Func<byte[], Task> onPcm;
+    readonly object sendSync = new();
+    Task sendTail = Task.CompletedTask;
     double sourcePosition;
     bool disposed;
 
@@ -13,10 +16,7 @@ sealed class LoopbackDownlink : IDisposable
         this.onPcm = onPcm;
         capture = new WasapiLoopbackCapture();
         capture.DataAvailable += CaptureOnDataAvailable;
-        capture.RecordingStopped += (_, e) =>
-        {
-            if (e.Exception != null) Console.WriteLine($"Downlink stopped: {e.Exception.Message}");
-        };
+        capture.RecordingStopped += (_, e) => { if (e.Exception != null) Console.WriteLine($"Downlink stopped: {e.Exception.Message}"); };
     }
 
     public void Start()
@@ -31,11 +31,26 @@ sealed class LoopbackDownlink : IDisposable
         try
         {
             var pcm = ConvertToMono16k(e.Buffer, e.BytesRecorded, capture.WaveFormat);
-            if (pcm.Length > 0) _ = onPcm(pcm);
+            if (pcm.Length == 0) return;
+            for (int offset = 0; offset < pcm.Length; offset += PacketBytes)
+            {
+                int count = Math.Min(PacketBytes, pcm.Length - offset);
+                var packet = new byte[count];
+                Buffer.BlockCopy(pcm, offset, packet, 0, count);
+                QueueSend(packet);
+            }
         }
-        catch (Exception ex)
+        catch (Exception ex) { Console.WriteLine($"Downlink conversion error: {ex.Message}"); }
+    }
+
+    void QueueSend(byte[] packet)
+    {
+        lock (sendSync)
         {
-            Console.WriteLine($"Downlink conversion error: {ex.Message}");
+            sendTail = sendTail.ContinueWith(async _ =>
+            {
+                if (!disposed) await onPcm(packet);
+            }, TaskScheduler.Default).Unwrap();
         }
     }
 
@@ -63,8 +78,7 @@ sealed class LoopbackDownlink : IDisposable
             }
             double mono = Math.Clamp(sum / channels, -1.0, 1.0);
             short s = (short)Math.Round(mono * 32767.0);
-            output.Add((byte)(s & 0xff));
-            output.Add((byte)((s >> 8) & 0xff));
+            output.Add((byte)(s & 0xff)); output.Add((byte)((s >> 8) & 0xff));
             pos += step;
         }
         sourcePosition = pos - frames;
@@ -73,13 +87,8 @@ sealed class LoopbackDownlink : IDisposable
 
     static double ReadSample(byte[] data, int offset, WaveFormat format)
     {
-        if (format.BitsPerSample == 32)
-        {
-            // Windows shared-mode mix format is normally IEEE float, including WaveFormatExtensible.
-            return BitConverter.ToSingle(data, offset);
-        }
-        if (format.BitsPerSample == 16)
-            return BitConverter.ToInt16(data, offset) / 32768.0;
+        if (format.BitsPerSample == 32) return BitConverter.ToSingle(data, offset);
+        if (format.BitsPerSample == 16) return BitConverter.ToInt16(data, offset) / 32768.0;
         if (format.BitsPerSample == 24)
         {
             int v = data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16);
