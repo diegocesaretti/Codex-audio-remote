@@ -63,6 +63,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private Thread phraseThread;
     private AudioTrack speaker;
     private OverlayController overlay;
+    private ResponseTranscriber responseTranscriber;
     private String serverIp;
     private int serverPort = 8765;
     private boolean connected;
@@ -76,7 +77,7 @@ public class RemoteService extends Service implements RecognitionListener {
     @Override public void onCreate() {
         super.onCreate();
         createChannel();
-        overlay = new OverlayController(this);
+        overlay = new OverlayController(this, () -> requestEndSession("overlay_tap"));
         startForeground(NOTIFICATION_ID, notification("Iniciando…"));
         client = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(15, TimeUnit.SECONDS).build();
     }
@@ -132,9 +133,9 @@ public class RemoteService extends Service implements RecognitionListener {
         try {
             String type = new JSONObject(text).optString("type", "");
             switch (type) {
-                case "activating": stopWakeRecognition(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;
+                case "activating": stopWakeRecognition(); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;
                 case "codex_listening":
-                    endingSession = false; stopWakeRecognition(); startSpeaker(); startMicStreaming(); armConversationTimeout();
+                    endingSession = false; stopWakeRecognition(); stopResponseTranscriber(); startSpeaker(); startMicStreaming(); armConversationTimeout();
                     overlay.show("Escuchando"); updateNotification("Codex escuchando"); break;
                 case "session_ending": endingSession = true; overlay.show("Finalizando…"); updateNotification("Finalizando conversación…"); break;
                 case "codex_idle": finishLocalSession(); break;
@@ -147,7 +148,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private void finishLocalSession() {
         handler.removeCallbacks(conversationTimeoutRunnable);
-        endingSession = false; stopMicStreaming(); stopSpeaker(); overlay.hide(); startWakeRecognition();
+        endingSession = false; stopMicStreaming(); stopSpeaker(); stopResponseTranscriber(); overlay.hide(); startWakeRecognition();
         updateNotification("Conectado · hola sol");
     }
 
@@ -246,7 +247,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private void triggerWake() {
         if (!connected) { updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); return; }
-        stopWakeRecognition(); sendText("{\"type\":\"wake\"}"); overlay.show("Activando…"); updateNotification("Hola Sol detectado · activando…");
+        stopWakeRecognition(); sendText("{\"type\":\"wake\"}"); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Hola Sol detectado · activando…");
     }
 
     private static boolean wakeMatches(String text, int sensitivity) {
@@ -464,10 +465,32 @@ public class RemoteService extends Service implements RecognitionListener {
         speaker.play();
     }
 
+    private synchronized void ensureResponseTranscriber() {
+        if (!prefs().getBoolean("show_transcript", false) || voskModel == null || responseTranscriber != null) return;
+        try {
+            responseTranscriber = new ResponseTranscriber(voskModel, text -> handler.post(() -> overlay.setTranscript(text)));
+        } catch (Exception e) {
+            responseTranscriber = null;
+            updateNotification("Transcripción no disponible");
+        }
+    }
+
+    private synchronized void stopResponseTranscriber() {
+        if (responseTranscriber != null) {
+            try { responseTranscriber.close(); } catch (Exception ignored) { }
+            responseTranscriber = null;
+        }
+        if (overlay != null) overlay.clearTranscript();
+    }
+
     private synchronized void playDownlink(byte[] pcm) {
         if (speaker == null) startSpeaker();
         if (speaker == null || pcm.length == 0) return;
         speaker.write(pcm, 0, pcm.length);
+        if (prefs().getBoolean("show_transcript", false)) {
+            ensureResponseTranscriber();
+            if (responseTranscriber != null) responseTranscriber.accept(pcm);
+        }
         overlay.show("Sol hablando"); overlay.setLevel(rmsPcm16(pcm, pcm.length));
         handler.removeCallbacks(backToListening); handler.postDelayed(backToListening, 180);
     }
@@ -513,7 +536,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     @Override public void onDestroy() {
         destroyed = true; handler.removeCallbacksAndMessages(null);
-        stopMicStreaming(); stopWakeRecognition(); stopSpeaker(); overlay.hide();
+        stopMicStreaming(); stopWakeRecognition(); stopSpeaker(); stopResponseTranscriber(); overlay.hide();
         if (socket != null) socket.close(1000, "service stopped");
         if (client != null) client.dispatcher().executorService().shutdown();
         if (voskModel != null) voskModel.close();
