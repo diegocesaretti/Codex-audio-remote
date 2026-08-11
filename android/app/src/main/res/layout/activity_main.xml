@@ -53,10 +53,35 @@
             android:max="100"
             android:progress="60" />
 
+        <EditText
+            android:id="@+id/timeoutSeconds"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:hint="Timeout conversación en segundos (0 = sin límite)"
+            android:inputType="number"
+            android:text="300" />
+
+        <EditText
+            android:id="@+id/endPhrases"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Frases de finalización separadas por coma"
+            android:inputType="textCapSentences"
+            android:maxLines="3"
+            android:text="gracias sol, chau sol, adiós sol, listo sol" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Las frases se reconocen localmente durante la conversación y cierran Voice sin esperar el timeout." />
+
         <CheckBox
             android:id="@+id/autostartCheck"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:text="Iniciar satélite al encender Android" />
 
         <Button
@@ -91,6 +116,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="La primera vez descarga el modelo español de Vosk (~39 MB). Luego el wake word funciona localmente y el servicio puede quedar en segundo plano mientras Home Assistant permanece visible." />
+            android:text="La primera vez descarga el modelo español de Vosk (~39 MB). Luego wake y frases de finalización funcionan localmente, incluso con Home Assistant en primer plano." />
     </LinearLayout>
 </ScrollView>
