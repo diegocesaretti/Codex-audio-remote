@@ -13,8 +13,13 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - name: Build Windows companion
-        run: dotnet build windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-x64
+          path: dist/windows
 
   android:
     runs-on: ubuntu-latest
@@ -32,3 +37,8 @@ jobs:
           gradle-version: '8.9'
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
