@@ -5,6 +5,11 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.media.AudioFormat;
+import android.media.AudioManager;
+import android.media.AudioRecord;
+import android.media.AudioTrack;
+import android.media.MediaRecorder;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,12 +20,15 @@ import android.widget.EditText;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import java.io.ByteArrayOutputStream;
+
 public class MainActivity extends Activity {
     private static final int REQ_AUDIO = 10;
     private EditText serverIp, serverPort, timeoutSeconds, endPhrases, manualChunkMs;
     private TextView statusText, sensitivityText, qualityText, latencyText;
     private SeekBar sensitivity, quality, latency;
     private CheckBox autostart, manualLatency;
+    private volatile boolean audioTestRunning;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -43,6 +51,7 @@ public class MainActivity extends Activity {
         Button connect = findViewById(R.id.connectButton);
         Button wake = findViewById(R.id.wakeButton);
         Button overlay = findViewById(R.id.overlayButton);
+        Button audioTest = findViewById(R.id.audioTestButton);
 
         SharedPreferences prefs = getSharedPreferences("settings", MODE_PRIVATE);
         serverIp.setText(prefs.getString("ip", "192.168.1.100"));
@@ -94,6 +103,7 @@ public class MainActivity extends Activity {
             statusText.setText("Wake enviado…");
         });
         overlay.setOnClickListener(v -> requestOverlayPermission());
+        audioTest.setOnClickListener(v -> runLocalAudioTest());
 
         if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
@@ -127,6 +137,78 @@ public class MainActivity extends Activity {
         startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName())));
     }
 
+    private void runLocalAudioTest() {
+        if (audioTestRunning) return;
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_AUDIO);
+            return;
+        }
+        saveSettings();
+        audioTestRunning = true;
+        stopService(new Intent(this, RemoteService.class));
+        statusText.setText("Test local: grabando 5 segundos… hablá ahora");
+
+        new Thread(() -> {
+            AudioRecord record = null;
+            AudioTrack player = null;
+            int requestedRate = RemoteService.sampleRateForQuality(quality.getProgress());
+            int usedRate = requestedRate;
+            try {
+                int min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                if (min <= 0) {
+                    usedRate = 16000;
+                    min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                }
+                int bufferSize = Math.max(min, usedRate * 2 / 5);
+                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, usedRate,
+                        AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
+                if (record.getState() != AudioRecord.STATE_INITIALIZED && usedRate != 16000) {
+                    record.release();
+                    usedRate = 16000;
+                    min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                    bufferSize = Math.max(min, usedRate * 2 / 5);
+                    record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, usedRate,
+                            AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
+                }
+                if (record.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("AudioRecord no inicializa");
+
+                final int finalRate = usedRate;
+                runOnUiThread(() -> statusText.setText("Test local: grabando 5 s a " + (finalRate / 1000) + " kHz… hablá ahora"));
+                ByteArrayOutputStream pcm = new ByteArrayOutputStream(usedRate * 2 * 5);
+                byte[] chunk = new byte[Math.max(1024, usedRate * 2 * 45 / 1000)];
+                record.startRecording();
+                long end = System.currentTimeMillis() + 5000;
+                while (System.currentTimeMillis() < end) {
+                    int n = record.read(chunk, 0, chunk.length);
+                    if (n > 0) pcm.write(chunk, 0, n);
+                }
+                record.stop();
+                byte[] data = pcm.toByteArray();
+
+                runOnUiThread(() -> statusText.setText("Test local: reproduciendo lo capturado…"));
+                int outMin = AudioTrack.getMinBufferSize(usedRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                player = new AudioTrack(AudioManager.STREAM_MUSIC, usedRate, AudioFormat.CHANNEL_OUT_MONO,
+                        AudioFormat.ENCODING_PCM_16BIT, Math.max(outMin, 4096), AudioTrack.MODE_STREAM);
+                player.play();
+                int pos = 0;
+                while (pos < data.length) {
+                    int n = player.write(data, pos, data.length - pos);
+                    if (n <= 0) break;
+                    pos += n;
+                }
+                try { Thread.sleep(250); } catch (InterruptedException ignored) { }
+                runOnUiThread(() -> statusText.setText("Test local terminado. Si esto suena limpio, el problema está después de Android."));
+            } catch (Exception e) {
+                runOnUiThread(() -> statusText.setText("Test local falló: " + e.getClass().getSimpleName() + " · " + e.getMessage()));
+            } finally {
+                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
+                if (player != null) { try { player.stop(); } catch (Exception ignored) { } player.release(); }
+                audioTestRunning = false;
+                runOnUiThread(this::startRemoteService);
+            }
+        }, "LocalAudioDiagnostic").start();
+    }
+
     private void saveSettings() {
         String ip = serverIp.getText().toString().trim();
         int port; try { port = Integer.parseInt(serverPort.getText().toString().trim()); } catch (Exception e) { port = 8765; }
@@ -155,7 +237,7 @@ public class MainActivity extends Activity {
         i.setAction(RemoteService.ACTION_START);
         i.putExtra("ip", ip); i.putExtra("port", port);
         startServiceCompat(i);
-        statusText.setText("Servicio iniciado: ws://" + ip + ":" + port + "/ws/ · wake: hola sol");
+        if (!audioTestRunning) statusText.setText("Servicio iniciado: ws://" + ip + ":" + port + "/ws/ · wake: hola sol");
     }
 
     private void startServiceCompat(Intent i) {
