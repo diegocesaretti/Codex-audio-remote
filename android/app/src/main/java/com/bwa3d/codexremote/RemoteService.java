@@ -382,9 +382,14 @@ public class RemoteService extends Service implements RecognitionListener {
         final int gainPct = Math.max(50, Math.min(400, prefs().getInt("mic_gain_pct", 100)));
         final String sourceKey = prefs().getString("audio_source", "voice_recognition");
         final int requestedSource = audioSourceForKey(sourceKey);
+        final String enhancerMode = prefs().getString("voice_enhancer", VoiceEnhancer.OFF);
+        final boolean nativeNs = prefs().getBoolean("native_ns", false);
+        final boolean nativeAgc = prefs().getBoolean("native_agc", false);
+        final boolean nativeAec = prefs().getBoolean("native_aec", false);
 
         audioThread = new Thread(() -> {
             AudioRecord record = null;
+            NativeAudioEffects effects = null;
             try {
                 int actualRate = requestedRate;
                 int actualSource = requestedSource;
@@ -413,10 +418,13 @@ public class RemoteService extends Service implements RecognitionListener {
                 final int finalRate = actualRate;
                 final int finalChunkBytes = chunkBytes;
                 final int finalSource = actualSource;
+                effects = new NativeAudioEffects(record.getAudioSessionId(), nativeNs, nativeAgc, nativeAec);
+                VoiceEnhancer enhancer = new VoiceEnhancer(enhancerMode, finalRate);
+                final String effectSummary = effects.summary();
                 String captureName = audioSourceName(finalSource).replace(" ", "_").toLowerCase(Locale.ROOT);
-                sendText("{\"type\":\"audio_start\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"gainPct\":" + gainPct + ",\"capture\":\"" + captureName + "\"}");
+                sendText("{\"type\":\"audio_start\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"gainPct\":" + gainPct + ",\"enhancer\":\"" + enhancerMode + "\",\"capture\":\"" + captureName + "\"}");
                 startPhraseDetector(finalRate);
-                updateNotification("Codex escuchando · " + audioSourceName(finalSource) + " · " + (finalRate / 1000) + " kHz · gain " + gainPct + "%");
+                updateNotification("Codex escuchando · " + audioSourceName(finalSource) + " · " + (finalRate / 1000) + " kHz · gain " + gainPct + "% · enh " + enhancerMode + " · " + effectSummary);
 
                 byte[] buffer = new byte[finalChunkBytes];
                 record.startRecording();
@@ -424,13 +432,17 @@ public class RemoteService extends Service implements RecognitionListener {
                     int read = record.read(buffer, 0, buffer.length);
                     if (read > 0 && socket != null) {
                         applyGainPcm16InPlace(buffer, read, gainPct);
+                        enhancer.processInPlace(buffer, read);
                         socket.send(ByteString.of(buffer, 0, read));
                         overlay.setLevel(rmsPcm16(buffer, read));
                         offerPhraseAudio(buffer, read);
                     }
                 }
             } catch (Exception e) { updateNotification("Audio error: " + e.getClass().getSimpleName()); }
-            finally { if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); } }
+            finally {
+                if (effects != null) effects.close();
+                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
+            }
         }, "MicUplink");
         audioThread.setPriority(Thread.MAX_PRIORITY); audioThread.start();
     }
