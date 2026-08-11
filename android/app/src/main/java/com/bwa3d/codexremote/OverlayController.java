@@ -1,6 +1,7 @@
 package com.bwa3d.codexremote;
 
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -20,6 +21,7 @@ public class OverlayController {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private OverlayView view;
     private WindowManager.LayoutParams layoutParams;
+    private boolean activityFallback;
 
     public OverlayController(Context context, Runnable tapAction) {
         this.context = context.getApplicationContext();
@@ -40,12 +42,20 @@ public class OverlayController {
             mainHandler.post(() -> show(state));
             return;
         }
-        if (!canShow()) {
-            AndroidDebugLog.log("Overlay show skipped: Settings.canDrawOverlays=false");
+        if (activityFallback) {
+            showFallbackActivity(state);
             return;
         }
-        if (view == null) {
-            if (!tryAddOverlay(state)) return;
+        if (!canShow()) {
+            AndroidDebugLog.log("Overlay permission false; using fallback activity");
+            activityFallback = true;
+            showFallbackActivity(state);
+            return;
+        }
+        if (view == null && !tryAddOverlay(state)) {
+            activityFallback = true;
+            showFallbackActivity(state);
+            return;
         }
         if (view != null) view.setState(state);
     }
@@ -55,16 +65,9 @@ public class OverlayController {
         if (Build.VERSION.SDK_INT >= 26) {
             types = new int[]{ WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY };
         } else if (Build.VERSION.SDK_INT >= 23) {
-            // Android 6 vendor ROMs can report overlay permission granted while still
-            // rejecting TYPE_SYSTEM_ALERT/TYPE_PHONE. TYPE_TOAST is a useful last-resort
-            // compatibility path on API 23.
-            types = new int[]{
-                    WindowManager.LayoutParams.TYPE_SYSTEM_ALERT,
-                    WindowManager.LayoutParams.TYPE_PHONE,
-                    WindowManager.LayoutParams.TYPE_TOAST
-            };
+            types = new int[]{ WindowManager.LayoutParams.TYPE_SYSTEM_ALERT, WindowManager.LayoutParams.TYPE_PHONE };
         } else {
-            types = new int[]{ WindowManager.LayoutParams.TYPE_PHONE, WindowManager.LayoutParams.TYPE_TOAST };
+            types = new int[]{ WindowManager.LayoutParams.TYPE_PHONE };
         }
 
         for (int type : types) {
@@ -93,8 +96,20 @@ public class OverlayController {
         }
         view = null;
         layoutParams = null;
-        AndroidDebugLog.log("Overlay unavailable after all fallbacks · API=" + Build.VERSION.SDK_INT);
+        AndroidDebugLog.log("WindowManager overlay unavailable · switching to fallback activity");
         return false;
+    }
+
+    private void showFallbackActivity(String state) {
+        try {
+            Intent i = new Intent(context, OverlayFallbackActivity.class);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            i.putExtra(OverlayFallbackActivity.EXTRA_STATE, state);
+            context.startActivity(i);
+            AndroidDebugLog.log("Fallback overlay activity requested · state=" + state);
+        } catch (Exception e) {
+            AndroidDebugLog.log("Fallback overlay activity failed: " + e);
+        }
     }
 
     public void setLevel(float level) {
@@ -128,10 +143,19 @@ public class OverlayController {
             mainHandler.post(this::hide);
             return;
         }
-        if (view == null) return;
-        try { windowManager.removeView(view); } catch (Exception ignored) { }
-        view = null;
-        layoutParams = null;
+        if (view != null) {
+            try { windowManager.removeView(view); } catch (Exception ignored) { }
+            view = null;
+            layoutParams = null;
+        }
+        if (activityFallback) {
+            try {
+                Intent i = new Intent(context, OverlayFallbackActivity.class);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                i.putExtra(OverlayFallbackActivity.EXTRA_STATE, OverlayFallbackActivity.STATE_HIDE);
+                context.startActivity(i);
+            } catch (Exception ignored) { }
+        }
     }
 
     private int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
