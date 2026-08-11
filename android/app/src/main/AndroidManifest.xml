@@ -23,6 +23,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".OverlayFallbackActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/OverlayFallbackTheme" />
+
         <service
             android:name=".RemoteService"
             android:exported="false"
