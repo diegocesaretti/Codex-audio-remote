@@ -103,8 +103,6 @@ while (true)
                             await SendJson(socket, sendGate, new { type = "audio_error", reason = "cable_input_not_found" });
                             break;
                         }
-                        // Record the exact capture endpoint selected as Codex's temporary microphone.
-                        // Compare this codex-input WAV with uplink-android WAV to isolate VB-CABLE/format issues.
                         codexInputRecorder = CableOutputRecorder.TryCreate(options.VirtualMicName);
                         downlink = new LoopbackDownlink(async pcm => await SendBinary(socket, sendGate, pcm));
                         await SendJson(socket, sendGate, new { type = "downlink_start", sampleRate = 16000, channels = 1 });
@@ -278,7 +276,6 @@ sealed class AudioCableSink : IDisposable
 {
     readonly MMDevice device;
     readonly BufferedWaveProvider source;
-    readonly MediaFoundationResampler resampler;
     readonly WasapiOut output;
     bool disposed;
 
@@ -287,9 +284,8 @@ sealed class AudioCableSink : IDisposable
         this.device = device;
         quality = Math.Clamp(quality, 0, 100);
         latency = Math.Clamp(latency, 0, 100);
-        var bufferMs = 300 + (quality * 3);
-        var wasapiLatencyMs = Math.Clamp(60 - (latency * 40 / 100), 20, 60);
-        var resamplerQuality = Math.Clamp(20 + (quality * 40 / 100), 20, 60);
+        var bufferMs = 400 + (quality * 3);
+        var wasapiLatencyMs = Math.Clamp(80 - (latency * 45 / 100), 35, 80);
         source = new BufferedWaveProvider(new WaveFormat(sampleRate, 16, 1))
         {
             BufferDuration = TimeSpan.FromMilliseconds(bufferMs),
@@ -297,10 +293,10 @@ sealed class AudioCableSink : IDisposable
             ReadFully = true
         };
         var target = device.AudioClient.MixFormat;
-        resampler = new MediaFoundationResampler(source, target) { ResamplerQuality = resamplerQuality };
         output = new WasapiOut(device, AudioClientShareMode.Shared, true, wasapiLatencyMs);
-        output.Init(resampler); output.Play();
-        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} | source {source.WaveFormat} | cable mix {target} | WASAPI {wasapiLatencyMs} ms | resampler {resamplerQuality} | reservoir {bufferMs} ms");
+        output.Init(source);
+        output.Play();
+        Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} | source {source.WaveFormat} | cable mix {target} | WASAPI shared conversion | {wasapiLatencyMs} ms | reservoir {bufferMs} ms");
     }
 
     public static AudioCableSink? TryCreate(string namePart, int sampleRate, int quality, int latency)
@@ -311,7 +307,7 @@ sealed class AudioCableSink : IDisposable
     }
 
     public void Write(byte[] data, int offset, int count) { if (!disposed) source.AddSamples(data, offset, count); }
-    public void Dispose() { if (disposed) return; disposed = true; try { output.Stop(); } catch { } output.Dispose(); resampler.Dispose(); device.Dispose(); }
+    public void Dispose() { if (disposed) return; disposed = true; try { output.Stop(); } catch { } output.Dispose(); device.Dispose(); }
 }
 
 enum AudioSessionState { Idle, Activating, Listening }
