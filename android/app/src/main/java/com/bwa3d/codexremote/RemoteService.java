@@ -330,9 +330,11 @@ public class RemoteService extends Service implements RecognitionListener {
         if (!streaming.compareAndSet(false, true)) return;
         final int quality = prefs().getInt("audio_quality", 80);
         final int latency = prefs().getInt("audio_latency", 55);
-        final int chunkMs = chunkMsForLatency(latency);
+        final boolean manualLatency = prefs().getBoolean("manual_latency", true);
+        final int requestedManualMs = prefs().getInt("manual_chunk_ms", 45);
+        final int chunkMs = manualLatency ? Math.max(20, Math.min(120, requestedManualMs)) : chunkMsForLatency(latency);
         final int chunkBytes = SAMPLE_RATE * 2 * chunkMs / 1000;
-        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"capture\":\"voice_recognition\"}");
+        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"capture\":\"voice_recognition\"}");
         startPhraseDetector();
 
         audioThread = new Thread(() -> {
@@ -341,9 +343,6 @@ public class RemoteService extends Service implements RecognitionListener {
             int recordBuffer = Math.max(min, chunkBytes * safetyChunks);
             AudioRecord record = null;
             try {
-                // VOICE_RECOGNITION is intentionally used instead of VOICE_COMMUNICATION.
-                // On many Android devices VOICE_COMMUNICATION enables aggressive telephony DSP/AEC/NS
-                // which is good for calls but can harm downstream speech recognition quality.
                 record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
                         AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, recordBuffer);
                 byte[] buffer = new byte[chunkBytes];
