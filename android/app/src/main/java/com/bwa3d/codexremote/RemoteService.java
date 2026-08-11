@@ -303,6 +303,35 @@ public class RemoteService extends Service implements RecognitionListener {
         return Math.max(20, Math.min(80, ((raw + 5) / 10) * 10));
     }
 
+    public static int audioSourceForKey(String key) {
+        if ("voice_communication".equals(key)) return MediaRecorder.AudioSource.VOICE_COMMUNICATION;
+        if ("mic".equals(key)) return MediaRecorder.AudioSource.MIC;
+        if ("default".equals(key)) return MediaRecorder.AudioSource.DEFAULT;
+        if ("camcorder".equals(key)) return MediaRecorder.AudioSource.CAMCORDER;
+        return MediaRecorder.AudioSource.VOICE_RECOGNITION;
+    }
+
+    public static String audioSourceName(int source) {
+        if (source == MediaRecorder.AudioSource.VOICE_COMMUNICATION) return "Llamada";
+        if (source == MediaRecorder.AudioSource.MIC) return "Mic normal";
+        if (source == MediaRecorder.AudioSource.DEFAULT) return "Default";
+        if (source == MediaRecorder.AudioSource.CAMCORDER) return "Camcorder";
+        return "Reconocimiento";
+    }
+
+    public static void applyGainPcm16InPlace(byte[] data, int count, int gainPct) {
+        gainPct = Math.max(50, Math.min(400, gainPct));
+        if (gainPct == 100 || data == null) return;
+        for (int i = 0; i + 1 < count; i += 2) {
+            int sample = (short)((data[i] & 0xff) | (data[i + 1] << 8));
+            int amplified = (sample * gainPct) / 100;
+            if (amplified > 32767) amplified = 32767;
+            else if (amplified < -32768) amplified = -32768;
+            data[i] = (byte)(amplified & 0xff);
+            data[i + 1] = (byte)((amplified >> 8) & 0xff);
+        }
+    }
+
     private void startPhraseDetector(final int sourceRate) {
         if (voskModel == null || (phraseThread != null && phraseThread.isAlive())) return;
         final List<String> phrases = endPhrases();
@@ -331,11 +360,11 @@ public class RemoteService extends Service implements RecognitionListener {
         if (!phraseQueue.offer(copy)) { phraseQueue.poll(); phraseQueue.offer(copy); }
     }
 
-    private AudioRecord createCapture(int sampleRate, int bufferBytes) {
+    private AudioRecord createCapture(int sampleRate, int bufferBytes, int audioSource) {
         try {
             int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
             if (min <= 0) return null;
-            AudioRecord record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, sampleRate,
+            AudioRecord record = new AudioRecord(audioSource, sampleRate,
                     AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, bufferBytes));
             if (record.getState() != AudioRecord.STATE_INITIALIZED) { record.release(); return null; }
             return record;
@@ -350,32 +379,51 @@ public class RemoteService extends Service implements RecognitionListener {
         final int requestedManualMs = prefs().getInt("manual_chunk_ms", 45);
         final int chunkMs = manualLatency ? Math.max(20, Math.min(120, requestedManualMs)) : chunkMsForLatency(latency);
         final int requestedRate = sampleRateForQuality(quality);
+        final int gainPct = Math.max(50, Math.min(400, prefs().getInt("mic_gain_pct", 100)));
+        final String sourceKey = prefs().getString("audio_source", "voice_recognition");
+        final int requestedSource = audioSourceForKey(sourceKey);
 
         audioThread = new Thread(() -> {
             AudioRecord record = null;
             try {
                 int actualRate = requestedRate;
+                int actualSource = requestedSource;
                 int chunkBytes = actualRate * 2 * chunkMs / 1000;
                 int safetyChunks = quality >= 75 ? 6 : quality >= 40 ? 5 : 4;
-                record = createCapture(actualRate, chunkBytes * safetyChunks);
+                record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
+
                 if (record == null && actualRate != 16000) {
                     actualRate = 16000;
                     chunkBytes = actualRate * 2 * chunkMs / 1000;
-                    record = createCapture(actualRate, chunkBytes * safetyChunks);
+                    record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
+                }
+                if (record == null && actualSource != MediaRecorder.AudioSource.VOICE_RECOGNITION) {
+                    actualSource = MediaRecorder.AudioSource.VOICE_RECOGNITION;
+                    actualRate = requestedRate;
+                    chunkBytes = actualRate * 2 * chunkMs / 1000;
+                    record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
+                    if (record == null && actualRate != 16000) {
+                        actualRate = 16000;
+                        chunkBytes = actualRate * 2 * chunkMs / 1000;
+                        record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
+                    }
                 }
                 if (record == null) throw new IllegalStateException("No compatible AudioRecord format");
 
                 final int finalRate = actualRate;
                 final int finalChunkBytes = chunkBytes;
-                sendText("{\"type\":\"audio_start\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"capture\":\"voice_recognition\"}");
+                final int finalSource = actualSource;
+                String captureName = audioSourceName(finalSource).replace(" ", "_").toLowerCase(Locale.ROOT);
+                sendText("{\"type\":\"audio_start\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"gainPct\":" + gainPct + ",\"capture\":\"" + captureName + "\"}");
                 startPhraseDetector(finalRate);
-                updateNotification("Codex escuchando · mic " + (finalRate / 1000) + " kHz");
+                updateNotification("Codex escuchando · " + audioSourceName(finalSource) + " · " + (finalRate / 1000) + " kHz · gain " + gainPct + "%");
 
                 byte[] buffer = new byte[finalChunkBytes];
                 record.startRecording();
                 while (streaming.get()) {
                     int read = record.read(buffer, 0, buffer.length);
                     if (read > 0 && socket != null) {
+                        applyGainPcm16InPlace(buffer, read, gainPct);
                         socket.send(ByteString.of(buffer, 0, read));
                         overlay.setLevel(rmsPcm16(buffer, read));
                         offerPhraseAudio(buffer, read);
