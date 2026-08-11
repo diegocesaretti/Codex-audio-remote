@@ -1,13 +1,15 @@
 using NAudio.Wave;
 using System.Buffers.Binary;
+using System.Threading;
 
 // Transparent wrapper around NAudio's BufferedWaveProvider.
 // It preserves the original audio path while also writing the exact PCM bytes received
-// from Android to a listenable WAV file for diagnostics.
+// from Android to a listenable WAV file for diagnostics and counting starvation events.
 sealed class BufferedWaveProvider : IWaveProvider
 {
     readonly NAudio.Wave.BufferedWaveProvider inner;
     readonly DiagnosticWavRecorder recorder;
+    long underflowCount;
 
     public BufferedWaveProvider(WaveFormat waveFormat)
     {
@@ -37,6 +39,7 @@ sealed class BufferedWaveProvider : IWaveProvider
 
     public int BufferedBytes => inner.BufferedBytes;
     public TimeSpan BufferedDuration => inner.BufferedDuration;
+    public long UnderflowCount => Interlocked.Read(ref underflowCount);
 
     public void AddSamples(byte[] buffer, int offset, int count)
     {
@@ -44,7 +47,13 @@ sealed class BufferedWaveProvider : IWaveProvider
         recorder.Write(buffer, offset, count);
     }
 
-    public int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
+    public int Read(byte[] buffer, int offset, int count)
+    {
+        // With ReadFully=true NAudio pads missing data with zeroes. Detect that condition
+        // before the read so the sink can pause/rebuffer instead of producing periodic silence.
+        if (inner.BufferedBytes < count) Interlocked.Increment(ref underflowCount);
+        return inner.Read(buffer, offset, count);
+    }
 }
 
 sealed class DiagnosticWavRecorder
