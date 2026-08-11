@@ -35,6 +35,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Bundle Vosk Spanish wake model
+        run: |
+          mkdir -p android/app/src/main/assets
+          curl -L --fail --retry 3 -o android/app/src/main/assets/vosk-es.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+          ls -lh android/app/src/main/assets/vosk-es.zip
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
       - name: Upload Android artifact
