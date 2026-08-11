@@ -17,10 +17,10 @@ import android.widget.TextView;
 
 public class MainActivity extends Activity {
     private static final int REQ_AUDIO = 10;
-    private EditText serverIp, serverPort, timeoutSeconds, endPhrases;
+    private EditText serverIp, serverPort, timeoutSeconds, endPhrases, manualChunkMs;
     private TextView statusText, sensitivityText, qualityText, latencyText;
     private SeekBar sensitivity, quality, latency;
-    private CheckBox autostart;
+    private CheckBox autostart, manualLatency;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -30,6 +30,7 @@ public class MainActivity extends Activity {
         serverPort = findViewById(R.id.serverPort);
         timeoutSeconds = findViewById(R.id.timeoutSeconds);
         endPhrases = findViewById(R.id.endPhrases);
+        manualChunkMs = findViewById(R.id.manualChunkMs);
         statusText = findViewById(R.id.statusText);
         sensitivityText = findViewById(R.id.sensitivityText);
         qualityText = findViewById(R.id.qualityText);
@@ -37,6 +38,7 @@ public class MainActivity extends Activity {
         sensitivity = findViewById(R.id.sensitivitySeek);
         quality = findViewById(R.id.qualitySeek);
         latency = findViewById(R.id.latencySeek);
+        manualLatency = findViewById(R.id.manualLatencyCheck);
         autostart = findViewById(R.id.autostartCheck);
         Button connect = findViewById(R.id.connectButton);
         Button wake = findViewById(R.id.wakeButton);
@@ -47,6 +49,7 @@ public class MainActivity extends Activity {
         serverPort.setText(String.valueOf(prefs.getInt("port", 8765)));
         timeoutSeconds.setText(String.valueOf(prefs.getInt("conversation_timeout", 300)));
         endPhrases.setText(prefs.getString("end_phrases", "gracias sol, chau sol, adiós sol, listo sol"));
+        manualChunkMs.setText(String.valueOf(prefs.getInt("manual_chunk_ms", 45)));
 
         int sens = prefs.getInt("sensitivity", 60);
         int q = prefs.getInt("audio_quality", 80);
@@ -57,6 +60,8 @@ public class MainActivity extends Activity {
         updateSensitivityLabel(sens);
         updateQualityLabel(q);
         updateLatencyLabel(l);
+        manualLatency.setChecked(prefs.getBoolean("manual_latency", true));
+        manualChunkMs.setEnabled(manualLatency.isChecked());
         autostart.setChecked(prefs.getBoolean("autostart", false));
 
         sensitivity.setOnSeekBarChangeListener(listener((progress) -> {
@@ -71,6 +76,11 @@ public class MainActivity extends Activity {
             updateLatencyLabel(progress);
             getSharedPreferences("settings", MODE_PRIVATE).edit().putInt("audio_latency", progress).apply();
         }));
+
+        manualLatency.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            manualChunkMs.setEnabled(isChecked);
+            getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("manual_latency", isChecked).apply();
+        });
 
         autostart.setOnCheckedChangeListener((buttonView, isChecked) ->
                 getSharedPreferences("settings", MODE_PRIVATE).edit().putBoolean("autostart", isChecked).apply());
@@ -108,7 +118,7 @@ public class MainActivity extends Activity {
     private void updateLatencyLabel(int value) {
         int chunk = RemoteService.chunkMsForLatency(value);
         String label = value >= 75 ? "Muy baja" : value >= 40 ? "Equilibrada" : "Robusta";
-        latencyText.setText("Latencia: " + value + "% · " + label + " · paquetes ~" + chunk + " ms");
+        latencyText.setText("Latencia automática: " + value + "% · " + label + " · paquetes ~" + chunk + " ms");
     }
 
     private void requestOverlayPermission() {
@@ -120,12 +130,17 @@ public class MainActivity extends Activity {
         String ip = serverIp.getText().toString().trim();
         int port; try { port = Integer.parseInt(serverPort.getText().toString().trim()); } catch (Exception e) { port = 8765; }
         int timeout; try { timeout = Math.max(0, Integer.parseInt(timeoutSeconds.getText().toString().trim())); } catch (Exception e) { timeout = 300; }
+        int chunkMs; try { chunkMs = Integer.parseInt(manualChunkMs.getText().toString().trim()); } catch (Exception e) { chunkMs = 45; }
+        chunkMs = Math.max(20, Math.min(120, chunkMs));
+        manualChunkMs.setText(String.valueOf(chunkMs));
         String endings = endPhrases.getText().toString().trim();
         getSharedPreferences("settings", MODE_PRIVATE).edit()
                 .putString("ip", ip).putInt("port", port)
                 .putInt("sensitivity", sensitivity.getProgress())
                 .putInt("audio_quality", quality.getProgress())
                 .putInt("audio_latency", latency.getProgress())
+                .putBoolean("manual_latency", manualLatency.isChecked())
+                .putInt("manual_chunk_ms", chunkMs)
                 .putInt("conversation_timeout", timeout)
                 .putString("end_phrases", endings)
                 .putBoolean("autostart", autostart.isChecked()).apply();
