@@ -112,8 +112,9 @@ public class MainActivity extends Activity {
 
     private void updateSensitivityLabel(int value) { sensitivityText.setText("Sensibilidad wake: " + value + "%"); }
     private void updateQualityLabel(int value) {
-        String label = value >= 75 ? "Alta" : value >= 40 ? "Equilibrada" : "Ligera";
-        qualityText.setText("Calidad / estabilidad: " + value + "% · " + label);
+        int rate = RemoteService.sampleRateForQuality(value);
+        String label = rate == 48000 ? "Alta" : rate == 24000 ? "Media" : "Compatible";
+        qualityText.setText("Calidad: " + value + "% · " + label + " · " + (rate / 1000) + " kHz");
     }
     private void updateLatencyLabel(int value) {
         int chunk = RemoteService.chunkMsForLatency(value);
