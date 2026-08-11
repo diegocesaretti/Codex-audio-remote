@@ -70,14 +70,14 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Más calidad usa mejor resampling y más margen contra jitter. No cambia el PCM original del micrófono." />
+            android:text="Más calidad usa mejor resampling y más margen contra jitter." />
 
         <TextView
             android:id="@+id/latencyText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
-            android:text="Latencia: 55% · Equilibrada · paquetes ~50 ms" />
+            android:text="Latencia automática: 55% · Equilibrada · paquetes ~50 ms" />
 
         <SeekBar
             android:id="@+id/latencySeek"
@@ -86,10 +86,24 @@
             android:max="100"
             android:progress="55" />
 
+        <CheckBox
+            android:id="@+id/manualLatencyCheck"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Usar latencia manual" />
+
+        <EditText
+            android:id="@+id/manualChunkMs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Tamaño de paquete manual en ms"
+            android:inputType="number"
+            android:text="45" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Más a la derecha = menos delay. En dispositivos viejos o Wi‑Fi inestable conviene dejarlo entre 40 y 65%." />
+            android:text="Modo manual recomendado: 45 ms. Rango permitido: 20–120 ms. Si está activo, reemplaza al slider de latencia para el uplink." />
 
         <EditText
             android:id="@+id/timeoutSeconds"
