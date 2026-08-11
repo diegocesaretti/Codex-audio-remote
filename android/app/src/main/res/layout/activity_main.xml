@@ -53,6 +53,44 @@
             android:max="100"
             android:progress="60" />
 
+        <TextView
+            android:id="@+id/qualityText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="Calidad / estabilidad: 80% · Alta" />
+
+        <SeekBar
+            android:id="@+id/qualitySeek"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="80" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Más calidad usa mejor resampling y más margen contra jitter. No cambia el PCM original del micrófono." />
+
+        <TextView
+            android:id="@+id/latencyText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="Latencia: 55% · Equilibrada · paquetes ~50 ms" />
+
+        <SeekBar
+            android:id="@+id/latencySeek"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="55" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Más a la derecha = menos delay. En dispositivos viejos o Wi‑Fi inestable conviene dejarlo entre 40 y 65%." />
+
         <EditText
             android:id="@+id/timeoutSeconds"
             android:layout_width="match_parent"
