@@ -14,19 +14,33 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.SeekBar;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import java.io.ByteArrayOutputStream;
 
 public class MainActivity extends Activity {
     private static final int REQ_AUDIO = 10;
+    private static final String[] AUDIO_SOURCE_LABELS = {
+            "Reconocimiento de voz / asistente",
+            "Comunicación / llamada",
+            "Micrófono normal",
+            "Default Android",
+            "Camcorder"
+    };
+    private static final String[] AUDIO_SOURCE_KEYS = {
+            "voice_recognition", "voice_communication", "mic", "default", "camcorder"
+    };
+
     private EditText serverIp, serverPort, timeoutSeconds, endPhrases, manualChunkMs;
-    private TextView statusText, sensitivityText, qualityText, latencyText;
-    private SeekBar sensitivity, quality, latency;
+    private TextView statusText, sensitivityText, qualityText, latencyText, micGainText;
+    private SeekBar sensitivity, quality, latency, micGain;
+    private Spinner audioSourceSpinner;
     private CheckBox autostart, manualLatency;
     private volatile boolean audioTestRunning;
 
@@ -43,15 +57,22 @@ public class MainActivity extends Activity {
         sensitivityText = findViewById(R.id.sensitivityText);
         qualityText = findViewById(R.id.qualityText);
         latencyText = findViewById(R.id.latencyText);
+        micGainText = findViewById(R.id.micGainText);
         sensitivity = findViewById(R.id.sensitivitySeek);
         quality = findViewById(R.id.qualitySeek);
         latency = findViewById(R.id.latencySeek);
+        micGain = findViewById(R.id.micGainSeek);
+        audioSourceSpinner = findViewById(R.id.audioSourceSpinner);
         manualLatency = findViewById(R.id.manualLatencyCheck);
         autostart = findViewById(R.id.autostartCheck);
         Button connect = findViewById(R.id.connectButton);
         Button wake = findViewById(R.id.wakeButton);
         Button overlay = findViewById(R.id.overlayButton);
         Button audioTest = findViewById(R.id.audioTestButton);
+
+        ArrayAdapter<String> sourceAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, AUDIO_SOURCE_LABELS);
+        sourceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        audioSourceSpinner.setAdapter(sourceAdapter);
 
         SharedPreferences prefs = getSharedPreferences("settings", MODE_PRIVATE);
         serverIp.setText(prefs.getString("ip", "192.168.1.100"));
@@ -63,12 +84,16 @@ public class MainActivity extends Activity {
         int sens = prefs.getInt("sensitivity", 60);
         int q = prefs.getInt("audio_quality", 80);
         int l = prefs.getInt("audio_latency", 55);
+        int gainPct = Math.max(50, Math.min(400, prefs.getInt("mic_gain_pct", 100)));
         sensitivity.setProgress(sens);
         quality.setProgress(q);
         latency.setProgress(l);
+        micGain.setProgress(gainPct - 50);
         updateSensitivityLabel(sens);
         updateQualityLabel(q);
         updateLatencyLabel(l);
+        updateMicGainLabel(gainPct);
+        audioSourceSpinner.setSelection(audioSourcePosition(prefs.getString("audio_source", "voice_recognition")));
         manualLatency.setChecked(prefs.getBoolean("manual_latency", true));
         manualChunkMs.setEnabled(manualLatency.isChecked());
         autostart.setChecked(prefs.getBoolean("autostart", false));
@@ -84,6 +109,11 @@ public class MainActivity extends Activity {
         latency.setOnSeekBarChangeListener(listener((progress) -> {
             updateLatencyLabel(progress);
             getSharedPreferences("settings", MODE_PRIVATE).edit().putInt("audio_latency", progress).apply();
+        }));
+        micGain.setOnSeekBarChangeListener(listener((progress) -> {
+            int pct = progress + 50;
+            updateMicGainLabel(pct);
+            getSharedPreferences("settings", MODE_PRIVATE).edit().putInt("mic_gain_pct", pct).apply();
         }));
 
         manualLatency.setOnCheckedChangeListener((buttonView, isChecked) -> {
@@ -131,6 +161,20 @@ public class MainActivity extends Activity {
         String label = value >= 75 ? "Muy baja" : value >= 40 ? "Equilibrada" : "Robusta";
         latencyText.setText("Latencia automática: " + value + "% · " + label + " · paquetes ~" + chunk + " ms");
     }
+    private void updateMicGainLabel(int pct) {
+        micGainText.setText("Ganancia mic: " + pct + "% · " + String.format(java.util.Locale.US, "%.2f×", pct / 100.0));
+    }
+
+    private static int audioSourcePosition(String key) {
+        if (key != null) for (int i = 0; i < AUDIO_SOURCE_KEYS.length; i++) if (AUDIO_SOURCE_KEYS[i].equals(key)) return i;
+        return 0;
+    }
+
+    private String selectedAudioSourceKey() {
+        int p = audioSourceSpinner.getSelectedItemPosition();
+        if (p < 0 || p >= AUDIO_SOURCE_KEYS.length) p = 0;
+        return AUDIO_SOURCE_KEYS[p];
+    }
 
     private void requestOverlayPermission() {
         if (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this)) { statusText.setText("Overlay habilitado"); return; }
@@ -153,6 +197,10 @@ public class MainActivity extends Activity {
             AudioTrack player = null;
             int requestedRate = RemoteService.sampleRateForQuality(quality.getProgress());
             int usedRate = requestedRate;
+            int gainPct = micGain.getProgress() + 50;
+            String sourceKey = selectedAudioSourceKey();
+            int requestedSource = RemoteService.audioSourceForKey(sourceKey);
+            int usedSource = requestedSource;
             try {
                 int min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                 if (min <= 0) {
@@ -160,27 +208,32 @@ public class MainActivity extends Activity {
                     min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                 }
                 int bufferSize = Math.max(min, usedRate * 2 / 5);
-                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, usedRate,
+                record = new AudioRecord(usedSource, usedRate,
                         AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
-                if (record.getState() != AudioRecord.STATE_INITIALIZED && usedRate != 16000) {
+                if (record.getState() != AudioRecord.STATE_INITIALIZED) {
                     record.release();
-                    usedRate = 16000;
+                    usedSource = MediaRecorder.AudioSource.VOICE_RECOGNITION;
+                    if (usedRate != 16000) usedRate = 16000;
                     min = AudioRecord.getMinBufferSize(usedRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
                     bufferSize = Math.max(min, usedRate * 2 / 5);
-                    record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, usedRate,
+                    record = new AudioRecord(usedSource, usedRate,
                             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufferSize);
                 }
                 if (record.getState() != AudioRecord.STATE_INITIALIZED) throw new IllegalStateException("AudioRecord no inicializa");
 
                 final int finalRate = usedRate;
-                runOnUiThread(() -> statusText.setText("Test local: grabando 5 s a " + (finalRate / 1000) + " kHz… hablá ahora"));
+                final int finalSource = usedSource;
+                runOnUiThread(() -> statusText.setText("Test local: 5 s · " + (finalRate / 1000) + " kHz · " + RemoteService.audioSourceName(finalSource) + " · gain " + gainPct + "%"));
                 ByteArrayOutputStream pcm = new ByteArrayOutputStream(usedRate * 2 * 5);
                 byte[] chunk = new byte[Math.max(1024, usedRate * 2 * 45 / 1000)];
                 record.startRecording();
                 long end = System.currentTimeMillis() + 5000;
                 while (System.currentTimeMillis() < end) {
                     int n = record.read(chunk, 0, chunk.length);
-                    if (n > 0) pcm.write(chunk, 0, n);
+                    if (n > 0) {
+                        RemoteService.applyGainPcm16InPlace(chunk, n, gainPct);
+                        pcm.write(chunk, 0, n);
+                    }
                 }
                 record.stop();
                 byte[] data = pcm.toByteArray();
@@ -197,7 +250,7 @@ public class MainActivity extends Activity {
                     pos += n;
                 }
                 try { Thread.sleep(250); } catch (InterruptedException ignored) { }
-                runOnUiThread(() -> statusText.setText("Test local terminado. Si esto suena limpio, el problema está después de Android."));
+                runOnUiThread(() -> statusText.setText("Test local terminado. Compará modo y ganancia antes de probar Codex."));
             } catch (Exception e) {
                 runOnUiThread(() -> statusText.setText("Test local falló: " + e.getClass().getSimpleName() + " · " + e.getMessage()));
             } finally {
@@ -222,6 +275,8 @@ public class MainActivity extends Activity {
                 .putInt("sensitivity", sensitivity.getProgress())
                 .putInt("audio_quality", quality.getProgress())
                 .putInt("audio_latency", latency.getProgress())
+                .putInt("mic_gain_pct", micGain.getProgress() + 50)
+                .putString("audio_source", selectedAudioSourceKey())
                 .putBoolean("manual_latency", manualLatency.isChecked())
                 .putInt("manual_chunk_ms", chunkMs)
                 .putInt("conversation_timeout", timeout)
