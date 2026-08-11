@@ -30,7 +30,7 @@ public class OverlayController {
 
     public void show(String state) {
         if (!canShow()) {
-            DebugLog.log(context, "Overlay show skipped: Settings.canDrawOverlays=false");
+            AndroidDebugLog.log("Overlay show skipped: Settings.canDrawOverlays=false");
             return;
         }
         if (view == null) {
@@ -51,14 +51,14 @@ public class OverlayController {
                 windowManager.addView(candidate, candidateParams);
                 view = candidate;
                 layoutParams = candidateParams;
-                DebugLog.log(context, "Overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT);
+                AndroidDebugLog.log("Overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT);
             } catch (SecurityException | WindowManager.BadTokenException e) {
-                DebugLog.log(context, "Overlay add denied; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
+                AndroidDebugLog.log("Overlay add denied; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
                 view = null;
                 layoutParams = null;
                 return;
             } catch (RuntimeException e) {
-                DebugLog.log(context, "Overlay add failed; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
+                AndroidDebugLog.log("Overlay add failed; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
                 view = null;
                 layoutParams = null;
                 return;
