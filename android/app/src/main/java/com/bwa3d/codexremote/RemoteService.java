@@ -80,11 +80,13 @@ public class RemoteService extends Service implements RecognitionListener {
         overlay = new OverlayController(this, () -> requestEndSession("overlay_tap"));
         startForeground(NOTIFICATION_ID, notification("Iniciando…"));
         client = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(15, TimeUnit.SECONDS).build();
+        AndroidDebugLog.log("RemoteService created · API=" + Build.VERSION.SDK_INT);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) { startFromSavedSettings(); return START_STICKY; }
         String action = intent.getAction();
+        AndroidDebugLog.log("Service command: " + action);
         if (ACTION_START.equals(action)) {
             SharedPreferences p = prefs();
             serverIp = intent.getStringExtra("ip");
@@ -108,17 +110,28 @@ public class RemoteService extends Service implements RecognitionListener {
         if (socket != null) try { socket.cancel(); } catch (Exception ignored) { }
         connected = false;
         updateNotification("Conectando a " + serverIp + "…");
+        AndroidDebugLog.log("WS connecting ws://" + serverIp + ":" + serverPort + "/ws/");
         socket = client.newWebSocket(new Request.Builder().url("ws://" + serverIp + ":" + serverPort + "/ws/").build(), new WebSocketListener() {
             @Override public void onOpen(WebSocket webSocket, Response response) {
                 connected = true; socket = webSocket;
+                AndroidDebugLog.log("WS open");
                 sendText("{\"type\":\"hello\",\"name\":\"Android satellite\"}");
                 updateNotification(voskModel != null ? "Conectado · hola sol" : "Conectado · preparando wake");
-                startWakeRecognition();
+                handler.post(RemoteService.this::startWakeRecognition);
             }
-            @Override public void onMessage(WebSocket webSocket, String text) { handleServerMessage(text); }
+            @Override public void onMessage(WebSocket webSocket, String text) {
+                AndroidDebugLog.log("WS <- " + text);
+                handler.post(() -> handleServerMessage(text));
+            }
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) { playDownlink(bytes.toByteArray()); }
-            @Override public void onClosed(WebSocket webSocket, int code, String reason) { connected = false; scheduleReconnect(); }
-            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) { connected = false; updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); }
+            @Override public void onClosed(WebSocket webSocket, int code, String reason) {
+                AndroidDebugLog.log("WS closed code=" + code + " reason=" + reason);
+                connected = false; scheduleReconnect();
+            }
+            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                AndroidDebugLog.log("WS failure: " + t);
+                connected = false; updateNotification("Sin conexión · reintentando…"); scheduleReconnect();
+            }
         });
     }
 
@@ -132,6 +145,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private void handleServerMessage(String text) {
         try {
             String type = new JSONObject(text).optString("type", "");
+            AndroidDebugLog.log("Server event: " + type + " · main=" + (Looper.myLooper() == Looper.getMainLooper()));
             switch (type) {
                 case "activating": stopWakeRecognition(); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;
                 case "codex_listening":
@@ -143,7 +157,9 @@ public class RemoteService extends Service implements RecognitionListener {
                 case "audio_error": finishLocalSession(); updateNotification("Codex no respondió"); break;
                 case "downlink_start": startSpeaker(); break;
             }
-        } catch (Exception ignored) { }
+        } catch (Exception e) {
+            AndroidDebugLog.log("Server message error: " + e);
+        }
     }
 
     private void finishLocalSession() {
@@ -162,6 +178,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private void requestEndSession(String reason) {
         if (!streaming.get() || endingSession) return;
         endingSession = true; handler.removeCallbacks(conversationTimeoutRunnable);
+        AndroidDebugLog.log("Request end session: " + reason);
         sendText("{\"type\":\"end_session\",\"reason\":\"" + reason + "\"}");
         overlay.show("Finalizando…"); updateNotification("Finalizando conversación…");
     }
@@ -178,14 +195,18 @@ public class RemoteService extends Service implements RecognitionListener {
                 downloadFile(MODEL_URL, zip);
                 if (modelDir.exists()) deleteRecursive(modelDir);
                 modelDir.mkdirs(); unzipStripRoot(zip, modelDir); loadModel(modelDir);
-            } catch (Exception e) { updateNotification("Wake manual · error descargando modelo"); }
+            } catch (Exception e) { AndroidDebugLog.log("Vosk model download/load error: " + e); updateNotification("Wake manual · error descargando modelo"); }
             finally { modelLoading = false; if (zip.exists()) zip.delete(); }
         }, "VoskModelSetup").start();
     }
 
     private void loadModel(File dir) {
-        try { voskModel = new Model(dir.getAbsolutePath()); updateNotification(connected ? "Conectado · hola sol" : "Wake listo · esperando PC"); startWakeRecognition(); }
-        catch (Exception e) { updateNotification("Wake model inválido"); }
+        try {
+            voskModel = new Model(dir.getAbsolutePath());
+            AndroidDebugLog.log("Vosk model loaded");
+            updateNotification(connected ? "Conectado · hola sol" : "Wake listo · esperando PC");
+            handler.post(this::startWakeRecognition);
+        } catch (Exception e) { AndroidDebugLog.log("Vosk model invalid: " + e); updateNotification("Wake model inválido"); }
     }
 
     private static void downloadFile(String urlString, File out) throws Exception {
@@ -220,13 +241,20 @@ public class RemoteService extends Service implements RecognitionListener {
     private synchronized void startWakeRecognition() {
         if (!connected || voskModel == null || speechService != null || streaming.get()) return;
         try {
+            AndroidDebugLog.log("Wake recognition START · thread=" + Thread.currentThread().getName());
             Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]");
             speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE); speechService.startListening(this);
-        } catch (Exception e) { updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
+        } catch (Exception e) { AndroidDebugLog.log("Wake recognition error: " + e); updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
     }
 
     private synchronized void stopWakeRecognition() {
-        if (speechService != null) { speechService.stop(); speechService.shutdown(); speechService = null; }
+        SpeechService s = speechService;
+        speechService = null;
+        if (s != null) {
+            try { s.stop(); } catch (Exception e) { AndroidDebugLog.log("Wake stop error: " + e); }
+            try { s.shutdown(); } catch (Exception e) { AndroidDebugLog.log("Wake shutdown error: " + e); }
+            AndroidDebugLog.log("Wake recognition STOP");
+        }
     }
 
     private void checkWake(String json) {
@@ -234,6 +262,7 @@ public class RemoteService extends Service implements RecognitionListener {
             JSONObject o = new JSONObject(json);
             String text = normalize(o.optString("text", o.optString("partial", "")));
             if (text.isEmpty()) return;
+            AndroidDebugLog.log("Wake heard: " + text);
             int sensitivity = prefs().getInt("sensitivity", 60);
             boolean match = wakeMatches(text, sensitivity);
             long now = System.currentTimeMillis();
@@ -241,13 +270,21 @@ public class RemoteService extends Service implements RecognitionListener {
                 if (text.equals("hola")) { lastPartial = text; lastPartialMs = now; }
                 else if (text.equals("sol") && lastPartial.equals("hola") && now - lastPartialMs < 1500) match = true;
             }
-            if (match && now - lastWakeMs > 2500) { lastWakeMs = now; triggerWake(); }
-        } catch (Exception ignored) { }
+            if (match && now - lastWakeMs > 2500) { lastWakeMs = now; handler.post(this::triggerWake); }
+        } catch (Exception e) { AndroidDebugLog.log("Wake parse error: " + e); }
     }
 
     private void triggerWake() {
-        if (!connected) { updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); return; }
-        stopWakeRecognition(); sendText("{\"type\":\"wake\"}"); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Hola Sol detectado · activando…");
+        if (!connected || socket == null) {
+            AndroidDebugLog.log("WAKE not sent · disconnected");
+            updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); return;
+        }
+        boolean sent = false;
+        try { sent = socket.send("{\"type\":\"wake\"}"); } catch (Exception e) { AndroidDebugLog.log("WAKE socket exception: " + e); }
+        AndroidDebugLog.log("WAKE send=" + sent + " · thread=" + Thread.currentThread().getName());
+        stopWakeRecognition();
+        overlay.clearTranscript(); overlay.show("Activando…"); updateNotification(sent ? "Hola Sol detectado · activando…" : "Wake no enviado · reconectando…");
+        if (!sent) { connected = false; scheduleReconnect(); }
     }
 
     private static boolean wakeMatches(String text, int sensitivity) {
@@ -369,7 +406,7 @@ public class RemoteService extends Service implements RecognitionListener {
                     AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, bufferBytes));
             if (record.getState() != AudioRecord.STATE_INITIALIZED) { record.release(); return null; }
             return record;
-        } catch (Exception e) { return null; }
+        } catch (Exception e) { AndroidDebugLog.log("AudioRecord create failed rate=" + sampleRate + " source=" + audioSource + " · " + e); return null; }
     }
 
     private void startMicStreaming() {
@@ -387,6 +424,7 @@ public class RemoteService extends Service implements RecognitionListener {
         final boolean nativeNs = prefs().getBoolean("native_ns", false);
         final boolean nativeAgc = prefs().getBoolean("native_agc", false);
         final boolean nativeAec = prefs().getBoolean("native_aec", false);
+        AndroidDebugLog.log("Mic stream requested rate=" + requestedRate + " source=" + requestedSource + " chunk=" + chunkMs);
 
         audioThread = new Thread(() -> {
             AudioRecord record = null;
@@ -429,17 +467,22 @@ public class RemoteService extends Service implements RecognitionListener {
 
                 byte[] buffer = new byte[finalChunkBytes];
                 record.startRecording();
+                AndroidDebugLog.log("Mic stream START rate=" + finalRate + " source=" + finalSource + " chunkBytes=" + finalChunkBytes);
+                long sentBytes = 0;
                 while (streaming.get()) {
                     int read = record.read(buffer, 0, buffer.length);
                     if (read > 0 && socket != null) {
                         applyGainPcm16InPlace(buffer, read, gainPct);
                         enhancer.processInPlace(buffer, read);
-                        socket.send(ByteString.of(buffer, 0, read));
+                        boolean sent = socket.send(ByteString.of(buffer, 0, read));
+                        if (!sent) AndroidDebugLog.log("Mic binary send=false");
+                        sentBytes += read;
                         overlay.setLevel(rmsPcm16(buffer, read));
                         offerPhraseAudio(buffer, read);
                     }
                 }
-            } catch (Exception e) { updateNotification("Audio error: " + e.getClass().getSimpleName()); }
+                AndroidDebugLog.log("Mic stream STOP bytes=" + sentBytes);
+            } catch (Exception e) { AndroidDebugLog.log("Mic stream error: " + e); updateNotification("Audio error: " + e.getClass().getSimpleName()); }
             finally {
                 if (effects != null) effects.close();
                 if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
@@ -510,7 +553,13 @@ public class RemoteService extends Service implements RecognitionListener {
         return (float)Math.min(1.0, Math.sqrt(sum / Math.max(1,n)) * 5.0);
     }
 
-    private void sendText(String text) { if (socket != null && connected) socket.send(text); }
+    private boolean sendText(String text) {
+        boolean ok = false;
+        try { if (socket != null && connected) ok = socket.send(text); }
+        catch (Exception e) { AndroidDebugLog.log("WS text send exception: " + e); }
+        AndroidDebugLog.log("WS -> " + text + " · sent=" + ok);
+        return ok;
+    }
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
@@ -531,8 +580,8 @@ public class RemoteService extends Service implements RecognitionListener {
     @Override public void onPartialResult(String hypothesis) { checkWake(hypothesis); }
     @Override public void onResult(String hypothesis) { checkWake(hypothesis); }
     @Override public void onFinalResult(String hypothesis) { checkWake(hypothesis); }
-    @Override public void onError(Exception exception) { updateNotification("Vosk error"); }
-    @Override public void onTimeout() { startWakeRecognition(); }
+    @Override public void onError(Exception exception) { AndroidDebugLog.log("Vosk callback error: " + exception); updateNotification("Vosk error"); }
+    @Override public void onTimeout() { handler.post(this::startWakeRecognition); }
 
     @Override public void onDestroy() {
         destroyed = true; handler.removeCallbacksAndMessages(null);
@@ -540,6 +589,7 @@ public class RemoteService extends Service implements RecognitionListener {
         if (socket != null) socket.close(1000, "service stopped");
         if (client != null) client.dispatcher().executorService().shutdown();
         if (voskModel != null) voskModel.close();
+        AndroidDebugLog.log("RemoteService destroyed");
         super.onDestroy();
     }
 
