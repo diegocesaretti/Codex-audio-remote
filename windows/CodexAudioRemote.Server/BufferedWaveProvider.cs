@@ -1,18 +1,24 @@
 using NAudio.Wave;
 using System.Buffers.Binary;
+using System.IO;
 
 // Transparent wrapper around NAudio's BufferedWaveProvider.
-// It records exactly the PCM received from Android for diagnostics, but does not
-// interfere with NAudio reads. Playout prebuffering is handled by AudioCableSink.
+// It records exactly the PCM received from Android and only stages the first ~200 ms
+// before releasing it to NAudio. Reads remain completely untouched.
 sealed class BufferedWaveProvider : IWaveProvider
 {
     readonly NAudio.Wave.BufferedWaveProvider inner;
     readonly DiagnosticWavRecorder recorder;
+    readonly object writeGate = new();
+    readonly MemoryStream startupBuffer = new();
+    readonly int prebufferBytes;
+    bool released;
 
     public BufferedWaveProvider(WaveFormat waveFormat)
     {
         inner = new NAudio.Wave.BufferedWaveProvider(waveFormat);
         recorder = new DiagnosticWavRecorder(waveFormat);
+        prebufferBytes = Math.Max(waveFormat.BlockAlign, waveFormat.AverageBytesPerSecond * 200 / 1000);
     }
 
     public WaveFormat WaveFormat => inner.WaveFormat;
@@ -40,8 +46,24 @@ sealed class BufferedWaveProvider : IWaveProvider
 
     public void AddSamples(byte[] buffer, int offset, int count)
     {
-        inner.AddSamples(buffer, offset, count);
         recorder.Write(buffer, offset, count);
+        lock (writeGate)
+        {
+            if (released)
+            {
+                inner.AddSamples(buffer, offset, count);
+                return;
+            }
+
+            startupBuffer.Write(buffer, offset, count);
+            if (startupBuffer.Length < prebufferBytes) return;
+
+            var staged = startupBuffer.ToArray();
+            startupBuffer.SetLength(0);
+            released = true;
+            inner.AddSamples(staged, 0, staged.Length);
+            Console.WriteLine($"Audio startup prebuffer RELEASED · {staged.Length * 1000.0 / WaveFormat.AverageBytesPerSecond:F0} ms queued");
+        }
     }
 
     public int Read(byte[] buffer, int offset, int count) => inner.Read(buffer, offset, count);
