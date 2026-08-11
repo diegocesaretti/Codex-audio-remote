@@ -17,7 +17,7 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) => switcher.RestoreNow();
 
 Console.WriteLine($"Codex Audio Remote server listening on ws://0.0.0.0:{options.Port}/ws/");
 Console.WriteLine($"Virtual microphone: '{options.VirtualMicName}' | cable playback: '{options.VirtualCableInputName}'");
-Console.WriteLine("Downlink: Windows WASAPI loopback -> Android speaker (PCM16 mono 16kHz)");
+Console.WriteLine("Low-latency mode: 20 ms uplink chunks, 20 ms WASAPI output, 100 ms Codex-state polling");
 
 using var listener = new HttpListener();
 listener.Prefixes.Add($"http://+:{options.Port}/ws/");
@@ -42,8 +42,15 @@ while (true)
 
             using var cts = new CancellationTokenSource();
             var registryTask = WatchCodexMic(socket, sendGate, switcher, cts.Token);
-            var buffer = new byte[64 * 1024];
+            var buffer = new byte[16 * 1024];
             long audioBytes = 0;
+
+            async Task StopAudioSession(bool notify = true)
+            {
+                audioSink?.Dispose(); audioSink = null;
+                downlink?.Dispose(); downlink = null;
+                if (notify) await SendJson(socket, sendGate, new { type = "downlink_stop" });
+            }
 
             while (socket.State == WebSocketState.Open)
             {
@@ -54,14 +61,13 @@ while (true)
                 {
                     audioBytes += result.Count;
                     audioSink?.Write(buffer, 0, result.Count);
-                    if (audioBytes % 32000 < result.Count)
-                        Console.WriteLine($"Audio uplink injected: {audioBytes / 32000.0:F1}s");
+                    if (audioBytes % 32000 < result.Count) Console.WriteLine($"Audio uplink injected: {audioBytes / 32000.0:F1}s");
                     continue;
                 }
 
                 var text = Encoding.UTF8.GetString(buffer, 0, result.Count);
                 using var doc = JsonDocument.Parse(text);
-                var type = doc.RootElement.GetProperty("type").GetString();
+                var type = doc.RootElement.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : null;
                 Console.WriteLine($"<- {text}");
 
                 switch (type)
@@ -74,41 +80,50 @@ while (true)
                             break;
                         }
                         switcher.BeginActivation();
-                        await Task.Delay(150);
+                        await Task.Delay(75);
                         ShortcutSender.Send(options.Shortcut);
                         _ = ConfirmActivation(socket, sendGate, switcher, options.ActivationTimeoutMs);
                         break;
 
                     case "audio_start":
                         audioBytes = 0;
-                        audioSink?.Dispose();
+                        await StopAudioSession(false);
                         audioSink = AudioCableSink.TryCreate(options.VirtualCableInputName);
                         if (audioSink is null)
                         {
                             await SendJson(socket, sendGate, new { type = "audio_error", reason = "cable_input_not_found" });
                             break;
                         }
-                        downlink?.Dispose();
-                        downlink = new LoopbackDownlink(async pcm =>
-                        {
-                            await SendBinary(socket, sendGate, pcm);
-                        });
+                        downlink = new LoopbackDownlink(async pcm => await SendBinary(socket, sendGate, pcm));
                         await SendJson(socket, sendGate, new { type = "downlink_start", sampleRate = 16000, channels = 1 });
                         downlink.Start();
                         Console.WriteLine("Bidirectional audio session started");
                         break;
 
                     case "audio_stop":
-                        audioSink?.Dispose(); audioSink = null;
-                        downlink?.Dispose(); downlink = null;
-                        await SendJson(socket, sendGate, new { type = "downlink_stop" });
+                        await StopAudioSession();
                         Console.WriteLine("Bidirectional audio session stopped");
+                        break;
+
+                    case "end_session":
+                        var reason = doc.RootElement.TryGetProperty("reason", out var reasonProp) ? reasonProp.GetString() : "client";
+                        Console.WriteLine($"Ending conversation ({reason})");
+                        await SendJson(socket, sendGate, new { type = "session_ending", reason });
+                        await StopAudioSession();
+                        if (CodexMicDetector.IsActive())
+                        {
+                            ShortcutSender.Send(options.Shortcut);
+                            _ = ForceRestoreAfterEnd(switcher, options.EndSessionRestoreTimeoutMs);
+                        }
+                        else
+                        {
+                            switcher.ScheduleRestore(force: true);
+                        }
                         break;
                 }
             }
 
-            audioSink?.Dispose();
-            downlink?.Dispose();
+            await StopAudioSession(false);
             cts.Cancel();
             try { await registryTask; } catch (OperationCanceledException) { }
             switcher.ScheduleRestore(force: true);
@@ -118,13 +133,23 @@ while (true)
         }
         catch (Exception ex)
         {
-            audioSink?.Dispose();
-            downlink?.Dispose();
+            audioSink?.Dispose(); downlink?.Dispose();
             Console.WriteLine($"Client error: {ex.Message}");
             switcher.ScheduleRestore(force: true);
         }
         finally { sendGate.Dispose(); }
     });
+}
+
+async Task ForceRestoreAfterEnd(AudioDeviceSwitcher audioSwitcher, int timeoutMs)
+{
+    var started = Environment.TickCount64;
+    while (Environment.TickCount64 - started < timeoutMs)
+    {
+        if (!CodexMicDetector.IsActive()) { audioSwitcher.ScheduleRestore(force: true); return; }
+        await Task.Delay(50);
+    }
+    audioSwitcher.ScheduleRestore(force: true);
 }
 
 async Task ConfirmActivation(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitcher audioSwitcher, int timeoutMs)
@@ -133,7 +158,7 @@ async Task ConfirmActivation(WebSocket socket, SemaphoreSlim gate, AudioDeviceSw
     while (Environment.TickCount64 - started < timeoutMs && socket.State == WebSocketState.Open)
     {
         if (CodexMicDetector.IsActive()) { audioSwitcher.MarkListening(); return; }
-        await Task.Delay(100);
+        await Task.Delay(50);
     }
     if (socket.State == WebSocketState.Open && !CodexMicDetector.IsActive())
     {
@@ -165,7 +190,7 @@ async Task WatchCodexMic(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitch
                 if (audioSwitcher.State == AudioSessionState.Listening) audioSwitcher.ScheduleRestore();
             }
         }
-        await Task.Delay(250, token);
+        await Task.Delay(100, token);
     }
 }
 
@@ -175,6 +200,7 @@ static async Task SendJson(WebSocket socket, SemaphoreSlim gate, object payload)
     var bytes = JsonSerializer.SerializeToUtf8Bytes(payload);
     await gate.WaitAsync();
     try { if (socket.State == WebSocketState.Open) await socket.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None); }
+    catch { }
     finally { gate.Release(); }
 }
 
@@ -187,12 +213,12 @@ static async Task SendBinary(WebSocket socket, SemaphoreSlim gate, byte[] bytes)
     finally { gate.Release(); }
 }
 
-sealed record Options(int Port, string Shortcut, int ActivationTimeoutMs, string VirtualMicName, string VirtualCableInputName, int RestoreDelayMs, bool ListDevices)
+sealed record Options(int Port, string Shortcut, int ActivationTimeoutMs, string VirtualMicName, string VirtualCableInputName, int RestoreDelayMs, int EndSessionRestoreTimeoutMs, bool ListDevices)
 {
     public static Options Parse(string[] args)
     {
         var port = 8765; var shortcut = "ctrl+q"; var timeout = 6000;
-        var virtualMic = "CABLE Output"; var virtualCableInput = "CABLE Input"; var restoreDelay = 800;
+        var virtualMic = "CABLE Output"; var virtualCableInput = "CABLE Input"; var restoreDelay = 400; var endRestoreTimeout = 2500;
         var listDevices = args.Contains("--list-devices", StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < args.Length; i++)
         {
@@ -205,9 +231,10 @@ sealed record Options(int Port, string Shortcut, int ActivationTimeoutMs, string
                 case "--virtual-mic": virtualMic = args[++i]; break;
                 case "--cable-input": virtualCableInput = args[++i]; break;
                 case "--restore-delay": int.TryParse(args[++i], out restoreDelay); break;
+                case "--end-restore-timeout": int.TryParse(args[++i], out endRestoreTimeout); break;
             }
         }
-        return new(port, shortcut, timeout, virtualMic, virtualCableInput, restoreDelay, listDevices);
+        return new(port, shortcut, timeout, virtualMic, virtualCableInput, restoreDelay, endRestoreTimeout, listDevices);
     }
 }
 
@@ -242,10 +269,15 @@ sealed class AudioCableSink : IDisposable
     AudioCableSink(MMDevice device)
     {
         this.device = device;
-        source = new BufferedWaveProvider(new WaveFormat(16000, 16, 1)) { BufferDuration = TimeSpan.FromSeconds(2), DiscardOnBufferOverflow = true, ReadFully = true };
+        source = new BufferedWaveProvider(new WaveFormat(16000, 16, 1))
+        {
+            BufferDuration = TimeSpan.FromMilliseconds(300),
+            DiscardOnBufferOverflow = true,
+            ReadFully = true
+        };
         var target = device.AudioClient.MixFormat;
-        resampler = new MediaFoundationResampler(source, target) { ResamplerQuality = 60 };
-        output = new WasapiOut(device, AudioClientShareMode.Shared, true, 50);
+        resampler = new MediaFoundationResampler(source, target) { ResamplerQuality = 40 };
+        output = new WasapiOut(device, AudioClientShareMode.Shared, true, 20);
         output.Init(resampler); output.Play();
         Console.WriteLine($"Injecting Android audio into: {device.FriendlyName} ({target.SampleRate} Hz, {target.Channels} ch)");
     }
