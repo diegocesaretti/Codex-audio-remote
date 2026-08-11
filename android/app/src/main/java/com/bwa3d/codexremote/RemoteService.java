@@ -11,7 +11,6 @@ import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
 import android.media.MediaRecorder;
-import android.media.audiofx.AcousticEchoCanceler;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -79,36 +78,26 @@ public class RemoteService extends Service implements RecognitionListener {
         createChannel();
         overlay = new OverlayController(this);
         startForeground(NOTIFICATION_ID, notification("Iniciando…"));
-        client = new OkHttpClient.Builder()
-                .readTimeout(0, TimeUnit.MILLISECONDS)
-                .pingInterval(15, TimeUnit.SECONDS)
-                .build();
+        client = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(15, TimeUnit.SECONDS).build();
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) {
-            startFromSavedSettings();
-            return START_STICKY;
-        }
+        if (intent == null) { startFromSavedSettings(); return START_STICKY; }
         String action = intent.getAction();
         if (ACTION_START.equals(action)) {
             SharedPreferences p = prefs();
             serverIp = intent.getStringExtra("ip");
             serverPort = intent.getIntExtra("port", 8765);
             if (serverIp == null || serverIp.trim().isEmpty()) serverIp = p.getString("ip", "192.168.1.100");
-            connect();
-            initVosk();
-        } else if (ACTION_WAKE.equals(action)) {
-            triggerWake();
-        }
+            connect(); initVosk();
+        } else if (ACTION_WAKE.equals(action)) triggerWake();
         return START_STICKY;
     }
 
     private void startFromSavedSettings() {
         serverIp = prefs().getString("ip", "192.168.1.100");
         serverPort = prefs().getInt("port", 8765);
-        connect();
-        initVosk();
+        connect(); initVosk();
     }
 
     private SharedPreferences prefs() { return getSharedPreferences("settings", MODE_PRIVATE); }
@@ -120,8 +109,7 @@ public class RemoteService extends Service implements RecognitionListener {
         updateNotification("Conectando a " + serverIp + "…");
         socket = client.newWebSocket(new Request.Builder().url("ws://" + serverIp + ":" + serverPort + "/ws/").build(), new WebSocketListener() {
             @Override public void onOpen(WebSocket webSocket, Response response) {
-                connected = true;
-                socket = webSocket;
+                connected = true; socket = webSocket;
                 sendText("{\"type\":\"hello\",\"name\":\"Android satellite\"}");
                 updateNotification(voskModel != null ? "Conectado · hola sol" : "Conectado · preparando wake");
                 startWakeRecognition();
@@ -129,11 +117,7 @@ public class RemoteService extends Service implements RecognitionListener {
             @Override public void onMessage(WebSocket webSocket, String text) { handleServerMessage(text); }
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) { playDownlink(bytes.toByteArray()); }
             @Override public void onClosed(WebSocket webSocket, int code, String reason) { connected = false; scheduleReconnect(); }
-            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-                connected = false;
-                updateNotification("Sin conexión · reintentando…");
-                scheduleReconnect();
-            }
+            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) { connected = false; updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); }
         });
     }
 
@@ -142,40 +126,20 @@ public class RemoteService extends Service implements RecognitionListener {
         handler.removeCallbacks(reconnectRunnable);
         handler.postDelayed(reconnectRunnable, 2500);
     }
-
     private final Runnable reconnectRunnable = () -> { if (!destroyed && !connected) connect(); };
 
     private void handleServerMessage(String text) {
         try {
             String type = new JSONObject(text).optString("type", "");
             switch (type) {
-                case "activating":
-                    stopWakeRecognition();
-                    overlay.show("Activando…");
-                    updateNotification("Activando Codex…");
-                    break;
+                case "activating": stopWakeRecognition(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;
                 case "codex_listening":
-                    endingSession = false;
-                    stopWakeRecognition();
-                    startSpeaker();
-                    startMicStreaming();
-                    armConversationTimeout();
-                    overlay.show("Escuchando");
-                    updateNotification("Codex escuchando");
-                    break;
-                case "session_ending":
-                    endingSession = true;
-                    overlay.show("Finalizando…");
-                    updateNotification("Finalizando conversación…");
-                    break;
-                case "codex_idle":
-                    finishLocalSession();
-                    break;
+                    endingSession = false; stopWakeRecognition(); startSpeaker(); startMicStreaming(); armConversationTimeout();
+                    overlay.show("Escuchando"); updateNotification("Codex escuchando"); break;
+                case "session_ending": endingSession = true; overlay.show("Finalizando…"); updateNotification("Finalizando conversación…"); break;
+                case "codex_idle": finishLocalSession(); break;
                 case "activation_failed":
-                case "audio_error":
-                    finishLocalSession();
-                    updateNotification("Codex no respondió");
-                    break;
+                case "audio_error": finishLocalSession(); updateNotification("Codex no respondió"); break;
                 case "downlink_start": startSpeaker(); break;
                 case "downlink_stop": break;
             }
@@ -184,11 +148,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private void finishLocalSession() {
         handler.removeCallbacks(conversationTimeoutRunnable);
-        endingSession = false;
-        stopMicStreaming();
-        stopSpeaker();
-        overlay.hide();
-        startWakeRecognition();
+        endingSession = false; stopMicStreaming(); stopSpeaker(); overlay.hide(); startWakeRecognition();
         updateNotification("Conectado · hola sol");
     }
 
@@ -197,16 +157,13 @@ public class RemoteService extends Service implements RecognitionListener {
         int seconds = prefs().getInt("conversation_timeout", 300);
         if (seconds > 0) handler.postDelayed(conversationTimeoutRunnable, seconds * 1000L);
     }
-
     private final Runnable conversationTimeoutRunnable = () -> requestEndSession("timeout");
 
     private void requestEndSession(String reason) {
         if (!streaming.get() || endingSession) return;
-        endingSession = true;
-        handler.removeCallbacks(conversationTimeoutRunnable);
+        endingSession = true; handler.removeCallbacks(conversationTimeoutRunnable);
         sendText("{\"type\":\"end_session\",\"reason\":\"" + reason + "\"}");
-        overlay.show("Finalizando…");
-        updateNotification("Finalizando conversación…");
+        overlay.show("Finalizando…"); updateNotification("Finalizando conversación…");
     }
 
     private void initVosk() {
@@ -220,24 +177,15 @@ public class RemoteService extends Service implements RecognitionListener {
                 updateNotification("Descargando wake model (~39 MB)…");
                 downloadFile(MODEL_URL, zip);
                 if (modelDir.exists()) deleteRecursive(modelDir);
-                modelDir.mkdirs();
-                unzipStripRoot(zip, modelDir);
-                loadModel(modelDir);
-            } catch (Exception e) {
-                updateNotification("Wake manual · error descargando modelo");
-            } finally {
-                modelLoading = false;
-                if (zip.exists()) zip.delete();
-            }
+                modelDir.mkdirs(); unzipStripRoot(zip, modelDir); loadModel(modelDir);
+            } catch (Exception e) { updateNotification("Wake manual · error descargando modelo"); }
+            finally { modelLoading = false; if (zip.exists()) zip.delete(); }
         }, "VoskModelSetup").start();
     }
 
     private void loadModel(File dir) {
-        try {
-            voskModel = new Model(dir.getAbsolutePath());
-            updateNotification(connected ? "Conectado · hola sol" : "Wake listo · esperando PC");
-            startWakeRecognition();
-        } catch (Exception e) { updateNotification("Wake model inválido"); }
+        try { voskModel = new Model(dir.getAbsolutePath()); updateNotification(connected ? "Conectado · hola sol" : "Wake listo · esperando PC"); startWakeRecognition(); }
+        catch (Exception e) { updateNotification("Wake model inválido"); }
     }
 
     private static void downloadFile(String urlString, File out) throws Exception {
@@ -272,17 +220,13 @@ public class RemoteService extends Service implements RecognitionListener {
     private synchronized void startWakeRecognition() {
         if (!connected || voskModel == null || speechService != null || streaming.get()) return;
         try {
-            Recognizer recognizer = new Recognizer(voskModel, SAMPLE_RATE,
-                    "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]");
-            speechService = new SpeechService(recognizer, SAMPLE_RATE);
-            speechService.startListening(this);
+            Recognizer recognizer = new Recognizer(voskModel, SAMPLE_RATE, "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]");
+            speechService = new SpeechService(recognizer, SAMPLE_RATE); speechService.startListening(this);
         } catch (Exception e) { updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
     }
 
     private synchronized void stopWakeRecognition() {
-        if (speechService != null) {
-            speechService.stop(); speechService.shutdown(); speechService = null;
-        }
+        if (speechService != null) { speechService.stop(); speechService.shutdown(); speechService = null; }
     }
 
     private void checkWake(String json) {
@@ -303,10 +247,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private void triggerWake() {
         if (!connected) { updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); return; }
-        stopWakeRecognition();
-        sendText("{\"type\":\"wake\"}");
-        overlay.show("Activando…");
-        updateNotification("Hola Sol detectado · activando…");
+        stopWakeRecognition(); sendText("{\"type\":\"wake\"}"); overlay.show("Activando…"); updateNotification("Hola Sol detectado · activando…");
     }
 
     private static boolean wakeMatches(String text, int sensitivity) {
@@ -320,37 +261,26 @@ public class RemoteService extends Service implements RecognitionListener {
     private List<String> endPhrases() {
         String raw = prefs().getString("end_phrases", "gracias sol,chau sol,adiós sol,listo sol");
         List<String> out = new ArrayList<>();
-        if (raw != null) for (String s : raw.split(",")) {
-            String n = normalize(s);
-            if (!n.isEmpty() && !out.contains(n)) out.add(n);
-        }
+        if (raw != null) for (String s : raw.split(",")) { String n = normalize(s); if (!n.isEmpty() && !out.contains(n)) out.add(n); }
         return out;
     }
 
     private String endGrammar(List<String> phrases) {
         StringBuilder b = new StringBuilder("[");
-        for (int i = 0; i < phrases.size(); i++) {
-            if (i > 0) b.append(',');
-            b.append('"').append(phrases.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
-        }
-        if (!phrases.isEmpty()) b.append(',');
-        b.append("\"[unk]\"]");
-        return b.toString();
+        for (int i = 0; i < phrases.size(); i++) { if (i > 0) b.append(','); b.append('"').append(phrases.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"'); }
+        if (!phrases.isEmpty()) b.append(','); b.append("\"[unk]\"]"); return b.toString();
     }
 
     private boolean isEndPhrase(String json, List<String> phrases) {
         try {
-            JSONObject o = new JSONObject(json);
-            String text = normalize(o.optString("text", o.optString("partial", "")));
+            JSONObject o = new JSONObject(json); String text = normalize(o.optString("text", o.optString("partial", "")));
             if (text.isEmpty()) return false;
             for (String phrase : phrases) if (text.equals(phrase) || text.endsWith(" " + phrase)) return true;
         } catch (Exception ignored) { }
         return false;
     }
 
-    private static String normalize(String s) {
-        return s.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " ");
-    }
+    private static String normalize(String s) { return s.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " "); }
 
     private static int levenshtein(String a, String b) {
         int[] prev = new int[b.length()+1]; for (int j=0;j<=b.length();j++) prev[j]=j;
@@ -364,7 +294,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     public static int chunkMsForLatency(int latency) {
         latency = Math.max(0, Math.min(100, latency));
-        int raw = 20 + ((100 - latency) * 60 / 100); // 20..80 ms
+        int raw = 20 + ((100 - latency) * 60 / 100);
         return Math.max(20, Math.min(80, ((raw + 5) / 10) * 10));
     }
 
@@ -384,24 +314,16 @@ public class RemoteService extends Service implements RecognitionListener {
                     String result = finalChunk ? recognizer.getResult() : recognizer.getPartialResult();
                     if (!endingSession && isEndPhrase(result, phrases)) requestEndSession("phrase");
                 }
-            } catch (Exception ignored) {
-            } finally {
-                if (recognizer != null) recognizer.close();
-                phraseQueue.clear();
-                phraseThread = null;
-            }
+            } catch (Exception ignored) { }
+            finally { if (recognizer != null) recognizer.close(); phraseQueue.clear(); phraseThread = null; }
         }, "EndPhraseVosk");
-        phraseThread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
-        phraseThread.start();
+        phraseThread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1)); phraseThread.start();
     }
 
     private void offerPhraseAudio(byte[] buffer, int read) {
         if (phraseThread == null || !phraseThread.isAlive() || endingSession) return;
         byte[] copy = Arrays.copyOf(buffer, read);
-        if (!phraseQueue.offer(copy)) {
-            phraseQueue.poll();
-            phraseQueue.offer(copy);
-        }
+        if (!phraseQueue.offer(copy)) { phraseQueue.poll(); phraseQueue.offer(copy); }
     }
 
     private void startMicStreaming() {
@@ -410,7 +332,7 @@ public class RemoteService extends Service implements RecognitionListener {
         final int latency = prefs().getInt("audio_latency", 55);
         final int chunkMs = chunkMsForLatency(latency);
         final int chunkBytes = SAMPLE_RATE * 2 * chunkMs / 1000;
-        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + "}");
+        sendText("{\"type\":\"audio_start\",\"sampleRate\":16000,\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"capture\":\"voice_recognition\"}");
         startPhraseDetector();
 
         audioThread = new Thread(() -> {
@@ -418,14 +340,12 @@ public class RemoteService extends Service implements RecognitionListener {
             int safetyChunks = quality >= 75 ? 6 : quality >= 40 ? 5 : 4;
             int recordBuffer = Math.max(min, chunkBytes * safetyChunks);
             AudioRecord record = null;
-            AcousticEchoCanceler aec = null;
             try {
-                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE,
+                // VOICE_RECOGNITION is intentionally used instead of VOICE_COMMUNICATION.
+                // On many Android devices VOICE_COMMUNICATION enables aggressive telephony DSP/AEC/NS
+                // which is good for calls but can harm downstream speech recognition quality.
+                record = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, SAMPLE_RATE,
                         AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, recordBuffer);
-                if (AcousticEchoCanceler.isAvailable()) {
-                    aec = AcousticEchoCanceler.create(record.getAudioSessionId());
-                    if (aec != null) aec.setEnabled(true);
-                }
                 byte[] buffer = new byte[chunkBytes];
                 record.startRecording();
                 while (streaming.get()) {
@@ -436,21 +356,15 @@ public class RemoteService extends Service implements RecognitionListener {
                         offerPhraseAudio(buffer, read);
                     }
                 }
-            } catch (Exception e) {
-                updateNotification("Audio error: " + e.getClass().getSimpleName());
-            } finally {
-                if (aec != null) aec.release();
-                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
-            }
+            } catch (Exception e) { updateNotification("Audio error: " + e.getClass().getSimpleName()); }
+            finally { if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); } }
         }, "MicUplink");
-        audioThread.setPriority(Thread.MAX_PRIORITY);
-        audioThread.start();
+        audioThread.setPriority(Thread.MAX_PRIORITY); audioThread.start();
     }
 
     private void stopMicStreaming() {
         if (!streaming.compareAndSet(true, false)) return;
-        phraseQueue.clear();
-        sendText("{\"type\":\"audio_stop\"}");
+        phraseQueue.clear(); sendText("{\"type\":\"audio_stop\"}");
     }
 
     private synchronized void startSpeaker() {
@@ -461,8 +375,7 @@ public class RemoteService extends Service implements RecognitionListener {
         if (latency >= 80) buffer = Math.max(min, 2048);
         else if (latency >= 45) buffer = Math.max(min * 2, 4096);
         else buffer = Math.max(min * 3, 6144);
-        speaker = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
+        speaker = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
         speaker.play();
     }
 
@@ -470,10 +383,8 @@ public class RemoteService extends Service implements RecognitionListener {
         if (speaker == null) startSpeaker();
         if (speaker == null || pcm.length == 0) return;
         speaker.write(pcm, 0, pcm.length);
-        overlay.show("Sol hablando");
-        overlay.setLevel(rmsPcm16(pcm, pcm.length));
-        handler.removeCallbacks(backToListening);
-        handler.postDelayed(backToListening, 180);
+        overlay.show("Sol hablando"); overlay.setLevel(rmsPcm16(pcm, pcm.length));
+        handler.removeCallbacks(backToListening); handler.postDelayed(backToListening, 180);
     }
 
     private final Runnable backToListening = () -> { if (streaming.get() && !endingSession) overlay.show("Escuchando"); };
@@ -487,9 +398,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private static float rmsPcm16(byte[] data, int count) {
         if (count < 2) return 0.05f;
         double sum = 0; int n = 0;
-        for (int i=0;i+1<count;i+=2) {
-            int v = (short)((data[i] & 0xff) | (data[i+1] << 8)); double x = v / 32768.0; sum += x*x; n++;
-        }
+        for (int i=0;i+1<count;i+=2) { int v = (short)((data[i] & 0xff) | (data[i+1] << 8)); double x = v / 32768.0; sum += x*x; n++; }
         return (float)Math.min(1.0, Math.sqrt(sum / Math.max(1,n)) * 5.0);
     }
 
@@ -518,8 +427,7 @@ public class RemoteService extends Service implements RecognitionListener {
     @Override public void onTimeout() { startWakeRecognition(); }
 
     @Override public void onDestroy() {
-        destroyed = true;
-        handler.removeCallbacksAndMessages(null);
+        destroyed = true; handler.removeCallbacksAndMessages(null);
         stopMicStreaming(); stopWakeRecognition(); stopSpeaker(); overlay.hide();
         if (socket != null) socket.close(1000, "service stopped");
         if (client != null) client.dispatcher().executorService().shutdown();
