@@ -51,8 +51,10 @@ public class RemoteService extends Service implements RecognitionListener {
     private static final String CHANNEL_ID = "codex_remote";
     private static final String MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
     private static final int WAKE_SAMPLE_RATE = 16000;
+    private static final String WAKE_GRAMMAR = "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]";
 
     private final AtomicBoolean streaming = new AtomicBoolean(false);
+    private final AtomicBoolean legacyWakeRunning = new AtomicBoolean(false);
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ArrayBlockingQueue<byte[]> phraseQueue = new ArrayBlockingQueue<>(24);
     private OkHttpClient client;
@@ -61,6 +63,8 @@ public class RemoteService extends Service implements RecognitionListener {
     private Model voskModel;
     private Thread audioThread;
     private Thread phraseThread;
+    private Thread legacyWakeThread;
+    private AudioRecord legacyWakeRecord;
     private AudioTrack speaker;
     private OverlayController overlay;
     private ResponseTranscriber responseTranscriber;
@@ -73,6 +77,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private long lastWakeMs;
     private String lastPartial = "";
     private long lastPartialMs;
+    private String lastWakeLogged = "";
 
     @Override public void onCreate() {
         super.onCreate();
@@ -239,21 +244,80 @@ public class RemoteService extends Service implements RecognitionListener {
     }
 
     private synchronized void startWakeRecognition() {
-        if (!connected || voskModel == null || speechService != null || streaming.get()) return;
+        if (!connected || voskModel == null || streaming.get()) return;
+        if (Build.VERSION.SDK_INT <= 23) {
+            startLegacyWakeRecognition();
+            return;
+        }
+        if (speechService != null) return;
         try {
-            AndroidDebugLog.log("Wake recognition START · thread=" + Thread.currentThread().getName());
-            Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, "[\"hola sol\",\"ola sol\",\"hola so\",\"hola\",\"sol\",\"[unk]\"]");
+            AndroidDebugLog.log("Wake SpeechService START · thread=" + Thread.currentThread().getName());
+            Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, WAKE_GRAMMAR);
             speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE); speechService.startListening(this);
         } catch (Exception e) { AndroidDebugLog.log("Wake recognition error: " + e); updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
     }
 
+    private synchronized void startLegacyWakeRecognition() {
+        if (legacyWakeRunning.get() || streaming.get() || !connected || voskModel == null) return;
+        legacyWakeRunning.set(true);
+        legacyWakeThread = new Thread(() -> {
+            AudioRecord record = null;
+            Recognizer recognizer = null;
+            try {
+                int min = AudioRecord.getMinBufferSize(WAKE_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                int bufferBytes = Math.max(min > 0 ? min * 2 : 4096, 4096);
+                record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, MediaRecorder.AudioSource.VOICE_RECOGNITION);
+                int source = MediaRecorder.AudioSource.VOICE_RECOGNITION;
+                if (record == null) {
+                    source = MediaRecorder.AudioSource.MIC;
+                    record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, source);
+                }
+                if (record == null) throw new IllegalStateException("No AudioRecord for legacy wake");
+                legacyWakeRecord = record;
+                recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, WAKE_GRAMMAR);
+                byte[] buffer = new byte[4096];
+                record.startRecording();
+                AndroidDebugLog.log("Legacy wake START · source=" + source + " · buffer=" + bufferBytes);
+                updateNotification("Conectado · hola sol · wake API23");
+                while (legacyWakeRunning.get() && connected && !streaming.get() && !destroyed) {
+                    int read = record.read(buffer, 0, buffer.length);
+                    if (read <= 0) continue;
+                    boolean finalResult = recognizer.acceptWaveForm(buffer, read);
+                    String json = finalResult ? recognizer.getResult() : recognizer.getPartialResult();
+                    checkWake(json);
+                }
+            } catch (Exception e) {
+                AndroidDebugLog.log("Legacy wake error: " + e);
+                updateNotification("Wake API23 error: " + e.getClass().getSimpleName());
+            } finally {
+                if (record != null) {
+                    try { record.stop(); } catch (Exception ignored) { }
+                    try { record.release(); } catch (Exception ignored) { }
+                }
+                legacyWakeRecord = null;
+                if (recognizer != null) try { recognizer.close(); } catch (Exception ignored) { }
+                legacyWakeRunning.set(false);
+                legacyWakeThread = null;
+                AndroidDebugLog.log("Legacy wake STOP");
+            }
+        }, "LegacyWakeVosk");
+        legacyWakeThread.setPriority(Thread.NORM_PRIORITY + 1);
+        legacyWakeThread.start();
+    }
+
     private synchronized void stopWakeRecognition() {
+        if (legacyWakeRunning.getAndSet(false)) {
+            AudioRecord r = legacyWakeRecord;
+            if (r != null) try { r.stop(); } catch (Exception ignored) { }
+            Thread t = legacyWakeThread;
+            if (t != null) t.interrupt();
+        }
         SpeechService s = speechService;
         speechService = null;
         if (s != null) {
             try { s.stop(); } catch (Exception e) { AndroidDebugLog.log("Wake stop error: " + e); }
             try { s.shutdown(); } catch (Exception e) { AndroidDebugLog.log("Wake shutdown error: " + e); }
-            AndroidDebugLog.log("Wake recognition STOP");
+            AndroidDebugLog.log("Wake SpeechService STOP");
         }
     }
 
@@ -262,7 +326,10 @@ public class RemoteService extends Service implements RecognitionListener {
             JSONObject o = new JSONObject(json);
             String text = normalize(o.optString("text", o.optString("partial", "")));
             if (text.isEmpty()) return;
-            AndroidDebugLog.log("Wake heard: " + text);
+            if (!text.equals(lastWakeLogged)) {
+                lastWakeLogged = text;
+                AndroidDebugLog.log("Wake heard: " + text);
+            }
             int sensitivity = prefs().getInt("sensitivity", 60);
             boolean match = wakeMatches(text, sensitivity);
             long now = System.currentTimeMillis();
