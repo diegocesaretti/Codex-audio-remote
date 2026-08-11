@@ -58,7 +58,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="14dp"
-            android:text="Calidad / estabilidad: 80% · Alta" />
+            android:text="Calidad: 80% · Alta · 48 kHz" />
 
         <SeekBar
             android:id="@+id/qualitySeek"
@@ -70,7 +70,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Más calidad usa mejor resampling y más margen contra jitter." />
+            android:text="Calidad controla el sample rate: 16 / 24 / 48 kHz. 48 kHz cae automáticamente a 16 kHz si el dispositivo no lo soporta." />
 
         <TextView
             android:id="@+id/latencyText"
@@ -104,6 +104,18 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Modo manual recomendado: 45 ms. Rango permitido: 20–120 ms. Si está activo, reemplaza al slider de latencia para el uplink." />
+
+        <Button
+            android:id="@+id/audioTestButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Test mic local · grabar 5 s y escuchar" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Este test usa la misma captura VOICE_RECOGNITION y el mismo sample rate, pero no usa Wi‑Fi, Windows ni VB-CABLE. Sirve para aislar problemas de calidad del micrófono." />
 
         <EditText
             android:id="@+id/timeoutSeconds"
