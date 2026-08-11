@@ -27,8 +27,19 @@ android {
     }
 }
 
+configurations.all {
+    resolutionStrategy {
+        // JNA 5.18.x contains Java-generated synthetic lambda classes in Structure
+        // that fail during static initialization on this API 23 Sony ROM.
+        // Vosk only needs the stable native/JNA API, so pin the older Android-safe line.
+        force 'net.java.dev.jna:jna:5.13.0'
+    }
+}
+
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:3.12.13'
-    implementation 'net.java.dev.jna:jna:5.18.1@aar'
-    implementation 'com.alphacephei:vosk-android:0.3.75@aar'
+    implementation 'net.java.dev.jna:jna:5.13.0@aar'
+    implementation('com.alphacephei:vosk-android:0.3.75@aar') {
+        exclude group: 'net.java.dev.jna', module: 'jna'
+    }
 }
