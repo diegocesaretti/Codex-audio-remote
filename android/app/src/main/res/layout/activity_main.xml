@@ -10,12 +10,22 @@
         android:padding="24dp">
 
         <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Codex Audio Remote" android:textSize="24sp" android:textStyle="bold" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Wake local: “hola sol”" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Wake local configurable con Vosk" />
 
         <EditText android:id="@+id/serverIp" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="18dp" android:hint="IP de la PC" android:inputType="textUri" android:text="192.168.1.100" />
         <EditText android:id="@+id/serverPort" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Puerto" android:inputType="number" android:text="8765" />
 
-        <TextView android:id="@+id/sensitivityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Sensibilidad wake: 60%" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Wake word" />
+        <com.bwa3d.codexremote.WakeWordEditText
+            android:id="@+id/wakeWord"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Ej.: hola sol"
+            android:inputType="text"
+            android:maxLines="1" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Se guarda automáticamente y el detector local se recarga al cambiarla." />
+
+        <TextView android:id="@+id/sensitivityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:text="Sensibilidad wake: 60%" />
         <SeekBar android:id="@+id/sensitivitySeek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" android:progress="60" />
 
         <TextView android:id="@+id/qualityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Calidad: 80% · Alta · 48 kHz" />
@@ -50,22 +60,41 @@
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="El test usa sample rate, fuente, ganancia, Voice Enhancer y efectos Android seleccionados, sin Wi‑Fi, Windows ni VB-CABLE." />
 
         <EditText android:id="@+id/timeoutSeconds" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:hint="Timeout conversación en segundos (0 = sin límite)" android:inputType="number" android:text="300" />
-        <EditText android:id="@+id/endPhrases" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="Frases de finalización separadas por coma" android:inputType="textCapSentences" android:maxLines="3" android:text="gracias sol, chau sol, adiós sol, listo sol" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Las frases se reconocen localmente durante la conversación y cierran Voice sin esperar el timeout." />
+        <com.bwa3d.codexremote.PersistentEndPhrasesEditText
+            android:id="@+id/endPhrases"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:hint="Frases de finalización separadas por coma"
+            android:inputType="textCapSentences"
+            android:maxLines="3" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Las frases se guardan mientras las editás y se reconocen localmente durante la conversación." />
 
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="Overlay" android:textStyle="bold" />
         <com.bwa3d.codexremote.PreferenceCheckBox
             android:id="@+id/transcriptCheck"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="4dp"
             android:text="Mostrar transcripción local de la respuesta de Sol" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Opcional: usa el mismo modelo local de Vosk sobre el audio de respuesta. Consume algo más de CPU y no requiere nube." />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="La transcripción se actualiza dentro del popup sin relanzarlo." />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Tamaño del overlay (80–170%)" />
+        <com.bwa3d.codexremote.OverlaySizeSeekBar
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Color del overlay" />
+        <com.bwa3d.codexremote.OverlayColorSpinner
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Los cambios de tamaño/color se aplican en la próxima conversación para mantener el popup estable durante la charla." />
 
         <com.bwa3d.codexremote.StartOnOpenCheckBox
             android:id="@+id/startOnOpenCheck"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_marginTop="12dp"
             android:text="Iniciar servicio al abrir la app" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Si está activado, al abrir Codex Audio Remote inicia el satélite automáticamente usando la IP y puerto guardados." />
 
@@ -75,6 +104,6 @@
         <Button android:id="@+id/wakeButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Probar wake" />
 
         <TextView android:id="@+id/statusText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp" android:text="Inactivo" android:textSize="17sp" />
-        <TextView android:id="@+id/helpText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:text="La primera vez descarga el modelo español de Vosk (~39 MB). Luego wake, frases de finalización y transcripción opcional funcionan localmente, incluso con Home Assistant en primer plano." />
+        <TextView android:id="@+id/helpText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:text="Wake, frases de finalización y transcripción opcional funcionan localmente con el modelo Vosk incluido." />
     </LinearLayout>
 </ScrollView>
