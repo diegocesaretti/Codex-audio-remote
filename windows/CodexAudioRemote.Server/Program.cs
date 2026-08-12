@@ -401,7 +401,7 @@ sealed class AudioDeviceSwitcher
                 {
                     if (!string.IsNullOrWhiteSpace(saved.Console)) { PolicyConfig.SetDefaultEndpoint(saved.Console, PolicyRole.Console); restored = true; }
                     if (!string.IsNullOrWhiteSpace(saved.Multimedia)) { PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Multimedia); restored = true; }
-                    if (!string.IsNullOrWhiteSpace(saved.Communications)) { PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Communications); restored = true; }
+                    if (!string.IsNullOrWhiteSpace(saved.Communications)) { PolicyConfig.SetDefaultEndpoint(saved.Communications, PolicyRole.Communications); restored = true; }
                 }
             }
             catch (Exception ex) { Console.WriteLine($"Restore warning: {ex.Message}"); }
