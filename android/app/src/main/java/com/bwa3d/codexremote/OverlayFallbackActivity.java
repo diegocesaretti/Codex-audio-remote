@@ -11,10 +11,19 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.widget.TextView;
 
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+
 public class OverlayFallbackActivity extends Activity {
     public static final String EXTRA_STATE = "state";
     public static final String STATE_HIDE = "__hide__";
     private TextView label;
+    private boolean ending;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -43,18 +52,7 @@ public class OverlayFallbackActivity extends Activity {
         setContentView(label);
         updateState(getIntent());
 
-        label.setOnClickListener(view -> {
-            AndroidDebugLog.log("Fallback overlay tapped · restarting service to end session");
-            Intent service = new Intent(this, RemoteService.class);
-            stopService(service);
-            SharedPreferences p = getSharedPreferences("settings", MODE_PRIVATE);
-            Intent restart = new Intent(this, RemoteService.class);
-            restart.setAction(RemoteService.ACTION_START);
-            restart.putExtra("ip", p.getString("ip", "192.168.1.100"));
-            restart.putExtra("port", p.getInt("port", 8765));
-            startService(restart);
-            finish();
-        });
+        label.setOnClickListener(view -> endSessionDirectly());
         AndroidDebugLog.log("Fallback overlay activity shown");
     }
 
@@ -71,6 +69,42 @@ public class OverlayFallbackActivity extends Activity {
             return;
         }
         if (state == null || state.trim().isEmpty()) state = "Escuchando";
-        if (label != null) label.setText(state + " · tocar para finalizar");
+        if (label != null && !ending) label.setText(state + " · tocar para finalizar");
+    }
+
+    private void endSessionDirectly() {
+        if (ending) return;
+        ending = true;
+        if (label != null) label.setText("Finalizando…");
+        AndroidDebugLog.log("Fallback overlay tapped · direct end_session requested");
+
+        SharedPreferences p = getSharedPreferences("settings", MODE_PRIVATE);
+        String ip = p.getString("ip", "192.168.1.100");
+        int port = p.getInt("port", 8765);
+        OkHttpClient client = new OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .readTimeout(2, TimeUnit.SECONDS)
+                .writeTimeout(2, TimeUnit.SECONDS)
+                .build();
+        Request request = new Request.Builder().url("ws://" + ip + ":" + port + "/ws/").build();
+        client.newWebSocket(request, new WebSocketListener() {
+            @Override public void onOpen(WebSocket webSocket, Response response) {
+                AndroidDebugLog.log("Fallback end socket open");
+                webSocket.send("{\"type\":\"end_session\",\"reason\":\"overlay_tap\"}");
+                webSocket.close(1000, "overlay end sent");
+                runOnUiThread(() -> finish());
+                client.dispatcher().executorService().shutdown();
+            }
+
+            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                AndroidDebugLog.log("Fallback direct end failed: " + t);
+                // Keep the existing RemoteService alive; do not kill/restart it.
+                ending = false;
+                runOnUiThread(() -> {
+                    if (label != null) label.setText("No se pudo finalizar · tocar otra vez");
+                });
+                client.dispatcher().executorService().shutdown();
+            }
+        });
     }
 }
