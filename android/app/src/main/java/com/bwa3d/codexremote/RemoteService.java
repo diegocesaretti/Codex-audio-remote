@@ -417,7 +417,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private boolean isEndPhrase(String json, List<String> phrases) {
         try {
-            JSONObject o = new JSONObject(json); String text = normalize(o.optString("text", o.optString("partial", "")));
+            JSONObject o = new JSONObject(json); String text = normalize(o.optString("text", ""));
             if (text.isEmpty()) return false;
             for (String phrase : phrases) if (text.equals(phrase) || text.endsWith(" " + phrase)) return true;
         } catch (Exception ignored) { }
@@ -490,10 +490,14 @@ public class RemoteService extends Service implements RecognitionListener {
                     byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
                     if (chunk == null) continue;
                     boolean finalChunk = recognizer.acceptWaveForm(chunk, chunk.length);
-                    String result = finalChunk ? recognizer.getResult() : recognizer.getPartialResult();
-                    if (!endingSession && isEndPhrase(result, phrases)) requestEndSession("phrase");
+                    if (!finalChunk) continue;
+                    String result = recognizer.getResult();
+                    if (!endingSession && isEndPhrase(result, phrases)) {
+                        AndroidDebugLog.log("End phrase CONFIRMED · result=" + result);
+                        requestEndSession("phrase");
+                    }
                 }
-            } catch (Exception ignored) { }
+            } catch (Exception e) { AndroidDebugLog.log("End phrase detector error: " + e); }
             finally { if (recognizer != null) recognizer.close(); phraseQueue.clear(); phraseThread = null; }
         }, "EndPhraseVosk");
         phraseThread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1)); phraseThread.start();
@@ -607,7 +611,6 @@ public class RemoteService extends Service implements RecognitionListener {
         int latency = prefs().getInt("audio_latency", 55);
         int prebufferMs;
         if (Build.VERSION.SDK_INT <= 23) {
-            // Old AudioTrack/Wi-Fi stacks are much more bursty. Favor continuity over latency.
             prebufferMs = latency >= 80 ? 260 : latency >= 45 ? 320 : 400;
         } else {
             prebufferMs = latency >= 80 ? 100 : latency >= 45 ? 170 : 260;
