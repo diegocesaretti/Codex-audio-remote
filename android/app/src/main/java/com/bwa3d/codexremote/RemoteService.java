@@ -17,7 +17,9 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.vosk.Model;
 import org.vosk.Recognizer;
@@ -386,12 +388,34 @@ public class RemoteService extends Service implements RecognitionListener {
             AndroidDebugLog.log("WAKE not sent · disconnected");
             updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); return;
         }
+        wakeScreenIfEnabled();
         boolean sent = false;
         try { sent = socket.send("{\"type\":\"wake\"}"); } catch (Exception e) { AndroidDebugLog.log("WAKE socket exception: " + e); }
         AndroidDebugLog.log("WAKE send=" + sent + " · thread=" + Thread.currentThread().getName());
         stopWakeRecognition();
         overlay.clearTranscript(); overlay.show("Activando…"); updateNotification(sent ? "Wake detectado · activando…" : "Wake no enviado · reconectando…");
         if (!sent) { connected = false; scheduleReconnect(); }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void wakeScreenIfEnabled() {
+        if (!prefs().getBoolean("wake_screen_on", true)) return;
+        try {
+            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
+            if (pm == null) return;
+            boolean interactive = Build.VERSION.SDK_INT >= 20 ? pm.isInteractive() : pm.isScreenOn();
+            if (interactive) {
+                AndroidDebugLog.log("Wake screen skipped · already interactive");
+                return;
+            }
+            int flags = PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE;
+            PowerManager.WakeLock lock = pm.newWakeLock(flags, "codexremote:wake-screen");
+            lock.setReferenceCounted(false);
+            lock.acquire(3000);
+            AndroidDebugLog.log("Wake screen requested · 3000ms");
+        } catch (Exception e) {
+            AndroidDebugLog.log("Wake screen error: " + e);
+        }
     }
 
     private static boolean wakeMatches(String text, int sensitivity, String target) {
@@ -415,13 +439,45 @@ public class RemoteService extends Service implements RecognitionListener {
         if (!phrases.isEmpty()) b.append(','); b.append("\"[unk]\"]"); return b.toString();
     }
 
-    private boolean isEndPhrase(String json, List<String> phrases) {
+    public static double endPhraseMinConfidence(int sensitivity) {
+        sensitivity = Math.max(0, Math.min(100, sensitivity));
+        return 0.99 - (0.44 * sensitivity / 100.0);
+    }
+
+    private String matchedEndPhrase(String json, List<String> phrases, int sensitivity) {
         try {
-            JSONObject o = new JSONObject(json); String text = normalize(o.optString("text", ""));
-            if (text.isEmpty()) return false;
-            for (String phrase : phrases) if (text.equals(phrase) || text.endsWith(" " + phrase)) return true;
-        } catch (Exception ignored) { }
-        return false;
+            JSONObject o = new JSONObject(json);
+            String text = normalize(o.optString("text", ""));
+            if (text.isEmpty()) return null;
+
+            String matched = null;
+            for (String phrase : phrases) {
+                if (text.equals(phrase) || text.endsWith(" " + phrase)) {
+                    matched = phrase;
+                    break;
+                }
+            }
+            if (matched == null) return null;
+
+            JSONArray words = o.optJSONArray("result");
+            double sum = 0.0;
+            int count = 0;
+            if (words != null) {
+                for (int i = 0; i < words.length(); i++) {
+                    JSONObject w = words.optJSONObject(i);
+                    if (w == null || !w.has("conf")) continue;
+                    sum += w.optDouble("conf", 0.0);
+                    count++;
+                }
+            }
+            double confidence = count > 0 ? sum / count : 0.0;
+            double required = endPhraseMinConfidence(sensitivity);
+            AndroidDebugLog.log("End phrase candidate · phrase=" + matched + " · confidence=" + String.format(Locale.US, "%.3f", confidence) + " · required=" + String.format(Locale.US, "%.3f", required) + " · sensitivity=" + sensitivity);
+            return confidence >= required ? matched : null;
+        } catch (Exception e) {
+            AndroidDebugLog.log("End phrase parse error: " + e);
+            return null;
+        }
     }
 
     private static String normalize(String s) { return s == null ? "" : s.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " "); }
@@ -481,19 +537,23 @@ public class RemoteService extends Service implements RecognitionListener {
         if (voskModel == null || (phraseThread != null && phraseThread.isAlive())) return;
         final List<String> phrases = endPhrases();
         if (phrases.isEmpty()) return;
+        final int sensitivity = Math.max(0, Math.min(100, prefs().getInt("end_sensitivity", 30)));
         phraseQueue.clear();
         phraseThread = new Thread(() -> {
             Recognizer recognizer = null;
             try {
                 recognizer = new Recognizer(voskModel, sourceRate, endGrammar(phrases));
+                recognizer.setWords(true);
+                AndroidDebugLog.log("End phrase detector START · sensitivity=" + sensitivity + " · minConfidence=" + String.format(Locale.US, "%.3f", endPhraseMinConfidence(sensitivity)));
                 while (streaming.get() || !phraseQueue.isEmpty()) {
                     byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
                     if (chunk == null) continue;
                     boolean finalChunk = recognizer.acceptWaveForm(chunk, chunk.length);
                     if (!finalChunk) continue;
                     String result = recognizer.getResult();
-                    if (!endingSession && isEndPhrase(result, phrases)) {
-                        AndroidDebugLog.log("End phrase CONFIRMED · result=" + result);
+                    String matched = endingSession ? null : matchedEndPhrase(result, phrases, sensitivity);
+                    if (matched != null) {
+                        AndroidDebugLog.log("End phrase CONFIRMED · phrase=" + matched + " · result=" + result);
                         requestEndSession("phrase");
                     }
                 }
