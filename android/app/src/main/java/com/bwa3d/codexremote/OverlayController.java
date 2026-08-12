@@ -22,6 +22,8 @@ public class OverlayController {
     private OverlayView view;
     private WindowManager.LayoutParams layoutParams;
     private boolean activityFallback;
+    private String lastFallbackState = null;
+    private long lastFallbackRequestMs = 0L;
 
     public OverlayController(Context context, Runnable tapAction) {
         this.context = context.getApplicationContext();
@@ -101,12 +103,33 @@ public class OverlayController {
     }
 
     private void showFallbackActivity(String state) {
+        String normalized = state == null ? "" : state.trim();
+        long now = android.os.SystemClock.elapsedRealtime();
+
+        // Audio/downlink callbacks may request the same visual state many times per second.
+        // Starting/reordering an Activity for every chunk makes old API 23 devices unstable.
+        if (normalized.equals(lastFallbackState)) return;
+
+        // Extra guard against rapid state chatter while Codex flips between adjacent events.
+        if (now - lastFallbackRequestMs < 120L && lastFallbackState != null) {
+            final String pending = normalized;
+            mainHandler.postDelayed(() -> {
+                if (!pending.equals(lastFallbackState)) showFallbackActivity(pending);
+            }, 120L);
+            return;
+        }
+
         try {
             Intent i = new Intent(context, OverlayFallbackActivity.class);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-            i.putExtra(OverlayFallbackActivity.EXTRA_STATE, state);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                    | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+            i.putExtra(OverlayFallbackActivity.EXTRA_STATE, normalized);
             context.startActivity(i);
-            AndroidDebugLog.log("Fallback overlay activity requested · state=" + state);
+            lastFallbackState = normalized;
+            lastFallbackRequestMs = now;
+            AndroidDebugLog.log("Fallback overlay state -> " + normalized);
         } catch (Exception e) {
             AndroidDebugLog.log("Fallback overlay activity failed: " + e);
         }
@@ -151,11 +174,16 @@ public class OverlayController {
         if (activityFallback) {
             try {
                 Intent i = new Intent(context, OverlayFallbackActivity.class);
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                        | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                        | Intent.FLAG_ACTIVITY_NO_ANIMATION);
                 i.putExtra(OverlayFallbackActivity.EXTRA_STATE, OverlayFallbackActivity.STATE_HIDE);
                 context.startActivity(i);
             } catch (Exception ignored) { }
         }
+        lastFallbackState = null;
+        lastFallbackRequestMs = 0L;
     }
 
     private int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
