@@ -191,26 +191,55 @@ async Task ConfirmActivation(WebSocket socket, SemaphoreSlim gate, AudioDeviceSw
 
 async Task WatchCodexMic(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitcher audioSwitcher, CancellationToken token)
 {
-    bool? last = null;
+    const int IdleConfirmMs = 1200;
+    bool? announcedActive = null;
+    long idleSince = 0;
+
     while (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
     {
         var active = CodexMicDetector.IsActive();
-        if (active != last)
+        var now = Environment.TickCount64;
+
+        if (active)
         {
-            last = active;
-            if (active)
+            if (idleSince != 0)
             {
+                Console.WriteLine($"Codex transient idle ignored after {now - idleSince} ms");
+                idleSince = 0;
+            }
+            if (announcedActive != true)
+            {
+                announcedActive = true;
                 audioSwitcher.MarkListening();
                 await SendJson(socket, gate, new { type = "codex_listening" });
                 Console.WriteLine("Codex microphone ACTIVE");
             }
-            else
+        }
+        else
+        {
+            if (announcedActive == true)
             {
-                await SendJson(socket, gate, new { type = "codex_idle" });
-                Console.WriteLine("Codex microphone idle");
-                if (audioSwitcher.State == AudioSessionState.Listening) audioSwitcher.ScheduleRestore();
+                if (idleSince == 0)
+                {
+                    idleSince = now;
+                    Console.WriteLine($"Codex microphone looks idle; confirming for {IdleConfirmMs} ms...");
+                }
+                else if (now - idleSince >= IdleConfirmMs)
+                {
+                    announcedActive = false;
+                    idleSince = 0;
+                    await SendJson(socket, gate, new { type = "codex_idle" });
+                    Console.WriteLine("Codex microphone idle CONFIRMED");
+                    if (audioSwitcher.State == AudioSessionState.Listening) audioSwitcher.ScheduleRestore();
+                }
+            }
+            else if (announcedActive is null)
+            {
+                announcedActive = false;
+                Console.WriteLine("Codex microphone initially idle");
             }
         }
+
         await Task.Delay(100, token);
     }
 }
@@ -372,7 +401,7 @@ sealed class AudioDeviceSwitcher
                 {
                     if (!string.IsNullOrWhiteSpace(saved.Console)) { PolicyConfig.SetDefaultEndpoint(saved.Console, PolicyRole.Console); restored = true; }
                     if (!string.IsNullOrWhiteSpace(saved.Multimedia)) { PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Multimedia); restored = true; }
-                    if (!string.IsNullOrWhiteSpace(saved.Communications)) { PolicyConfig.SetDefaultEndpoint(saved.Communications, PolicyRole.Communications); restored = true; }
+                    if (!string.IsNullOrWhiteSpace(saved.Communications)) { PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Communications); restored = true; }
                 }
             }
             catch (Exception ex) { Console.WriteLine($"Restore warning: {ex.Message}"); }
