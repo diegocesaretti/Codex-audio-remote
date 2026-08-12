@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Build;
@@ -48,6 +49,7 @@ import okio.ByteString;
 public class RemoteService extends Service implements RecognitionListener {
     public static final String ACTION_START = "com.bwa3d.codexremote.START";
     public static final String ACTION_WAKE = "com.bwa3d.codexremote.WAKE";
+    public static final String ACTION_WAKE_WORD_CHANGED = "com.bwa3d.codexremote.WAKE_WORD_CHANGED";
     private static final int NOTIFICATION_ID = 42;
     private static final String CHANNEL_ID = "codex_remote";
     private static final String MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
@@ -82,12 +84,9 @@ public class RemoteService extends Service implements RecognitionListener {
 
     private final BroadcastReceiver wakeWordReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
-            if (intent == null || !WakeWordEditText.ACTION_WAKE_WORD_CHANGED.equals(intent.getAction())) return;
             AndroidDebugLog.log("Wake word changed -> " + wakeWord());
-            if (!streaming.get()) {
-                stopWakeRecognition();
-                handler.postDelayed(RemoteService.this::startWakeRecognition, 180);
-            }
+            stopWakeRecognition();
+            handler.postDelayed(RemoteService.this::startWakeRecognition, 180);
         }
     };
 
@@ -97,14 +96,10 @@ public class RemoteService extends Service implements RecognitionListener {
         overlay = new OverlayController(this, () -> requestEndSession("overlay_tap"));
         startForeground(NOTIFICATION_ID, notification("Iniciando…"));
         client = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(15, TimeUnit.SECONDS).build();
-        try {
-            IntentFilter filter = new IntentFilter(WakeWordEditText.ACTION_WAKE_WORD_CHANGED);
-            if (Build.VERSION.SDK_INT >= 33) registerReceiver(wakeWordReceiver, filter, RECEIVER_NOT_EXPORTED);
-            else registerReceiver(wakeWordReceiver, filter);
-            wakeReceiverRegistered = true;
-        } catch (Exception e) {
-            AndroidDebugLog.log("Wake config receiver error: " + e);
-        }
+        IntentFilter filter = new IntentFilter(ACTION_WAKE_WORD_CHANGED);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(wakeWordReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        else registerReceiver(wakeWordReceiver, filter);
+        wakeReceiverRegistered = true;
         AndroidDebugLog.log("RemoteService created · API=" + Build.VERSION.SDK_INT);
     }
 
@@ -131,24 +126,26 @@ public class RemoteService extends Service implements RecognitionListener {
     private SharedPreferences prefs() { return getSharedPreferences("settings", MODE_PRIVATE); }
 
     private String wakeWord() {
-        String value = prefs().getString("wake_word", "hola sol");
-        value = normalize(value == null ? "hola sol" : value);
-        return value.isEmpty() ? "hola sol" : value;
+        String w = normalize(prefs().getString("wake_word", "hola sol"));
+        return w.isEmpty() ? "hola sol" : w;
     }
 
     private String wakeGrammar() {
-        String wake = wakeWord();
-        List<String> values = new ArrayList<>();
-        values.add(wake);
-        for (String part : wake.split(" ")) if (!part.isEmpty() && !values.contains(part)) values.add(part);
-        StringBuilder b = new StringBuilder("[");
-        for (int i = 0; i < values.size(); i++) {
-            if (i > 0) b.append(',');
-            b.append('"').append(values.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        String word = wakeWord();
+        List<String> variants = new ArrayList<>();
+        variants.add(word);
+        String[] parts = word.split(" ");
+        if (parts.length == 2) {
+            variants.add(parts[0]);
+            variants.add(parts[1]);
         }
-        if (!values.isEmpty()) b.append(',');
-        b.append("\"[unk]\"]");
-        return b.toString();
+        variants.add("[unk]");
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < variants.size(); i++) {
+            if (i > 0) b.append(',');
+            b.append('"').append(variants.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        return b.append(']').toString();
     }
 
     private synchronized void connect() {
@@ -197,7 +194,7 @@ public class RemoteService extends Service implements RecognitionListener {
                 case "codex_listening":
                     endingSession = false; stopWakeRecognition(); stopResponseTranscriber(); startSpeaker(); startMicStreaming(); armConversationTimeout();
                     overlay.show("Escuchando"); updateNotification("Codex escuchando"); break;
-                case "session_ending": endingSession = true; updateNotification("Finalizando conversación…"); break;
+                case "session_ending": endingSession = true; overlay.show("Finalizando…"); updateNotification("Finalizando conversación…"); break;
                 case "codex_idle": finishLocalSession(); break;
                 case "activation_failed":
                 case "audio_error": finishLocalSession(); updateNotification("Codex no respondió"); break;
@@ -226,7 +223,7 @@ public class RemoteService extends Service implements RecognitionListener {
         endingSession = true; handler.removeCallbacks(conversationTimeoutRunnable);
         AndroidDebugLog.log("Request end session: " + reason);
         sendText("{\"type\":\"end_session\",\"reason\":\"" + reason + "\"}");
-        updateNotification("Finalizando conversación…");
+        overlay.show("Finalizando…"); updateNotification("Finalizando conversación…");
     }
 
     private void initVosk() {
@@ -292,9 +289,8 @@ public class RemoteService extends Service implements RecognitionListener {
         }
         if (speechService != null) return;
         try {
-            String grammar = wakeGrammar();
-            AndroidDebugLog.log("Wake SpeechService START · word=" + wakeWord() + " · grammar=" + grammar);
-            Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, grammar);
+            AndroidDebugLog.log("Wake SpeechService START · thread=" + Thread.currentThread().getName());
+            Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
             speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE); speechService.startListening(this);
         } catch (Exception e) { AndroidDebugLog.log("Wake recognition error: " + e); updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
     }
@@ -316,8 +312,7 @@ public class RemoteService extends Service implements RecognitionListener {
                 }
                 if (record == null) throw new IllegalStateException("No AudioRecord for legacy wake");
                 legacyWakeRecord = record;
-                String grammar = wakeGrammar();
-                recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, grammar);
+                recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
                 byte[] buffer = new byte[4096];
                 record.startRecording();
                 AndroidDebugLog.log("Legacy wake START · word=" + wakeWord() + " · source=" + source + " · buffer=" + bufferBytes);
@@ -610,7 +605,13 @@ public class RemoteService extends Service implements RecognitionListener {
     private synchronized void startSpeaker() {
         if (speaker != null) return;
         int latency = prefs().getInt("audio_latency", 55);
-        int prebufferMs = latency >= 80 ? 100 : latency >= 45 ? 170 : 260;
+        int prebufferMs;
+        if (Build.VERSION.SDK_INT <= 23) {
+            // Old AudioTrack/Wi-Fi stacks are much more bursty. Favor continuity over latency.
+            prebufferMs = latency >= 80 ? 260 : latency >= 45 ? 320 : 400;
+        } else {
+            prebufferMs = latency >= 80 ? 100 : latency >= 45 ? 170 : 260;
+        }
         speaker = new DownlinkPlayer(prebufferMs, pcm -> {
             if (prefs().getBoolean("show_transcript", false)) {
                 ensureResponseTranscriber();
@@ -618,7 +619,7 @@ public class RemoteService extends Service implements RecognitionListener {
                 if (t != null) t.accept(pcm);
             }
         });
-        AndroidDebugLog.log("Downlink jitter configured · prebuffer=" + prebufferMs + "ms");
+        AndroidDebugLog.log("Downlink jitter configured · prebuffer=" + prebufferMs + "ms · API=" + Build.VERSION.SDK_INT);
     }
 
     private synchronized void ensureResponseTranscriber() {
