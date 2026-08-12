@@ -5,7 +5,7 @@ using System.Diagnostics;
 
 sealed class LoopbackDownlink : IDisposable
 {
-    const int PacketBytes = 640;          // 20 ms @ PCM16 mono 16 kHz
+    const int PacketBytes = 640;          // exactly 20 ms @ PCM16 mono 16 kHz
     const int PacketMs = 20;
     const int PrebufferPackets = 8;       // ~160 ms jitter cushion
     const int MaxQueuedPackets = 75;      // 1.5 s hard ceiling
@@ -15,8 +15,10 @@ sealed class LoopbackDownlink : IDisposable
     readonly ConcurrentQueue<byte[]> sendQueue = new();
     readonly SemaphoreSlim queueSignal = new(0);
     readonly CancellationTokenSource sendCts = new();
+    readonly byte[] packetAssembly = new byte[PacketBytes];
     Task? senderTask;
     double sourcePosition;
+    int packetAssemblyCount;
     bool disposed;
     long capturedPackets;
     long sentPackets;
@@ -35,7 +37,7 @@ sealed class LoopbackDownlink : IDisposable
     public void Start()
     {
         Console.WriteLine($"PC audio downlink capture: {capture.WaveFormat.SampleRate} Hz, {capture.WaveFormat.Channels} ch, {capture.WaveFormat.Encoding}");
-        Console.WriteLine($"Downlink jitter buffer: {PrebufferPackets * PacketMs} ms prebuffer, fixed {PacketMs} ms pacing");
+        Console.WriteLine($"Downlink jitter buffer: {PrebufferPackets * PacketMs} ms prebuffer, fixed {PacketMs} ms pacing, complete packets only");
         senderTask = Task.Run(() => SenderLoop(sendCts.Token));
         capture.StartRecording();
     }
@@ -56,15 +58,29 @@ sealed class LoopbackDownlink : IDisposable
 
             var pcm = ConvertToMono16k(e.Buffer, e.BytesRecorded, capture.WaveFormat);
             if (pcm.Length == 0) return;
-            for (int offset = 0; offset < pcm.Length; offset += PacketBytes)
+            AppendPcm(pcm);
+        }
+        catch (Exception ex) { Console.WriteLine($"Downlink conversion error: {ex.Message}"); }
+    }
+
+    void AppendPcm(byte[] pcm)
+    {
+        int offset = 0;
+        while (offset < pcm.Length)
+        {
+            int copy = Math.Min(PacketBytes - packetAssemblyCount, pcm.Length - offset);
+            Buffer.BlockCopy(pcm, offset, packetAssembly, packetAssemblyCount, copy);
+            packetAssemblyCount += copy;
+            offset += copy;
+
+            if (packetAssemblyCount == PacketBytes)
             {
-                int count = Math.Min(PacketBytes, pcm.Length - offset);
-                var packet = new byte[count];
-                Buffer.BlockCopy(pcm, offset, packet, 0, count);
+                var packet = new byte[PacketBytes];
+                Buffer.BlockCopy(packetAssembly, 0, packet, 0, PacketBytes);
+                packetAssemblyCount = 0;
                 EnqueuePacket(packet);
             }
         }
-        catch (Exception ex) { Console.WriteLine($"Downlink conversion error: {ex.Message}"); }
     }
 
     void EnqueuePacket(byte[] packet)
@@ -124,7 +140,7 @@ sealed class LoopbackDownlink : IDisposable
                 if (elapsedMs - lastStatsMs >= 5000)
                 {
                     lastStatsMs = elapsedMs;
-                    Console.WriteLine($"Downlink jitter stats: queue={sendQueue.Count} (~{sendQueue.Count * PacketMs} ms) · sent={sentPackets} · underruns={underruns} · dropped={droppedPackets}");
+                    Console.WriteLine($"Downlink jitter stats: queue={sendQueue.Count} (~{sendQueue.Count * PacketMs} ms) · partial={packetAssemblyCount} bytes · sent={sentPackets} · underruns={underruns} · dropped={droppedPackets}");
                 }
             }
         }
@@ -151,8 +167,8 @@ sealed class LoopbackDownlink : IDisposable
             double sum = 0;
             for (int ch = 0; ch < channels; ch++)
             {
-                int offset = frame * frameBytes + ch * bytesPerSample;
-                sum += ReadSample(data, offset, format);
+                int sampleOffset = frame * frameBytes + ch * bytesPerSample;
+                sum += ReadSample(data, sampleOffset, format);
             }
             double mono = Math.Clamp(sum / channels, -1.0, 1.0);
             short s = (short)Math.Round(mono * 32767.0);
@@ -186,6 +202,6 @@ sealed class LoopbackDownlink : IDisposable
         try { senderTask?.Wait(300); } catch { }
         sendCts.Dispose();
         queueSignal.Dispose();
-        Console.WriteLine($"Downlink jitter final: captured={capturedPackets} sent={sentPackets} underruns={underruns} dropped={droppedPackets}");
+        Console.WriteLine($"Downlink jitter final: captured={capturedPackets} sent={sentPackets} underruns={underruns} dropped={droppedPackets} partial={packetAssemblyCount}");
     }
 }
