@@ -61,6 +61,14 @@
             android:text="Mostrar transcripción local de la respuesta de Sol" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Opcional: usa el mismo modelo local de Vosk sobre el audio de respuesta. Consume algo más de CPU y no requiere nube." />
 
+        <com.bwa3d.codexremote.StartOnOpenCheckBox
+            android:id="@+id/startOnOpenCheck"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Iniciar servicio al abrir la app" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Si está activado, al abrir Codex Audio Remote inicia el satélite automáticamente usando la IP y puerto guardados." />
+
         <CheckBox android:id="@+id/autostartCheck" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Iniciar satélite al encender Android" />
         <Button android:id="@+id/overlayButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Permitir overlay sobre Home Assistant" />
         <Button android:id="@+id/connectButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:text="Conectar / iniciar servicio" />
