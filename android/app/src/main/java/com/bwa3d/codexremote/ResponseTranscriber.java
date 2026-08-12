@@ -23,8 +23,9 @@ public class ResponseTranscriber implements AutoCloseable {
         this.recognizer = new Recognizer(model, 16000.0f);
         this.listener = listener;
         worker = new Thread(this::loop, "ResponseTranscriber");
-        worker.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1));
+        worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
+        AndroidDebugLog.log("ResponseTranscriber START async");
     }
 
     public void accept(byte[] pcm) {
@@ -37,29 +38,39 @@ public class ResponseTranscriber implements AutoCloseable {
     }
 
     private void loop() {
-        while (running.get() || !queue.isEmpty()) {
-            try {
-                byte[] pcm = queue.poll(150, TimeUnit.MILLISECONDS);
-                if (pcm == null) continue;
-                boolean done = recognizer.acceptWaveForm(pcm, pcm.length);
-                JSONObject o = new JSONObject(done ? recognizer.getResult() : recognizer.getPartialResult());
-                if (done) {
-                    String text = o.optString("text", "").trim();
-                    if (!text.isEmpty()) {
-                        if (committed.length() > 0) committed.append(' ');
-                        committed.append(text);
+        try {
+            while (running.get() || !queue.isEmpty()) {
+                try {
+                    byte[] pcm = queue.poll(150, TimeUnit.MILLISECONDS);
+                    if (pcm == null) continue;
+                    boolean done = recognizer.acceptWaveForm(pcm, pcm.length);
+                    JSONObject o = new JSONObject(done ? recognizer.getResult() : recognizer.getPartialResult());
+                    if (done) {
+                        String text = o.optString("text", "").trim();
+                        if (!text.isEmpty()) {
+                            if (committed.length() > 0) committed.append(' ');
+                            committed.append(text);
+                        }
+                        emit(committed.toString());
+                    } else {
+                        String partial = o.optString("partial", "").trim();
+                        if (!partial.isEmpty()) {
+                            String all = committed.length() == 0 ? partial : committed + " " + partial;
+                            emit(all);
+                        }
                     }
-                    emit(committed.toString());
-                } else {
-                    String partial = o.optString("partial", "").trim();
-                    if (!partial.isEmpty()) {
-                        String all = committed.length() == 0 ? partial : committed + " " + partial;
-                        emit(all);
-                    }
+                } catch (InterruptedException ignored) {
+                    if (!running.get()) break;
+                } catch (Exception e) {
+                    AndroidDebugLog.log("ResponseTranscriber error: " + e);
                 }
-            } catch (InterruptedException ignored) {
-                if (!running.get()) break;
-            } catch (Exception ignored) { }
+            }
+        } finally {
+            // The worker owns the native recognizer lifetime. Never close it from another
+            // thread while acceptWaveForm() may still be executing (important on API 23/JNA).
+            try { recognizer.close(); } catch (Exception ignored) { }
+            queue.clear();
+            AndroidDebugLog.log("ResponseTranscriber STOP native-safe");
         }
     }
 
@@ -73,8 +84,9 @@ public class ResponseTranscriber implements AutoCloseable {
     @Override public void close() {
         if (!running.getAndSet(false)) return;
         worker.interrupt();
-        try { worker.join(300); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-        queue.clear();
-        try { recognizer.close(); } catch (Exception ignored) { }
+        // Do not close recognizer here: Vosk/JNA may still be inside native code.
+        // Worker closes it in finally after it has actually left acceptWaveForm().
+        try { worker.join(1200); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        if (worker.isAlive()) AndroidDebugLog.log("ResponseTranscriber close deferred · worker still exiting safely");
     }
 }
