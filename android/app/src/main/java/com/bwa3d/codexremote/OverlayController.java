@@ -22,8 +22,7 @@ public class OverlayController {
     private OverlayView view;
     private WindowManager.LayoutParams layoutParams;
     private boolean activityFallback;
-    private String lastFallbackState = null;
-    private long lastFallbackRequestMs = 0L;
+    private boolean fallbackVisible;
 
     public OverlayController(Context context, Runnable tapAction) {
         this.context = context.getApplicationContext();
@@ -45,24 +44,23 @@ public class OverlayController {
             return;
         }
         if (activityFallback) {
-            showFallbackActivity(state);
+            showFallbackActivityOnce();
             return;
         }
         if (!canShow()) {
-            AndroidDebugLog.log("Overlay permission false; using fallback activity");
+            AndroidDebugLog.log("Overlay permission false; using fixed fallback activity");
             activityFallback = true;
-            showFallbackActivity(state);
+            showFallbackActivityOnce();
             return;
         }
-        if (view == null && !tryAddOverlay(state)) {
+        if (view == null && !tryAddOverlay()) {
             activityFallback = true;
-            showFallbackActivity(state);
+            showFallbackActivityOnce();
             return;
         }
-        if (view != null) view.setState(state);
     }
 
-    private boolean tryAddOverlay(String state) {
+    private boolean tryAddOverlay() {
         int[] types;
         if (Build.VERSION.SDK_INT >= 26) {
             types = new int[]{ WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY };
@@ -74,21 +72,20 @@ public class OverlayController {
 
         for (int type : types) {
             OverlayView candidate = new OverlayView(context);
-            candidate.setState(state);
             candidate.setOnClickListener(v -> { if (tapAction != null) tapAction.run(); });
             int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                     | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
             WindowManager.LayoutParams candidateParams = new WindowManager.LayoutParams(
-                    dp(220), dp(80), type, flags,
+                    dp(300), dp(110), type, flags,
                     android.graphics.PixelFormat.TRANSLUCENT);
             candidateParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-            candidateParams.y = dp(42);
+            candidateParams.y = dp(32);
             try {
                 windowManager.addView(candidate, candidateParams);
                 view = candidate;
                 layoutParams = candidateParams;
-                AndroidDebugLog.log("Overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; main=true");
+                AndroidDebugLog.log("Fixed overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT);
                 return true;
             } catch (SecurityException | WindowManager.BadTokenException e) {
                 AndroidDebugLog.log("Overlay add denied; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
@@ -98,68 +95,35 @@ public class OverlayController {
         }
         view = null;
         layoutParams = null;
-        AndroidDebugLog.log("WindowManager overlay unavailable · switching to fallback activity");
+        AndroidDebugLog.log("WindowManager overlay unavailable · switching to fixed fallback activity");
         return false;
     }
 
-    private void showFallbackActivity(String state) {
-        String normalized = state == null ? "" : state.trim();
-        long now = android.os.SystemClock.elapsedRealtime();
-
-        // Audio/downlink callbacks may request the same visual state many times per second.
-        // Starting/reordering an Activity for every chunk makes old API 23 devices unstable.
-        if (normalized.equals(lastFallbackState)) return;
-
-        // Extra guard against rapid state chatter while Codex flips between adjacent events.
-        if (now - lastFallbackRequestMs < 120L && lastFallbackState != null) {
-            final String pending = normalized;
-            mainHandler.postDelayed(() -> {
-                if (!pending.equals(lastFallbackState)) showFallbackActivity(pending);
-            }, 120L);
-            return;
-        }
-
+    private void showFallbackActivityOnce() {
+        if (fallbackVisible) return;
         try {
             Intent i = new Intent(context, OverlayFallbackActivity.class);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                     | Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                     | Intent.FLAG_ACTIVITY_SINGLE_TOP
                     | Intent.FLAG_ACTIVITY_NO_ANIMATION);
-            i.putExtra(OverlayFallbackActivity.EXTRA_STATE, normalized);
             context.startActivity(i);
-            lastFallbackState = normalized;
-            lastFallbackRequestMs = now;
-            AndroidDebugLog.log("Fallback overlay state -> " + normalized);
+            fallbackVisible = true;
+            AndroidDebugLog.log("Fixed fallback overlay shown once");
         } catch (Exception e) {
             AndroidDebugLog.log("Fallback overlay activity failed: " + e);
         }
     }
 
     public void setLevel(float level) {
-        if (!onMainThread()) {
-            mainHandler.post(() -> setLevel(level));
-            return;
-        }
-        if (view != null) view.setLevel(level);
+        // Deliberately ignored in fixed mode. Avoid UI work on audio callbacks.
     }
 
     public void setTranscript(String text) {
-        if (!onMainThread()) {
-            mainHandler.post(() -> setTranscript(text));
-            return;
-        }
-        if (view == null) return;
-        view.setTranscript(text == null ? "" : text);
-        if (layoutParams != null) {
-            int wanted = (text == null || text.trim().isEmpty()) ? dp(80) : dp(150);
-            if (layoutParams.height != wanted) {
-                layoutParams.height = wanted;
-                try { windowManager.updateViewLayout(view, layoutParams); } catch (Exception ignored) { }
-            }
-        }
+        // Fixed overlay on legacy devices: no text/state updates while audio is running.
     }
 
-    public void clearTranscript() { setTranscript(""); }
+    public void clearTranscript() { }
 
     public void hide() {
         if (!onMainThread()) {
@@ -171,7 +135,7 @@ public class OverlayController {
             view = null;
             layoutParams = null;
         }
-        if (activityFallback) {
+        if (activityFallback && fallbackVisible) {
             try {
                 Intent i = new Intent(context, OverlayFallbackActivity.class);
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
@@ -182,45 +146,25 @@ public class OverlayController {
                 context.startActivity(i);
             } catch (Exception ignored) { }
         }
-        lastFallbackState = null;
-        lastFallbackRequestMs = 0L;
+        fallbackVisible = false;
     }
 
     private int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 
     private static class OverlayView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private String state = "Escuchando";
-        private String transcript = "";
-        private float level = 0.15f;
         OverlayView(Context context) { super(context); setClickable(true); }
-        void setState(String value) { state = value; postInvalidate(); }
-        void setTranscript(String value) { transcript = value == null ? "" : value.trim(); postInvalidate(); }
-        void setLevel(float value) { level = Math.max(0.05f, Math.min(1f, value)); postInvalidate(); }
         @Override protected void onDraw(Canvas c) {
             super.onDraw(c);
             float d = getResources().getDisplayMetrics().density;
             paint.setColor(0xE6212121);
-            c.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), 24*d, 24*d, paint);
-            paint.setColor(Color.WHITE); paint.setTextAlign(Paint.Align.CENTER); paint.setTextSize(14*d);
-            c.drawText(state + " · tocar para finalizar", getWidth()/2f, 24*d, paint);
-            if (!transcript.isEmpty()) {
-                paint.setTextSize(13*d); paint.setTextAlign(Paint.Align.LEFT);
-                drawWrappedText(c, transcript, 14*d, 48*d, getWidth()-28*d, 18*d, 4);
-            }
-            float base = getHeight() - 14*d, center = getWidth()/2f, barW = 5*d, gap = 6*d;
-            for (int i=0;i<5;i++) {
-                float factor = 0.35f + ((i==2)?0.65f:(i==1||i==3?0.45f:0.25f));
-                float h=(8+25*level*factor)*d, x=center+(i-2)*(barW+gap);
-                c.drawRoundRect(new RectF(x,base-h,x+barW,base),3*d,3*d,paint);
-            }
-        }
-        private void drawWrappedText(Canvas c,String text,float x,float y,float maxWidth,float lineHeight,int maxLines) {
-            String[] words=text.split("\\s+"); StringBuilder line=new StringBuilder(); int lines=0;
-            for(String word:words){ String candidate=line.length()==0?word:line+" "+word;
-                if(paint.measureText(candidate)>maxWidth&&line.length()>0){c.drawText(line.toString(),x,y+lines*lineHeight,paint);lines++;if(lines>=maxLines)return;line.setLength(0);line.append(word);}
-                else {if(line.length()>0)line.append(' ');line.append(word);} }
-            if(line.length()>0&&lines<maxLines)c.drawText(line.toString(),x,y+lines*lineHeight,paint);
+            c.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), 28*d, 28*d, paint);
+            paint.setColor(Color.WHITE);
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize(18*d);
+            c.drawText("Conversación activa", getWidth()/2f, 44*d, paint);
+            paint.setTextSize(14*d);
+            c.drawText("Tocar para finalizar", getWidth()/2f, 72*d, paint);
         }
     }
 }
