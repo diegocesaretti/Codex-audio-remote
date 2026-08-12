@@ -1,7 +1,6 @@
 package com.bwa3d.codexremote;
 
 import android.app.Application;
-import android.content.Intent;
 import android.os.Build;
 
 import java.io.BufferedInputStream;
@@ -16,14 +15,6 @@ public class CodexRemoteApp extends Application {
         super.onCreate();
         AndroidDebugLog.install(this);
         AndroidDebugLog.log("Application started · API " + Build.VERSION.SDK_INT);
-        if (Build.VERSION.SDK_INT <= 23) {
-            try {
-                startService(new Intent(this, LegacyKeepAliveService.class));
-                AndroidDebugLog.log("API23 keep-alive service requested");
-            } catch (Exception e) {
-                AndroidDebugLog.log("API23 keep-alive start failed: " + e);
-            }
-        }
         ensureBundledVoskModel();
     }
 
