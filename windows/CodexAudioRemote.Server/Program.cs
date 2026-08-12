@@ -123,9 +123,12 @@ while (true)
                         if (CodexMicDetector.IsActive())
                         {
                             ShortcutSender.Send(options.Shortcut);
-                            _ = ForceRestoreAfterEnd(switcher, options.EndSessionRestoreTimeoutMs);
+                            await ForceRestoreAfterEnd(switcher, options.EndSessionRestoreTimeoutMs);
                         }
-                        else switcher.ScheduleRestore(force: true);
+                        else
+                        {
+                            switcher.RestoreNow();
+                        }
                         break;
                 }
             }
@@ -133,7 +136,7 @@ while (true)
             await StopAudioSession(false);
             cts.Cancel();
             try { await registryTask; } catch (OperationCanceledException) { }
-            switcher.ScheduleRestore(force: true);
+            switcher.RestoreNow();
             if (socket.State == WebSocketState.Open || socket.State == WebSocketState.CloseReceived)
                 await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
             Console.WriteLine("Client disconnected");
@@ -142,7 +145,7 @@ while (true)
         {
             codexInputRecorder?.Dispose(); audioSink?.Dispose(); downlink?.Dispose();
             Console.WriteLine($"Client error: {ex.Message}");
-            switcher.ScheduleRestore(force: true);
+            switcher.RestoreNow();
         }
         finally { sendGate.Dispose(); }
     });
@@ -159,10 +162,15 @@ async Task ForceRestoreAfterEnd(AudioDeviceSwitcher audioSwitcher, int timeoutMs
     var started = Environment.TickCount64;
     while (Environment.TickCount64 - started < timeoutMs)
     {
-        if (!CodexMicDetector.IsActive()) { audioSwitcher.ScheduleRestore(force: true); return; }
+        if (!CodexMicDetector.IsActive())
+        {
+            audioSwitcher.RestoreNow();
+            return;
+        }
         await Task.Delay(50);
     }
-    audioSwitcher.ScheduleRestore(force: true);
+    Console.WriteLine("Codex mic detector remained active after close timeout; forcing default microphone restore.");
+    audioSwitcher.RestoreNow();
 }
 
 async Task ConfirmActivation(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitcher audioSwitcher, int timeoutMs)
@@ -356,19 +364,21 @@ sealed class AudioDeviceSwitcher
         lock (sync)
         {
             CancelPendingRestore();
+            bool restored = false;
             try
             {
                 if (saved is null && File.Exists(recoveryPath)) saved = JsonSerializer.Deserialize<SavedDefaults>(File.ReadAllText(recoveryPath));
                 if (saved is not null)
                 {
-                    if (!string.IsNullOrWhiteSpace(saved.Console)) PolicyConfig.SetDefaultEndpoint(saved.Console, PolicyRole.Console);
-                    if (!string.IsNullOrWhiteSpace(saved.Multimedia)) PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Multimedia);
-                    if (!string.IsNullOrWhiteSpace(saved.Communications)) PolicyConfig.SetDefaultEndpoint(saved.Communications, PolicyRole.Communications);
+                    if (!string.IsNullOrWhiteSpace(saved.Console)) { PolicyConfig.SetDefaultEndpoint(saved.Console, PolicyRole.Console); restored = true; }
+                    if (!string.IsNullOrWhiteSpace(saved.Multimedia)) { PolicyConfig.SetDefaultEndpoint(saved.Multimedia, PolicyRole.Multimedia); restored = true; }
+                    if (!string.IsNullOrWhiteSpace(saved.Communications)) { PolicyConfig.SetDefaultEndpoint(saved.Communications, PolicyRole.Communications); restored = true; }
                 }
             }
             catch (Exception ex) { Console.WriteLine($"Restore warning: {ex.Message}"); }
             try { if (File.Exists(recoveryPath)) File.Delete(recoveryPath); } catch { }
             saved = null; RemoteMicIsActive = false; State = AudioSessionState.Idle;
+            if (restored) Console.WriteLine("Default capture restored to the devices selected before the conversation.");
         }
     }
     public async Task TryRecoverAsync() { if (!File.Exists(recoveryPath)) return; Console.WriteLine("Recovering audio defaults from previous run..."); RestoreNow(); await Task.Delay(100); }
