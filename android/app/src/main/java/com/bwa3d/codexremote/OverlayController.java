@@ -56,7 +56,6 @@ public class OverlayController {
         if (view == null && !tryAddOverlay()) {
             activityFallback = true;
             showFallbackActivityOnce();
-            return;
         }
     }
 
@@ -70,6 +69,10 @@ public class OverlayController {
             types = new int[]{ WindowManager.LayoutParams.TYPE_PHONE };
         }
 
+        float scale = OverlayPrefs.scale(context);
+        int width = dp(Math.round(300 * scale));
+        int height = dp(Math.round((context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("show_transcript", false) ? 180 : 110) * scale));
+
         for (int type : types) {
             OverlayView candidate = new OverlayView(context);
             candidate.setOnClickListener(v -> { if (tapAction != null) tapAction.run(); });
@@ -77,15 +80,14 @@ public class OverlayController {
                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                     | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
             WindowManager.LayoutParams candidateParams = new WindowManager.LayoutParams(
-                    dp(300), dp(110), type, flags,
-                    android.graphics.PixelFormat.TRANSLUCENT);
+                    width, height, type, flags, android.graphics.PixelFormat.TRANSLUCENT);
             candidateParams.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-            candidateParams.y = dp(32);
+            candidateParams.y = dp(Math.round(32 * scale));
             try {
                 windowManager.addView(candidate, candidateParams);
                 view = candidate;
                 layoutParams = candidateParams;
-                AndroidDebugLog.log("Fixed overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT);
+                AndroidDebugLog.log("Fixed overlay added; type=" + type + "; API=" + Build.VERSION.SDK_INT + " scale=" + scale);
                 return true;
             } catch (SecurityException | WindowManager.BadTokenException e) {
                 AndroidDebugLog.log("Overlay add denied; type=" + type + "; API=" + Build.VERSION.SDK_INT + "; " + e);
@@ -116,14 +118,28 @@ public class OverlayController {
     }
 
     public void setLevel(float level) {
-        // Deliberately ignored in fixed mode. Avoid UI work on audio callbacks.
+        // Deliberately ignored. Avoid UI work on every audio chunk.
     }
 
     public void setTranscript(String text) {
-        // Fixed overlay on legacy devices: no text/state updates while audio is running.
+        if (!context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("show_transcript", false)) return;
+        final String safe = text == null ? "" : text.trim();
+        if (!onMainThread()) {
+            mainHandler.post(() -> setTranscript(safe));
+            return;
+        }
+        if (view != null) view.setTranscript(safe);
+        if (activityFallback && fallbackVisible) {
+            try {
+                Intent i = new Intent(OverlayFallbackActivity.ACTION_TRANSCRIPT);
+                i.setPackage(context.getPackageName());
+                i.putExtra(OverlayFallbackActivity.EXTRA_TRANSCRIPT, safe);
+                context.sendBroadcast(i);
+            } catch (Exception ignored) { }
+        }
     }
 
-    public void clearTranscript() { }
+    public void clearTranscript() { setTranscript(""); }
 
     public void hide() {
         if (!onMainThread()) {
@@ -153,18 +169,44 @@ public class OverlayController {
 
     private static class OverlayView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private String transcript = "";
         OverlayView(Context context) { super(context); setClickable(true); }
+        void setTranscript(String value) { transcript = value == null ? "" : value.trim(); postInvalidate(); }
         @Override protected void onDraw(Canvas c) {
             super.onDraw(c);
             float d = getResources().getDisplayMetrics().density;
-            paint.setColor(0xE6212121);
-            c.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), 28*d, 28*d, paint);
-            paint.setColor(Color.WHITE);
+            float scale = OverlayPrefs.scale(getContext());
+            paint.setColor(OverlayPrefs.color(getContext()));
+            c.drawRoundRect(new RectF(0, 0, getWidth(), getHeight()), 28*d*scale, 28*d*scale, paint);
+            paint.setColor(OverlayPrefs.textColor(getContext()));
             paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTextSize(18*d);
-            c.drawText("Conversación activa", getWidth()/2f, 44*d, paint);
-            paint.setTextSize(14*d);
-            c.drawText("Tocar para finalizar", getWidth()/2f, 72*d, paint);
+            paint.setTextSize(18*d*scale);
+            c.drawText("Conversación activa", getWidth()/2f, 42*d*scale, paint);
+            paint.setTextSize(14*d*scale);
+            c.drawText("Tocar para finalizar", getWidth()/2f, 70*d*scale, paint);
+
+            if (!transcript.isEmpty()) {
+                paint.setTextAlign(Paint.Align.LEFT);
+                paint.setTextSize(12*d*scale);
+                drawWrapped(c, transcript, 18*d*scale, 96*d*scale, getWidth() - 36*d*scale, 17*d*scale, 4);
+            }
+        }
+        private void drawWrapped(Canvas c, String text, float x, float y, float maxWidth, float lineHeight, int maxLines) {
+            String[] words = text.split("\\s+");
+            StringBuilder line = new StringBuilder();
+            int lines = 0;
+            for (String word : words) {
+                String candidate = line.length() == 0 ? word : line + " " + word;
+                if (paint.measureText(candidate) > maxWidth && line.length() > 0) {
+                    c.drawText(line.toString(), x, y + lines * lineHeight, paint);
+                    if (++lines >= maxLines) return;
+                    line.setLength(0); line.append(word);
+                } else {
+                    if (line.length() > 0) line.append(' ');
+                    line.append(word);
+                }
+            }
+            if (line.length() > 0 && lines < maxLines) c.drawText(line.toString(), x, y + lines * lineHeight, paint);
         }
     }
 }
