@@ -1,15 +1,28 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 
 sealed class LoopbackDownlink : IDisposable
 {
-    const int PacketBytes = 640; // 20 ms @ PCM16 mono 16 kHz
+    const int PacketBytes = 640;          // 20 ms @ PCM16 mono 16 kHz
+    const int PacketMs = 20;
+    const int PrebufferPackets = 8;       // ~160 ms jitter cushion
+    const int MaxQueuedPackets = 75;      // 1.5 s hard ceiling
+
     readonly WasapiLoopbackCapture capture;
     readonly Func<byte[], Task> onPcm;
-    readonly object sendSync = new();
-    Task sendTail = Task.CompletedTask;
+    readonly ConcurrentQueue<byte[]> sendQueue = new();
+    readonly SemaphoreSlim queueSignal = new(0);
+    readonly CancellationTokenSource sendCts = new();
+    Task? senderTask;
     double sourcePosition;
     bool disposed;
+    long capturedPackets;
+    long sentPackets;
+    long underruns;
+    long droppedPackets;
+    long lastCaptureTicks;
 
     public LoopbackDownlink(Func<byte[], Task> onPcm)
     {
@@ -22,6 +35,8 @@ sealed class LoopbackDownlink : IDisposable
     public void Start()
     {
         Console.WriteLine($"PC audio downlink capture: {capture.WaveFormat.SampleRate} Hz, {capture.WaveFormat.Channels} ch, {capture.WaveFormat.Encoding}");
+        Console.WriteLine($"Downlink jitter buffer: {PrebufferPackets * PacketMs} ms prebuffer, fixed {PacketMs} ms pacing");
+        senderTask = Task.Run(() => SenderLoop(sendCts.Token));
         capture.StartRecording();
     }
 
@@ -30,6 +45,15 @@ sealed class LoopbackDownlink : IDisposable
         if (disposed || e.BytesRecorded <= 0) return;
         try
         {
+            long now = Stopwatch.GetTimestamp();
+            if (lastCaptureTicks != 0)
+            {
+                double gapMs = (now - lastCaptureTicks) * 1000.0 / Stopwatch.Frequency;
+                if (gapMs > 120)
+                    Console.WriteLine($"Downlink capture gap: {gapMs:F0} ms · queue={sendQueue.Count}");
+            }
+            lastCaptureTicks = now;
+
             var pcm = ConvertToMono16k(e.Buffer, e.BytesRecorded, capture.WaveFormat);
             if (pcm.Length == 0) return;
             for (int offset = 0; offset < pcm.Length; offset += PacketBytes)
@@ -37,21 +61,75 @@ sealed class LoopbackDownlink : IDisposable
                 int count = Math.Min(PacketBytes, pcm.Length - offset);
                 var packet = new byte[count];
                 Buffer.BlockCopy(pcm, offset, packet, 0, count);
-                QueueSend(packet);
+                EnqueuePacket(packet);
             }
         }
         catch (Exception ex) { Console.WriteLine($"Downlink conversion error: {ex.Message}"); }
     }
 
-    void QueueSend(byte[] packet)
+    void EnqueuePacket(byte[] packet)
     {
-        lock (sendSync)
+        while (sendQueue.Count >= MaxQueuedPackets && sendQueue.TryDequeue(out _))
         {
-            sendTail = sendTail.ContinueWith(async _ =>
-            {
-                if (!disposed) await onPcm(packet);
-            }, TaskScheduler.Default).Unwrap();
+            droppedPackets++;
+            if (droppedPackets == 1 || droppedPackets % 25 == 0)
+                Console.WriteLine($"Downlink jitter overflow: dropped={droppedPackets} · queue={sendQueue.Count}");
         }
+        sendQueue.Enqueue(packet);
+        capturedPackets++;
+        queueSignal.Release();
+    }
+
+    async Task SenderLoop(CancellationToken token)
+    {
+        bool primed = false;
+        var clock = Stopwatch.StartNew();
+        double nextSendMs = 0;
+        long lastStatsMs = 0;
+
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (!primed)
+                {
+                    while (sendQueue.Count < PrebufferPackets && !token.IsCancellationRequested)
+                        await queueSignal.WaitAsync(250, token);
+                    if (token.IsCancellationRequested) break;
+                    primed = true;
+                    nextSendMs = clock.Elapsed.TotalMilliseconds;
+                    Console.WriteLine($"Downlink jitter primed: queue={sendQueue.Count} (~{sendQueue.Count * PacketMs} ms)");
+                }
+
+                if (!sendQueue.TryDequeue(out var packet))
+                {
+                    underruns++;
+                    Console.WriteLine($"Downlink jitter UNDERRUN #{underruns} · captured={capturedPackets} sent={sentPackets}");
+                    primed = false;
+                    continue;
+                }
+
+                double waitMs = nextSendMs - clock.Elapsed.TotalMilliseconds;
+                if (waitMs > 1)
+                    await Task.Delay(TimeSpan.FromMilliseconds(waitMs), token);
+
+                if (!disposed)
+                {
+                    await onPcm(packet);
+                    sentPackets++;
+                }
+                nextSendMs += PacketMs;
+
+                long elapsedMs = clock.ElapsedMilliseconds;
+                if (elapsedMs - lastStatsMs >= 5000)
+                {
+                    lastStatsMs = elapsedMs;
+                    Console.WriteLine($"Downlink jitter stats: queue={sendQueue.Count} (~{sendQueue.Count * PacketMs} ms) · sent={sentPackets} · underruns={underruns} · dropped={droppedPackets}");
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Console.WriteLine($"Downlink sender error: {ex.Message}"); }
     }
 
     byte[] ConvertToMono16k(byte[] data, int count, WaveFormat format)
@@ -104,5 +182,10 @@ sealed class LoopbackDownlink : IDisposable
         disposed = true;
         try { capture.StopRecording(); } catch { }
         capture.Dispose();
+        sendCts.Cancel();
+        try { senderTask?.Wait(300); } catch { }
+        sendCts.Dispose();
+        queueSignal.Dispose();
+        Console.WriteLine($"Downlink jitter final: captured={capturedPackets} sent={sentPackets} underruns={underruns} dropped={droppedPackets}");
     }
 }
