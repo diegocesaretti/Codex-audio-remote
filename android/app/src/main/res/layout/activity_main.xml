@@ -27,6 +27,11 @@
 
         <TextView android:id="@+id/sensitivityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:text="Sensibilidad wake: 60%" />
         <SeekBar android:id="@+id/sensitivitySeek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" android:progress="60" />
+        <com.bwa3d.codexremote.WakeScreenCheckBox
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Encender pantalla al detectar wake word" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="En Android 6 usa un wake-lock corto para despertar la pantalla al detectar la palabra de activación." />
 
         <TextView android:id="@+id/qualityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Calidad: 80% · Alta · 48 kHz" />
         <SeekBar android:id="@+id/qualitySeek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" android:progress="80" />
@@ -69,6 +74,11 @@
             android:inputType="textCapSentences"
             android:maxLines="3" />
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Las frases se guardan mientras las editás y se reconocen localmente durante la conversación." />
+        <com.bwa3d.codexremote.EndSensitivityControl
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="0% = casi coincidencia perfecta (99% de confianza). 100% = mucho más tolerante. Si tenés falsos cierres, bajalo." />
 
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="Overlay" android:textStyle="bold" />
         <com.bwa3d.codexremote.PreferenceCheckBox
