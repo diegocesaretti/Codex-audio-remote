@@ -9,6 +9,7 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.util.concurrent.TimeUnit;
@@ -22,7 +23,8 @@ import okhttp3.WebSocketListener;
 public class OverlayFallbackActivity extends Activity {
     public static final String EXTRA_STATE = "state";
     public static final String STATE_HIDE = "__hide__";
-    private TextView label;
+    private TextView title;
+    private TextView subtitle;
     private boolean ending;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -35,47 +37,55 @@ public class OverlayFallbackActivity extends Activity {
         w.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL);
         WindowManager.LayoutParams lp = w.getAttributes();
         lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        lp.width = Math.round(220 * getResources().getDisplayMetrics().density);
-        lp.height = Math.round(80 * getResources().getDisplayMetrics().density);
-        lp.y = Math.round(42 * getResources().getDisplayMetrics().density);
+        lp.width = Math.round(300 * getResources().getDisplayMetrics().density);
+        lp.height = Math.round(110 * getResources().getDisplayMetrics().density);
+        lp.y = Math.round(32 * getResources().getDisplayMetrics().density);
         w.setAttributes(lp);
 
-        label = new TextView(this);
-        label.setGravity(Gravity.CENTER);
-        label.setTextColor(Color.WHITE);
-        label.setTextSize(14f);
-        label.setPadding(18, 8, 18, 8);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER);
+        root.setPadding(20, 12, 20, 12);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0xE6212121);
-        bg.setCornerRadius(24 * getResources().getDisplayMetrics().density);
-        label.setBackground(bg);
-        setContentView(label);
-        updateState(getIntent());
+        bg.setCornerRadius(28 * getResources().getDisplayMetrics().density);
+        root.setBackground(bg);
 
-        label.setOnClickListener(view -> endSessionDirectly());
-        AndroidDebugLog.log("Fallback overlay activity shown");
+        title = new TextView(this);
+        title.setGravity(Gravity.CENTER);
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(20f);
+        title.setText("Conversación activa");
+
+        subtitle = new TextView(this);
+        subtitle.setGravity(Gravity.CENTER);
+        subtitle.setTextColor(0xFFD0D0D0);
+        subtitle.setTextSize(15f);
+        subtitle.setText("Tocar para finalizar");
+
+        root.addView(title, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(subtitle, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        setContentView(root);
+
+        if (getIntent() != null && STATE_HIDE.equals(getIntent().getStringExtra(EXTRA_STATE))) {
+            finish();
+            return;
+        }
+
+        root.setOnClickListener(view -> endSessionDirectly());
+        AndroidDebugLog.log("Fixed fallback overlay activity shown");
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        updateState(intent);
-    }
-
-    private void updateState(Intent intent) {
-        String state = intent != null ? intent.getStringExtra(EXTRA_STATE) : null;
-        if (STATE_HIDE.equals(state)) {
-            finish();
-            return;
-        }
-        if (state == null || state.trim().isEmpty()) state = "Escuchando";
-        if (label != null && !ending) label.setText(state + " · tocar para finalizar");
+        if (intent != null && STATE_HIDE.equals(intent.getStringExtra(EXTRA_STATE))) finish();
+        // All normal state changes are intentionally ignored. This popup is fixed for the whole session.
     }
 
     private void endSessionDirectly() {
         if (ending) return;
         ending = true;
-        if (label != null) label.setText("Finalizando…");
         AndroidDebugLog.log("Fallback overlay tapped · direct end_session requested");
 
         SharedPreferences p = getSharedPreferences("settings", MODE_PRIVATE);
@@ -98,11 +108,7 @@ public class OverlayFallbackActivity extends Activity {
 
             @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
                 AndroidDebugLog.log("Fallback direct end failed: " + t);
-                // Keep the existing RemoteService alive; do not kill/restart it.
                 ending = false;
-                runOnUiThread(() -> {
-                    if (label != null) label.setText("No se pudo finalizar · tocar otra vez");
-                });
                 client.dispatcher().executorService().shutdown();
             }
         });
