@@ -24,13 +24,13 @@ s = replace_once(s,
 
 p.write_text(s, encoding='utf-8')
 
-# Windows: speed local text TTS to +50% using SSML.
+# Windows: speed local text TTS to +25% using SSML.
 p = Path('windows/CodexAudioRemote.Server/ContextAudioInjector.cs')
 s = p.read_text(encoding='utf-8')
 s = replace_once(s,
 '''                synth.SetOutputToWaveFile(temp);\n                synth.Speak(text);\n                synth.SetOutputToNull();''',
-'''                synth.SetOutputToWaveFile(temp);\n                var escaped = System.Security.SecurityElement.Escape(text) ?? string.Empty;\n                var culture = spanish?.VoiceInfo.Culture.Name ?? "es-ES";\n                var ssml = $"<speak version='1.0' xml:lang='{culture}'><prosody rate='+50%'>{escaped}</prosody></speak>";\n                synth.SpeakSsml(ssml);\n                synth.SetOutputToNull();''',
-'tts 1.5x ssml')
+'''                synth.SetOutputToWaveFile(temp);\n                var escaped = System.Security.SecurityElement.Escape(text) ?? string.Empty;\n                var culture = spanish?.VoiceInfo.Culture.Name ?? "es-ES";\n                var ssml = $"<speak version='1.0' xml:lang='{culture}'><prosody rate='+25%'>{escaped}</prosody></speak>";\n                synth.SpeakSsml(ssml);\n                synth.SetOutputToNull();''',
+'tts 1.25x ssml')
 p.write_text(s, encoding='utf-8')
 
 # Windows: robust external-session handoff. Require a stable ready state, use UI busy state when exposed,
