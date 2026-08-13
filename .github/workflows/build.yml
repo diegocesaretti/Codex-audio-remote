@@ -15,8 +15,12 @@ jobs:
           python-version: '3.12'
       - name: Apply graceful voice end patch
         run: python tools/apply_graceful_end.py
+      - name: Temporarily hide System.Speech from legacy patch
+        run: python -c "from pathlib import Path; p=Path('windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj'); s=p.read_text(); s=s.replace('    <PackageReference Include=\"System.Speech\" Version=\"8.0.0\" />\n',''); p.write_text(s)"
       - name: Apply smart Codex UI state patch
         run: python tools/apply_smart_ui_state.py
+      - name: Restore System.Speech package
+        run: python -c "from pathlib import Path; p=Path('windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj'); s=p.read_text(); marker='    <PackageReference Include=\"NAudio\" Version=\"2.3.0\" />\n'; s=s.replace(marker, marker+'    <PackageReference Include=\"System.Speech\" Version=\"8.0.0\" />\n',1); p.write_text(s)"
       - name: Use MSAA accessibility detector
         run: python tools/replace_uia_with_msaa.py
       - name: Fix smart close scope
@@ -41,6 +45,8 @@ jobs:
           python-version: '3.12'
       - name: Apply graceful voice end patch
         run: python tools/apply_graceful_end.py
+      - name: Temporarily hide System.Speech from legacy patch
+        run: python -c "from pathlib import Path; p=Path('windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj'); s=p.read_text(); s=s.replace('    <PackageReference Include=\"System.Speech\" Version=\"8.0.0\" />\n',''); p.write_text(s)"
       - name: Apply smart Codex UI state patch
         run: python tools/apply_smart_ui_state.py
       - uses: actions/setup-java@v4
