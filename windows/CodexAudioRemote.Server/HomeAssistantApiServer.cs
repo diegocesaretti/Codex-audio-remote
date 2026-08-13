@@ -52,15 +52,30 @@ internal sealed class HomeAssistantApiServer : IDisposable
             using var doc = await JsonDocument.ParseAsync(context.Request.InputStream, cancellationToken: token);
             var root = doc.RootElement;
             var audioUrl = root.TryGetProperty("audio_url", out var audioProp) ? audioProp.GetString() : null;
-            if (string.IsNullOrWhiteSpace(audioUrl))
+            var text = root.TryGetProperty("text", out var textProp) ? textProp.GetString() : null;
+
+            string? contextSource = null;
+            string inputType;
+            if (!string.IsNullOrWhiteSpace(text))
             {
-                await WriteJson(context.Response, 400, new { ok = false, error = "audio_url_required" });
+                contextSource = ContextAudioInjector.PackText(text.Trim());
+                inputType = "text";
+            }
+            else if (!string.IsNullOrWhiteSpace(audioUrl))
+            {
+                contextSource = audioUrl;
+                inputType = "audio_url";
+            }
+            else
+            {
+                await WriteJson(context.Response, 400, new { ok = false, error = "text_or_audio_url_required" });
                 return;
             }
 
-            var started = await ExternalConversationHub.TryStartAsync(new ExternalConversationRequest(audioUrl));
+            Console.WriteLine($"HA conversation request · input={inputType}");
+            var started = await ExternalConversationHub.TryStartAsync(new ExternalConversationRequest(contextSource));
             await WriteJson(context.Response, started ? 202 : 409,
-                started ? new { ok = true, status = "accepted" } : new { ok = false, error = "android_not_connected" });
+                started ? new { ok = true, status = "accepted", input = inputType } : new { ok = false, error = "android_not_connected" });
         }
         catch (Exception ex)
         {
