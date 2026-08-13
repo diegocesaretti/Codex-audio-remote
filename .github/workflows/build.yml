@@ -25,6 +25,8 @@ jobs:
         run: python tools/replace_uia_with_msaa.py
       - name: Fix smart close scope
         run: python tools/fix_smart_scope.py
+      - name: Wire safe downlink selector
+        run: python tools/apply_downlink_selector.py
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
