@@ -18,6 +18,8 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) => switcher.RestoreNow();
 Console.WriteLine($"Codex Audio Remote server listening on ws://0.0.0.0:{options.Port}/ws/");
 Console.WriteLine($"Virtual microphone: '{options.VirtualMicName}' | cable playback: '{options.VirtualCableInputName}'");
 Console.WriteLine("Adaptive audio profile: quality/latency controlled by Android satellite");
+using var homeAssistantApi = new HomeAssistantApiServer();
+homeAssistantApi.Start();
 
 using var listener = new HttpListener();
 listener.Prefixes.Add($"http://+:{options.Port}/ws/");
@@ -34,12 +36,18 @@ while (true)
         CableOutputRecorder? codexInputRecorder = null;
         LoopbackDownlink? downlink = null;
         var sendGate = new SemaphoreSlim(1, 1);
+        ExternalSessionController? externalController = null;
+        Func<ExternalConversationRequest, Task>? externalHandler = null;
         try
         {
             var wsContext = await context.AcceptWebSocketAsync(null);
             var socket = wsContext.WebSocket;
             Console.WriteLine($"Client connected: {context.Request.RemoteEndPoint}");
             await SendJson(socket, sendGate, new { type = "hello", server = "CodexAudioRemote" });
+            externalController = new ExternalSessionController(socket, sendGate, switcher,
+                options.Shortcut, options.ActivationTimeoutMs, options.VirtualCableInputName);
+            externalHandler = externalController.QueueAsync;
+            ExternalConversationHub.Register(externalHandler);
 
             using var cts = new CancellationTokenSource();
             var registryTask = WatchCodexMic(socket, sendGate, switcher, cts.Token);
@@ -147,7 +155,12 @@ while (true)
             Console.WriteLine($"Client error: {ex.Message}");
             switcher.RestoreNow();
         }
-        finally { sendGate.Dispose(); }
+        finally
+        {
+            if (externalHandler is not null) ExternalConversationHub.Clear(externalHandler);
+            externalController?.Dispose();
+            sendGate.Dispose();
+        }
     });
 }
 
@@ -197,6 +210,11 @@ async Task WatchCodexMic(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitch
 
     while (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
     {
+        if (ExternalConversationHub.SuppressCodexEvents)
+        {
+            await Task.Delay(100, token);
+            continue;
+        }
         var active = CodexMicDetector.IsActive();
         var now = Environment.TickCount64;
 
