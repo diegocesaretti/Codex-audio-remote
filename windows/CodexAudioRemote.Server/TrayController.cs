@@ -35,6 +35,8 @@ static class TrayController
         startup.CheckedChanged += (_, _) => SetStartup(startup.Checked);
         var haUrl = new ToolStripMenuItem("Home Assistant URL…");
         haUrl.Click += (_, _) => ShowHomeAssistantUrlDialog();
+        var downlink = new ToolStripMenuItem("Audio de respuesta / Downlink…");
+        downlink.Click += (_, _) => DownlinkDeviceSettings.ShowDialog();
         var status = new ToolStripMenuItem("Codex Audio Remote activo") { Enabled = false };
         var exit = new ToolStripMenuItem("Salir");
         exit.Click += (_, _) =>
@@ -47,6 +49,7 @@ static class TrayController
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(startup);
         menu.Items.Add(haUrl);
+        menu.Items.Add(downlink);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exit);
 
