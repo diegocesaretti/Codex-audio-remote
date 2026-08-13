@@ -1,5 +1,6 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using System.Speech.Synthesis;
 
 internal static class ContextAudioInjector
 {
@@ -12,14 +13,30 @@ internal static class ContextAudioInjector
         if (string.IsNullOrWhiteSpace(extension)) extension = ".bin";
         var temp = Path.Combine(Path.GetTempPath(), "codex-context-" + Guid.NewGuid().ToString("N") + extension);
         await File.WriteAllBytesAsync(temp, bytes, token);
+        try { await PlayFileAsync(temp, cableDeviceName, token); }
+        finally { try { File.Delete(temp); } catch { } }
+    }
+
+    public static async Task PlayTextIntoVirtualCableAsync(string text, string cableDeviceName, CancellationToken token)
+    {
+        if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("Context text is empty", nameof(text));
+        var temp = Path.Combine(Path.GetTempPath(), "codex-context-" + Guid.NewGuid().ToString("N") + ".wav");
         try
         {
+            await Task.Run(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                using var synth = new SpeechSynthesizer();
+                var spanish = synth.GetInstalledVoices()
+                    .FirstOrDefault(v => v.Enabled && v.VoiceInfo.Culture.Name.StartsWith("es", StringComparison.OrdinalIgnoreCase));
+                if (spanish != null) synth.SelectVoice(spanish.VoiceInfo.Name);
+                synth.SetOutputToWaveFile(temp);
+                synth.Speak(text);
+                synth.SetOutputToNull();
+            }, token);
             await PlayFileAsync(temp, cableDeviceName, token);
         }
-        finally
-        {
-            try { File.Delete(temp); } catch { }
-        }
+        finally { try { File.Delete(temp); } catch { } }
     }
 
     static Uri ResolveAudioUrl(string value)
@@ -34,10 +51,7 @@ internal static class ContextAudioInjector
         using var device = AudioDeviceManager.FindDevice(DataFlow.Render, cableDeviceName)
             ?? throw new InvalidOperationException($"Virtual cable playback device '{cableDeviceName}' not found");
         using var reader = new AudioFileReader(file);
-        using var resampler = new MediaFoundationResampler(reader, device.AudioClient.MixFormat)
-        {
-            ResamplerQuality = 60
-        };
+        using var resampler = new MediaFoundationResampler(reader, device.AudioClient.MixFormat) { ResamplerQuality = 60 };
         using var output = new WasapiOut(device, AudioClientShareMode.Shared, true, 80);
         var stopped = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         output.PlaybackStopped += (_, e) =>
