@@ -20,9 +20,11 @@ p.write_text(s, encoding='utf-8')
 print('System.Speech package ' + mode + ' complete')
 
 if mode == 'hide':
-    first = Path('tools/apply_connection_handoff_fix.py')
-    second = Path('tools/apply_response_end_handoff.py')
-    if first.exists():
-        runpy.run_path(str(first), run_name='__main__')
-    if second.exists():
-        runpy.run_path(str(second), run_name='__main__')
+    patches = [
+        Path('tools/apply_connection_handoff_fix.py'),
+        Path('tools/apply_response_end_handoff.py'),
+        Path('tools/apply_output_routing.py'),
+    ]
+    for patch in patches:
+        if patch.exists():
+            runpy.run_path(str(patch), run_name='__main__')
