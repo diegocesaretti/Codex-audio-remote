@@ -7,6 +7,12 @@ internal static class ExternalConversationHub
 {
     static readonly object Sync = new();
     static Func<ExternalConversationRequest, Task>? handler;
+    static int suppressCodexEvents;
+
+    public static bool SuppressCodexEvents => Volatile.Read(ref suppressCodexEvents) != 0;
+
+    public static void SetSuppressCodexEvents(bool value)
+        => Interlocked.Exchange(ref suppressCodexEvents, value ? 1 : 0);
 
     public static void Register(Func<ExternalConversationRequest, Task> value)
     {
@@ -59,42 +65,53 @@ internal sealed class ExternalSessionController : IDisposable
         if (Interlocked.Exchange(ref running, 1) != 0) return Task.CompletedTask;
         _ = Task.Run(async () =>
         {
+            ExternalConversationHub.SetSuppressCodexEvents(true);
             try { await RunAsync(request); }
             catch (Exception ex)
             {
                 Console.WriteLine("External conversation error: " + ex.Message);
-                try { await SendJson(new { type = "external_error", reason = ex.Message }); } catch { }
+                try { await SendJson(new { type = "activation_failed", reason = "external_context_error" }); } catch { }
                 switcher.RestoreNow();
             }
-            finally { Interlocked.Exchange(ref running, 0); }
+            finally
+            {
+                ExternalConversationHub.SetSuppressCodexEvents(false);
+                Interlocked.Exchange(ref running, 0);
+            }
         });
         return Task.CompletedTask;
     }
 
     async Task RunAsync(ExternalConversationRequest request)
     {
-        await SendJson(new { type = "external_prepare", source = request.Source });
+        Console.WriteLine($"External conversation START · source={request.Source}");
+        await SendJson(new { type = "activating" });
         if (!switcher.ActivateRemoteMic()) throw new InvalidOperationException("virtual_mic_not_found");
         switcher.BeginActivation();
         await Task.Delay(75, cts.Token);
         ShortcutSender.Send(shortcut);
         if (!await WaitMicAsync(true, activationTimeoutMs)) throw new TimeoutException("codex_mic_timeout");
 
+        Console.WriteLine("Injecting HA context to virtual microphone only; Android downlink remains off");
         await ContextAudioInjector.PlayIntoVirtualCableAsync(request.AudioUrl, cableDeviceName, cts.Token);
+        Console.WriteLine("HA context injection complete");
 
         downlink?.Dispose();
         downlink = new LoopbackDownlink(SendBinary);
         await SendJson(new { type = "downlink_start", sampleRate = 16000, channels = 1 });
         downlink.Start();
-        await SendJson(new { type = "external_context_sent" });
 
-        await WaitMicAsync(false, 15000);
-        await WaitMicAsync(true, 45000);
+        var becameBusy = await WaitMicAsync(false, 15000);
+        Console.WriteLine(becameBusy ? "Codex processing external context" : "No inactive transition detected; using readiness fallback");
+        var ready = await WaitMicAsync(true, 45000);
+        Console.WriteLine(ready ? "Codex ready after external context" : "Readiness timeout; opening Android mic as fallback");
 
         downlink?.Dispose();
         downlink = null;
         switcher.MarkListening();
-        await SendJson(new { type = "external_conversation_ready" });
+        ExternalConversationHub.SetSuppressCodexEvents(false);
+        await SendJson(new { type = "codex_listening" });
+        Console.WriteLine("External conversation READY · Android microphone enabled");
     }
 
     async Task<bool> WaitMicAsync(bool desired, int timeoutMs)
@@ -130,6 +147,7 @@ internal sealed class ExternalSessionController : IDisposable
         cts.Cancel();
         downlink?.Dispose();
         downlink = null;
+        ExternalConversationHub.SetSuppressCodexEvents(false);
         cts.Dispose();
     }
 }
