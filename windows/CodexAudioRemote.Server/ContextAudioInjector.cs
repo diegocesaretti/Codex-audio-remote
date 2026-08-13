@@ -4,8 +4,16 @@ using System.Speech.Synthesis;
 
 internal static class ContextAudioInjector
 {
+    const string TextPrefix = "text-context:";
+
     public static async Task PlayIntoVirtualCableAsync(string audioUrl, string cableDeviceName, CancellationToken token)
     {
+        if (audioUrl.StartsWith(TextPrefix, StringComparison.Ordinal))
+        {
+            await PlayTextIntoVirtualCableAsync(audioUrl.Substring(TextPrefix.Length), cableDeviceName, token);
+            return;
+        }
+
         var resolved = ResolveAudioUrl(audioUrl);
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
         var bytes = await http.GetByteArrayAsync(resolved, token);
@@ -38,6 +46,8 @@ internal static class ContextAudioInjector
         }
         finally { try { File.Delete(temp); } catch { } }
     }
+
+    public static string PackText(string text) => TextPrefix + text;
 
     static Uri ResolveAudioUrl(string value)
     {
