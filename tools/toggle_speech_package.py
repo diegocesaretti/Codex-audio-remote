@@ -17,3 +17,10 @@ else:
 
 p.write_text(s, encoding='utf-8')
 print('System.Speech package ' + mode + ' complete')
+
+# Both CI jobs already invoke this helper. Apply the connection/HA handoff patch
+# once during the hide phase so Android and Windows builds stay synchronized.
+if mode == 'hide':
+    patch = Path('tools/apply_connection_handoff_fix.py')
+    if patch.exists():
+        exec(compile(patch.read_text(encoding='utf-8'), str(patch), 'exec'), {})
