@@ -11,6 +11,7 @@ sealed class LoopbackDownlink : IDisposable
     const int MaxQueuedPackets = 75;      // 1.5 s hard ceiling
 
     readonly WasapiLoopbackCapture capture;
+    readonly MMDevice captureDevice;
     readonly Func<byte[], Task> onPcm;
     readonly ConcurrentQueue<byte[]> sendQueue = new();
     readonly SemaphoreSlim queueSignal = new(0);
@@ -26,17 +27,65 @@ sealed class LoopbackDownlink : IDisposable
     long droppedPackets;
     long lastCaptureTicks;
 
-    public LoopbackDownlink(Func<byte[], Task> onPcm)
+    public LoopbackDownlink(Func<byte[], Task> onPcm, string? preferredDeviceId = null)
     {
         this.onPcm = onPcm;
-        capture = new WasapiLoopbackCapture();
+        captureDevice = ResolveSafeRenderDevice(preferredDeviceId);
+        capture = new WasapiLoopbackCapture(captureDevice);
         capture.DataAvailable += CaptureOnDataAvailable;
         capture.RecordingStopped += (_, e) => { if (e.Exception != null) Console.WriteLine($"Downlink stopped: {e.Exception.Message}"); };
     }
 
+    static MMDevice ResolveSafeRenderDevice(string? preferredDeviceId)
+    {
+        using var enumerator = new MMDeviceEnumerator();
+        var active = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToArray();
+
+        bool IsUnsafe(MMDevice d) =>
+            d.FriendlyName.Contains("CABLE", StringComparison.OrdinalIgnoreCase) ||
+            d.FriendlyName.Contains("VB-Audio", StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrWhiteSpace(preferredDeviceId))
+        {
+            var selected = active.FirstOrDefault(d => string.Equals(d.ID, preferredDeviceId, StringComparison.Ordinal));
+            if (selected is not null && !IsUnsafe(selected))
+            {
+                Console.WriteLine($"Downlink device selected: {selected.FriendlyName}");
+                return selected;
+            }
+            if (selected is not null)
+                Console.WriteLine($"Downlink safety: refusing virtual cable device '{selected.FriendlyName}'");
+            else
+                Console.WriteLine("Downlink selected device is no longer available; choosing a safe output.");
+        }
+
+        try
+        {
+            var def = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            var matchingDefault = active.FirstOrDefault(d => string.Equals(d.ID, def.ID, StringComparison.Ordinal));
+            def.Dispose();
+            if (matchingDefault is not null && !IsUnsafe(matchingDefault))
+            {
+                Console.WriteLine($"Downlink safe default: {matchingDefault.FriendlyName}");
+                return matchingDefault;
+            }
+        }
+        catch { }
+
+        var fallback = active.FirstOrDefault(d => !IsUnsafe(d));
+        if (fallback is null)
+        {
+            foreach (var d in active) d.Dispose();
+            throw new InvalidOperationException("No safe render device available for downlink. CABLE/VB-Audio devices are blocked to prevent feedback loops.");
+        }
+
+        Console.WriteLine($"Downlink safe fallback: {fallback.FriendlyName}");
+        return fallback;
+    }
+
     public void Start()
     {
-        Console.WriteLine($"PC audio downlink capture: {capture.WaveFormat.SampleRate} Hz, {capture.WaveFormat.Channels} ch, {capture.WaveFormat.Encoding}");
+        Console.WriteLine($"PC audio downlink capture: '{captureDevice.FriendlyName}' · {capture.WaveFormat.SampleRate} Hz, {capture.WaveFormat.Channels} ch, {capture.WaveFormat.Encoding}");
         Console.WriteLine($"Downlink jitter buffer: {PrebufferPackets * PacketMs} ms prebuffer, fixed {PacketMs} ms pacing, complete packets only");
         senderTask = Task.Run(() => SenderLoop(sendCts.Token));
         capture.StartRecording();
@@ -198,6 +247,7 @@ sealed class LoopbackDownlink : IDisposable
         disposed = true;
         try { capture.StopRecording(); } catch { }
         capture.Dispose();
+        captureDevice.Dispose();
         sendCts.Cancel();
         try { senderTask?.Wait(300); } catch { }
         sendCts.Dispose();
