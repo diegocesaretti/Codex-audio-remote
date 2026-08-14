@@ -44,6 +44,8 @@ jobs:
       - name: Apply smart Codex UI state patch (Android portion)
         continue-on-error: true
         run: python tools/apply_smart_ui_state.py
+      - name: Make bundled Vosk wake model self-contained
+        run: python tools/apply_bundled_wake_model.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
