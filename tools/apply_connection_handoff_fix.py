@@ -5,6 +5,12 @@ def replace_once(text, old, new, label):
     if new in text:
         return text
     if old not in text:
+        # REST/Home Assistant one-shot sessions intentionally no longer perform the
+        # old handoff into Android listening. In that mode these two legacy patch
+        # anchors are expected to be absent and should be treated as already obsolete.
+        if label in ('external handoff main', 'external stable ready helpers') and \
+                'External conversation END · Android microphone was never enabled' in text:
+            return text
         raise RuntimeError(f'Patch anchor not found: {label}')
     return text.replace(old, new, 1)
 
