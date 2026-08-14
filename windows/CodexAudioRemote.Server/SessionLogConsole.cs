@@ -1,10 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 
-// Zero-touch session logger: it mirrors the existing Console output and automatically
-// opens one timestamped log file per connected Android client/session. This keeps the
-// proven audio path completely unchanged while giving us enough state history to debug
-// abrupt conversation endings.
 static class SessionLogBootstrap
 {
     [ModuleInitializer]
@@ -21,7 +17,6 @@ sealed class SessionLogWriter : TextWriter
     readonly TextWriter original;
     readonly object sync = new();
     StreamWriter? session;
-    string? sessionPath;
 
     public SessionLogWriter(TextWriter original) => this.original = original;
     public override Encoding Encoding => original.Encoding;
@@ -33,17 +28,17 @@ sealed class SessionLogWriter : TextWriter
         {
             original.WriteLine(line);
 
-            if (line.Contains("Client connected:", StringComparison.OrdinalIgnoreCase))
-                StartSession(line);
+            if (line.Contains("Client connected", StringComparison.OrdinalIgnoreCase))
+                StartSession();
 
-            if (session != null)
+            if (session is not null)
             {
                 session.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {line}");
                 session.Flush();
             }
 
-            if (line.Contains("Client disconnected", StringComparison.OrdinalIgnoreCase)
-                || line.Contains("Client error:", StringComparison.OrdinalIgnoreCase))
+            if (line.Contains("Current client disconnected", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("Client error", StringComparison.OrdinalIgnoreCase))
                 EndSession();
         }
     }
@@ -53,19 +48,20 @@ sealed class SessionLogWriter : TextWriter
         lock (sync) original.Write(value);
     }
 
-    void StartSession(string firstLine)
+    void StartSession()
     {
         EndSession();
         try
         {
             var dir = Path.Combine(AppContext.BaseDirectory, "logs");
             Directory.CreateDirectory(dir);
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
-            sessionPath = Path.Combine(dir, $"session-{stamp}.log");
-            session = new StreamWriter(new FileStream(sessionPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite), new UTF8Encoding(false));
-            session.AutoFlush = true;
-            original.WriteLine($"Session log: {sessionPath}");
-            session.WriteLine("Codex Audio Remote · session diagnostic log");
+            var path = Path.Combine(dir, $"session-{DateTime.Now:yyyyMMdd-HHmmss-fff}.log");
+            session = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite), new UTF8Encoding(false))
+            {
+                AutoFlush = true
+            };
+            original.WriteLine("Session log: " + path);
+            session.WriteLine("Codex Audio Remote v2 · session diagnostic log");
             session.WriteLine($"Started: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
             session.WriteLine($"Executable: {Environment.ProcessPath}");
             session.WriteLine($"OS: {Environment.OSVersion}");
@@ -73,27 +69,21 @@ sealed class SessionLogWriter : TextWriter
         }
         catch (Exception ex)
         {
-            original.WriteLine($"Session log could not start: {ex.Message}");
+            original.WriteLine("Session log could not start: " + ex.Message);
             session = null;
-            sessionPath = null;
         }
     }
 
     void EndSession()
     {
-        if (session == null) return;
+        if (session is null) return;
         try
         {
             session.WriteLine(new string('-', 72));
             session.WriteLine($"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}");
-            session.Flush();
             session.Dispose();
         }
         catch { }
-        finally
-        {
-            session = null;
-            sessionPath = null;
-        }
+        finally { session = null; }
     }
 }
