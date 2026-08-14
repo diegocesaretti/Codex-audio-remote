@@ -54,6 +54,8 @@ jobs:
         run: python tools/apply_android_session_lifecycle_fix.py
       - name: Keep Android service connected and self-healing
         run: python tools/apply_android_persistent_service_fix.py
+      - name: Fix reconnect watchdog Java initializer
+        run: python tools/apply_android_reconnect_compile_fix.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
