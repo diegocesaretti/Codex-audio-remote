@@ -55,6 +55,8 @@ jobs:
         run: python tools/apply_smart_ui_state.py
       - name: Guard duplicate voice session starts
         run: python tools/apply_session_dedupe.py
+      - name: Disable STT-driven session ending
+        run: python tools/disable_stt_session_end.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
