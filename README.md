@@ -1,162 +1,215 @@
-# Codex Audio Remote
+# Codex Audio Remote v2
 
-Prototype Android satellite + Windows companion for using Codex Voice remotely over the LAN.
+Android 6+ audio satellite + Windows companion for using Codex Voice remotely over the LAN.
 
-## Goals
+The v2 rewrite has one design rule above everything else:
 
-- Android 6.0+ (`minSdk 23`)
-- lightweight foreground microphone service
-- local wake-word with Vosk
-- WebSocket link to a Windows PC
-- trigger the Codex Voice shortcut (`Ctrl+Q` by default)
-- confirm activation by watching the Windows microphone capability registry for `OpenAI.Codex_*`
-- temporarily switch the Windows default capture endpoint to the remote/virtual microphone during a Codex Voice session
-- restore the user's original microphone automatically when Voice ends, fails, disconnects, or the companion restarts after an unclean shutdown
-- stream Android microphone audio to the PC
-- later: stream PC/Codex audio back to Android and show a lightweight overlay over a Home Assistant dashboard
+> **Windows is the only authority for conversation state. Android mirrors that state and derives its microphone/speaker policy from it.**
 
-## Repository layout
+There are no build-time source patches and no independent client/server heuristics trying to guess whether a session is alive.
 
-- `windows/CodexAudioRemote.Server` — .NET 8 console prototype
-- `android` — Android/Java satellite prototype
+## Why v2 exists
 
-## Current prototype state
+The original prototype grew through incremental fixes. Eventually the same conversation could be represented by several unrelated signals:
 
-The signaling + temporary microphone switching milestone is implemented:
+- Android `streaming`, `conversationActive` and `activationPending` flags;
+- local timeouts and overlay state;
+- WebSocket lifecycle callbacks;
+- Windows microphone-registry activity;
+- delayed smart-close/graceful-end logic;
+- build-time Python patches modifying source before compilation.
 
-1. Android connects to the PC over WebSocket.
-2. Android sends a `wake` message (manual test button initially; Vosk service scaffold included).
-3. Windows saves the current default capture endpoint IDs for Console, Multimedia and Communications.
-4. Windows changes those defaults to the configured virtual microphone (default name match: `CABLE Output`).
-5. Windows sends `Ctrl+Q`.
-6. Windows polls `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone` for `OpenAI.Codex_*`.
-7. When `LastUsedTimeStart > 0 && LastUsedTimeStop == 0`, Windows replies `codex_listening`.
-8. Android can begin PCM microphone streaming.
-9. When Codex stops using the microphone, the companion waits a short debounce period and restores the original Windows defaults.
+That made valid combinations such as “server says listening, Android wake thread still owns AudioRecord” possible.
 
-The microphone registry behavior is intentionally treated as an observed Windows behavior rather than a guaranteed public API contract. The default-endpoint setter is also isolated because Windows exposes public APIs for discovering/default endpoint routing, but not a supported public setter equivalent for desktop apps.
+v2 replaces all of that with one explicit state machine and idempotent synchronization.
 
-## Windows quick start
+## Authoritative session states
 
-Requirements: Windows, .NET 8 SDK, Codex/ChatGPT Windows application installed.
+```text
+IDLE
+  ↓ wake
+ACTIVATING
+  ↓ Codex Voice confirmed
+LISTENING
+  ↓ explicit end event
+ENDING
+  ↓ cleanup/restore complete
+IDLE
+```
 
-For the prototype, install a virtual audio cable such as VB-CABLE. Its recording endpoint is normally named something containing `CABLE Output`.
+Every server state snapshot contains:
 
-First inspect the capture devices Windows exposes:
+```json
+{
+  "type": "state",
+  "protocol": 2,
+  "state": "listening",
+  "sessionId": "...",
+  "revision": 12,
+  "reason": "codex_ready"
+}
+```
+
+`sessionId` identifies one conversation. `revision` is monotonic and prevents Android from applying an older state snapshot after a newer one.
+
+## Android audio policy
+
+Android has one coordinator: `RemoteService.reconcileAudioPolicy()`.
+
+| Server state | Wake mic | Conversation mic | Downlink speaker |
+|---|---:|---:|---:|
+| disconnected | off | off | off |
+| idle | on | off | off |
+| activating | off | off | off |
+| listening | off | on | on |
+| ending | off | off | off |
+
+No timeout, overlay tap, Vosk callback or AudioRecord thread changes conversation state locally. Those components only emit events. Android changes policy when Windows sends the next authoritative state snapshot.
+
+### Wake word
+
+- Vosk runs locally.
+- Default phrase: `hola sol`.
+- Android 6 / API23 uses direct `AudioRecord` instead of `SpeechService`.
+- API23 capture preference order for wake is `DEFAULT`, `MIC`, `VOICE_RECOGNITION`, `CAMCORDER`.
+- `hola` followed by `sol` is accepted as a two-part partial sequence.
+- A real input heartbeat is tracked. If an API23 wake AudioRecord remains nominally open but stops producing buffers, it is recycled automatically.
+
+### Conversation microphone
+
+The conversation AudioRecord exists only in authoritative `LISTENING`.
+
+Android sends one `audio_config` control frame for the current `sessionId`, followed by PCM16 mono binary frames. If the capture thread fails or stops producing buffers while the state is still `LISTENING`, it is reopened from the same policy rather than inventing a new state transition.
+
+### Runtime indicators
+
+The top of the Android app shows the state used by the actual audio coordinator:
+
+- PC connected / connecting / disconnected;
+- current authoritative server state and revision;
+- wake listening + real RMS/audio heartbeat;
+- conversation mic listening + uplink heartbeat.
+
+These indicators are not a separate health model; they are rendered from the same variables used by `reconcileAudioPolicy()`.
+
+## Windows state owner
+
+`SessionServerV2` owns:
+
+- current state;
+- current `sessionId`;
+- monotonic revision;
+- current WebSocket generation;
+- virtual-cable uplink;
+- loopback downlink;
+- session cancellation and cleanup.
+
+A newly connected Android client immediately receives the current full state snapshot. This makes reconnect deterministic instead of treating every connection as a new conversation.
+
+If Android disconnects during an active session, Windows keeps the authoritative session for a short reconnect grace period. A reconnect receives the existing `sessionId` and resumes the audio policy. If no client returns, Windows ends the session and restores audio routing.
+
+## Codex Voice activation
+
+Windows uses the Windows microphone capability registry for one purpose only: **confirming the initial `ACTIVATING → LISTENING` transition**.
+
+It does **not** use temporary Codex microphone inactivity to decide that a conversation ended. Codex may think, speak, or temporarily release capture without changing the v2 session state.
+
+The normal activation path is:
+
+```text
+wake event
+  ├─ start optional Bluetooth reconnect in parallel
+  ├─ save original Windows audio defaults
+  ├─ default capture → CABLE Output
+  └─ Ctrl+Q
+       ↓
+Codex mic becomes active
+       ↓
+server state = LISTENING
+       ↓
+Android opens conversation mic
+```
+
+## Windows audio routing
+
+The companion stores the original capture/render endpoints before changing them and restores them when the session ends or the companion recovers from an unclean previous run.
+
+Default virtual devices:
+
+- recording endpoint used by Codex: `CABLE Output`;
+- render endpoint receiving Android PCM: `CABLE Input`.
+
+### Bluetooth output
+
+The selected response device is configured from **Audio de respuesta / Downlink…** in the Windows tray menu.
+
+If it is offline, `btcom` A2DP reconnect runs in parallel with Codex activation. A render handoff watcher switches the Windows default playback roles as soon as the selected endpoint becomes Active. The loopback downlink is rebound after the Bluetooth task completes.
+
+The companion requests only A2DP service `110b`. `btcom.exe` is not bundled.
+
+## Protocol v2
+
+Android → Windows control frames:
+
+```json
+{"type":"hello","protocol":2,"name":"Android satellite"}
+{"type":"sync"}
+{"type":"event","event":"wake","source":"voice"}
+{"type":"event","event":"end","reason":"overlay_tap","sessionId":"..."}
+{"type":"audio_config","sessionId":"...","sampleRate":48000,"channels":1,"chunkMs":45,"quality":80,"latency":55}
+```
+
+Windows → Android:
+
+```json
+{"type":"hello","protocol":2,"server":"CodexAudioRemote"}
+{"type":"state","protocol":2,"state":"idle","sessionId":"","revision":0,"reason":"startup"}
+```
+
+After `audio_config`, Android microphone audio is sent as PCM16 mono binary WebSocket frames while the authoritative state is `LISTENING`. Windows downlink PCM is sent as binary frames in the opposite direction.
+
+The server still accepts the old `wake`, `end_session`, `audio_start` and `audio_stop` controls temporarily so an old APK can connect during migration, but v2 clients do not use them.
+
+## Build
+
+CI builds source directly. No Python script rewrites Java or C# before compilation.
+
+### Windows
 
 ```powershell
 cd windows/CodexAudioRemote.Server
-dotnet run -- --list-devices
+dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
-Then start the server:
-
-```powershell
-dotnet run -- --port 8765 --virtual-mic "CABLE Output"
-```
-
-Allow TCP port 8765 through Windows Firewall for the local/private network.
-
-Optional arguments:
+Useful options:
 
 ```text
 --port 8765
 --shortcut ctrl+q
 --activation-timeout 6000
 --virtual-mic "CABLE Output"
---restore-delay 800
+--cable-input "CABLE Input"
+--end-restore-timeout 2500
 --list-devices
 ```
 
-The server binds to `http://+:8765/ws/`.
+### Android
 
-### Optional Bluetooth reconnect with btcom
+The Android app is Java/XML and has `minSdk 23`. CI bundles `vosk-model-small-es-0.42.zip` into the APK; `CodexRemoteApp` installs it into app storage on first launch.
 
-When the saved response output is a paired Bluetooth device that is currently
-offline, the Windows companion can ask `btcom` to enable the A2DP sink service
-(`110b`) before opening Codex Voice. It then waits for the saved audio endpoint
-to become `Active`. If either the command or the wait fails, the existing safe
-fallback is used and the saved selection is left untouched.
+On a fresh API23 install the conversation capture default is Android `DEFAULT`, because that is the most reliable mode on the target Android 6 device. The setting remains user-configurable.
 
-`btcom.exe` is detected from the configured path, the
-`CODEX_AUDIO_REMOTE_BTCOM` environment variable, `PATH`, and the usual
-`Program Files\\Bluetooth Command Line Tools` install folders. The path and the
-Active wait (1–15 seconds, 6 by default) can be changed from
-**Audio de respuesta / Downlink…** in the tray menu.
+## Main source files
 
-Only A2DP `110b` is requested. The companion does not enable HFP/HSP. If it
-connected an offline Bluetooth output for the conversation, it disconnects
-that A2DP service before restoring the playback device that was active before
-the conversation. A Bluetooth output that was already connected is left alone.
+- `windows/CodexAudioRemote.Server/SessionServerV2.cs` — authoritative protocol/session state machine.
+- `windows/CodexAudioRemote.Server/AudioPlatformV2.cs` — Windows capture/render switching + virtual-cable sink.
+- `windows/CodexAudioRemote.Server/BtcomBluetoothReconnect.cs` — optional A2DP reconnect.
+- `windows/CodexAudioRemote.Server/LoopbackDownlink.cs` — PC response loopback to Android.
+- `android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java` — v2 transport + deterministic audio coordinator.
+- `android/app/src/main/java/com/bwa3d/codexremote/RuntimeStatusPanel.java` — live state/audio health view.
 
-Bluetooth Command Line Tools 1.2 can return error 87 when A2DP is already
-registered but inactive. In that specific case only, the companion refreshes
-service `110b` (`-r` followed immediately by `-c`). It does not unpair the
-device and does not touch any hands-free service.
+## Home Assistant adapter
 
-`btcom.exe` is deliberately not bundled. Its publisher allows personal and
-commercial use but does not grant redistribution rights without express
-authorization. Install Bluetooth Command Line Tools separately from the
-publisher if you want this optional reconnect behavior.
+The existing `HomeAssistantApiServer`, `ExternalConversationHub` and context-injection sources are still present while the v2 core is being stabilized, but **the v2 entrypoint does not currently start that adapter**. It will be reattached through the same authoritative state machine rather than being allowed to own a parallel session lifecycle.
 
-### Safety / recovery behavior
-
-Before changing defaults, the companion writes `audio-restore.json` beside the executable. It stores the original endpoint IDs for the three Windows audio roles.
-
-Normal session end, activation timeout, client disconnect and Ctrl+C all restore the original microphone. If the process crashes while the virtual microphone is still default, the next launch sees `audio-restore.json` and restores the saved endpoints before accepting clients.
-
-The restore delay defaults to 800 ms so a short close/reopen transition inside Codex Voice does not cause the default input to flap between devices.
-
-## Android quick start
-
-Open `android/` in Android Studio, set the PC IP in the app, then press **Conectar** and **Probar wake**.
-
-The app targets Android 6.0+ and deliberately uses a small Java/XML stack instead of Compose.
-
-### Vosk model
-
-The code expects a Vosk model at `app/src/main/assets/model/`. The model itself is not committed because it is large. For the first transport test you can use the manual wake button without a model.
-
-## Audio format (prototype)
-
-Android uplink binary WebSocket frames are raw PCM:
-
-- signed PCM16 little-endian
-- mono
-- 16 kHz
-
-The Windows server currently receives and meters these frames. Feeding that PCM into the render side of the virtual cable (`CABLE Input`) and implementing the PC-audio downlink are the next milestone.
-
-## Protocol
-
-Text frames are JSON.
-
-Android → PC:
-
-```json
-{"type":"hello","name":"Kitchen tablet"}
-{"type":"wake"}
-{"type":"audio_start","sampleRate":16000,"channels":1}
-{"type":"audio_stop"}
-```
-
-PC → Android:
-
-```json
-{"type":"hello","server":"CodexAudioRemote"}
-{"type":"activating"}
-{"type":"codex_listening"}
-{"type":"codex_idle"}
-{"type":"activation_failed","reason":"virtual_mic_not_found"}
-{"type":"activation_failed","reason":"codex_mic_timeout"}
-```
-
-Binary frames are microphone PCM while a voice session is active.
-
-## Next milestone
-
-- feed Android PCM into a selectable Windows render endpoint / virtual audio cable (`CABLE Input`)
-- WASAPI loopback capture for Codex output → Android speaker
-- functional Vosk wake-word model loading
-- overlay states: Activating / Listening / Speaking / Error
-- reconnect + boot persistence
+That separation is intentional: external integrations must request transitions from the v2 state owner; they must never create a second source of session truth.
