@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, rewrite/state-machine-v2 ]
   pull_request:
 
 jobs:
@@ -10,15 +10,6 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Prevent stale-client and mic-idle audio restores
-        run: python tools/apply_single_client_audio_ownership.py
-      - name: Guard delayed smart close against stale owners
-        run: python tools/apply_current_owner_smart_close_guard.py
-      - name: Parallelize Bluetooth activation and handoff
-        run: python tools/apply_parallel_bluetooth_activation.py
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -27,39 +18,13 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexAudioRemote-Windows-x64
+          name: CodexAudioRemote-Windows-x64-v2
           path: dist/windows
 
   android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      # These scripts still contain legacy Windows patch sections. The Android
-      # modifications are written before those sections, so keep the Android
-      # behavior while allowing the already-materialized Windows source to remain untouched.
-      - name: Apply graceful voice end patch (Android portion)
-        continue-on-error: true
-        run: python tools/apply_graceful_end.py
-      - name: Apply smart Codex UI state patch (Android portion)
-        continue-on-error: true
-        run: python tools/apply_smart_ui_state.py
-      - name: Make bundled Vosk wake model self-contained
-        run: python tools/apply_bundled_wake_model.py
-      - name: Fix Android 6 legacy wake path
-        run: python tools/apply_android6_wake_fix.py
-      - name: Reset stale Android session state on reconnect
-        run: python tools/apply_android_session_lifecycle_fix.py
-      - name: Keep Android service connected and self-healing
-        run: python tools/apply_android_persistent_service_fix.py
-      - name: Fix reconnect watchdog Java initializer
-        run: python tools/apply_android_reconnect_compile_fix.py
-      - name: Route Android controls through one persistent socket
-        run: python tools/apply_android_single_socket_control.py
-      - name: Add live connection and wake health indicators
-        run: python tools/apply_runtime_health_and_activation_timeout.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -80,5 +45,5 @@ jobs:
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexAudioRemote-Android-debug
+          name: CodexAudioRemote-Android-v2
           path: android/app/build/outputs/apk/debug/app-debug.apk
