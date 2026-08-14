@@ -85,6 +85,9 @@ while (true)
                 switch (type)
                 {
                     case "wake":
+                        // Codex has its own intrinsic activation delay. Send the shortcut first so
+                        // Windows audio switching happens inside that delay instead of before it.
+                        ShortcutSender.Send(options.Shortcut);
                         await SendJson(socket, sendGate, new { type = "activating" });
                         if (!switcher.ActivateRemoteMic())
                         {
@@ -92,8 +95,6 @@ while (true)
                             break;
                         }
                         switcher.BeginActivation();
-                        await Task.Delay(75);
-                        ShortcutSender.Send(options.Shortcut);
                         _ = ConfirmActivation(socket, sendGate, switcher, options.ActivationTimeoutMs);
                         break;
 
