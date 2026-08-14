@@ -3,12 +3,16 @@ using System.Text.Json;
 
 internal sealed class HomeAssistantApiServer : IDisposable
 {
+    readonly SessionServerV2 sessions;
     readonly HttpListener listener = new();
     readonly CancellationTokenSource cts = new();
+    readonly int port;
     Task? loopTask;
 
-    public HomeAssistantApiServer(int port = 8766)
+    public HomeAssistantApiServer(SessionServerV2 sessions, int port = 8766)
     {
+        this.sessions = sessions;
+        this.port = port;
         listener.Prefixes.Add($"http://+:{port}/api/");
     }
 
@@ -16,7 +20,7 @@ internal sealed class HomeAssistantApiServer : IDisposable
     {
         listener.Start();
         loopTask = Task.Run(() => LoopAsync(cts.Token));
-        Console.WriteLine("Home Assistant API listening on http://0.0.0.0:8766/api/");
+        Console.WriteLine($"Home Assistant API v2 listening on http://0.0.0.0:{port}/api/");
         Console.WriteLine("Home Assistant base URL: " + TrayController.HomeAssistantBaseUrl);
     }
 
@@ -27,7 +31,11 @@ internal sealed class HomeAssistantApiServer : IDisposable
             HttpListenerContext context;
             try { context = await listener.GetContextAsync(); }
             catch when (token.IsCancellationRequested) { break; }
-            catch (Exception ex) { Console.WriteLine("HA API listener error: " + ex.Message); continue; }
+            catch (Exception ex)
+            {
+                Console.WriteLine("HA API listener error: " + ex.Message);
+                continue;
+            }
             _ = Task.Run(() => HandleAsync(context, token), token);
         }
     }
@@ -36,8 +44,16 @@ internal sealed class HomeAssistantApiServer : IDisposable
     {
         try
         {
+            var path = context.Request.Url?.AbsolutePath ?? "";
+            if (string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(path, "/api/health", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteJson(context.Response, 200, new { ok = true, protocol = 2, service = "home_assistant_rest" });
+                return;
+            }
+
             if (!string.Equals(context.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(context.Request.Url?.AbsolutePath, "/api/conversation/start", StringComparison.OrdinalIgnoreCase))
+                !string.Equals(path, "/api/conversation/start", StringComparison.OrdinalIgnoreCase))
             {
                 await WriteJson(context.Response, 404, new { ok = false, error = "not_found" });
                 return;
@@ -54,7 +70,7 @@ internal sealed class HomeAssistantApiServer : IDisposable
             var audioUrl = root.TryGetProperty("audio_url", out var audioProp) ? audioProp.GetString() : null;
             var text = root.TryGetProperty("text", out var textProp) ? textProp.GetString() : null;
 
-            string? contextSource = null;
+            string contextSource;
             string inputType;
             if (!string.IsNullOrWhiteSpace(text))
             {
@@ -63,7 +79,7 @@ internal sealed class HomeAssistantApiServer : IDisposable
             }
             else if (!string.IsNullOrWhiteSpace(audioUrl))
             {
-                contextSource = audioUrl;
+                contextSource = audioUrl.Trim();
                 inputType = "audio_url";
             }
             else
@@ -72,10 +88,27 @@ internal sealed class HomeAssistantApiServer : IDisposable
                 return;
             }
 
-            Console.WriteLine($"HA conversation request · input={inputType}");
-            var started = await ExternalConversationHub.TryStartAsync(new ExternalConversationRequest(contextSource));
-            await WriteJson(context.Response, started ? 202 : 409,
-                started ? new { ok = true, status = "accepted", input = inputType } : new { ok = false, error = "android_not_connected" });
+            Console.WriteLine($"HA conversation request · input={inputType} · remote={context.Request.RemoteEndPoint}");
+            var result = await sessions.StartExternalConversationAsync(contextSource, "home_assistant");
+            if (!result.Accepted)
+            {
+                await WriteJson(context.Response, 409, new { ok = false, error = result.Status });
+                return;
+            }
+
+            await WriteJson(context.Response, 202, new
+            {
+                ok = true,
+                status = "accepted",
+                input = inputType,
+                sessionId = result.SessionId,
+                protocol = 2
+            });
+        }
+        catch (JsonException ex)
+        {
+            Console.WriteLine("HA API invalid JSON: " + ex.Message);
+            try { await WriteJson(context.Response, 400, new { ok = false, error = "invalid_json" }); } catch { }
         }
         catch (Exception ex)
         {
