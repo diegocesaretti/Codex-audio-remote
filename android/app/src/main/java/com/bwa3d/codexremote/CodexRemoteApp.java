@@ -1,6 +1,7 @@
 package com.bwa3d.codexremote;
 
 import android.app.Application;
+import android.content.SharedPreferences;
 import android.os.Build;
 
 import java.io.BufferedInputStream;
@@ -15,7 +16,17 @@ public class CodexRemoteApp extends Application {
         super.onCreate();
         AndroidDebugLog.install(this);
         AndroidDebugLog.log("Application started · API " + Build.VERSION.SDK_INT);
+        applyFreshInstallDefaults();
         ensureBundledVoskModel();
+    }
+
+    private void applyFreshInstallDefaults() {
+        if (Build.VERSION.SDK_INT > 23) return;
+        SharedPreferences prefs = getSharedPreferences("settings", MODE_PRIVATE);
+        if (!prefs.contains("audio_source")) {
+            prefs.edit().putString("audio_source", "default").apply();
+            AndroidDebugLog.log("API23 fresh default · conversation capture=default");
+        }
     }
 
     private void ensureBundledVoskModel() {
