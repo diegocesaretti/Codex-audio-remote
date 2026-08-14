@@ -26,6 +26,9 @@ sealed class LoopbackDownlink : IDisposable
     long underruns;
     long droppedPackets;
     long lastCaptureTicks;
+    long lastSpeechTicks;
+    int speechSeen;
+    const double SpeechRmsThreshold = 420.0;
 
     public LoopbackDownlink(Func<byte[], Task> onPcm, string? preferredDeviceId = null)
     {
@@ -140,9 +143,60 @@ sealed class LoopbackDownlink : IDisposable
             if (droppedPackets == 1 || droppedPackets % 25 == 0)
                 Console.WriteLine($"Downlink jitter overflow: dropped={droppedPackets} · queue={sendQueue.Count}");
         }
+        TrackSpeechActivity(packet);
         sendQueue.Enqueue(packet);
         capturedPackets++;
         queueSignal.Release();
+    }
+
+    void TrackSpeechActivity(byte[] packet)
+    {
+        if (packet.Length < 2) return;
+        double sumSquares = 0;
+        int samples = packet.Length / 2;
+        for (int i = 0; i + 1 < packet.Length; i += 2)
+        {
+            short sample = (short)(packet[i] | (packet[i + 1] << 8));
+            sumSquares += (double)sample * sample;
+        }
+        var rms = Math.Sqrt(sumSquares / Math.Max(1, samples));
+        if (rms >= SpeechRmsThreshold)
+        {
+            Interlocked.Exchange(ref speechSeen, 1);
+            Interlocked.Exchange(ref lastSpeechTicks, Stopwatch.GetTimestamp());
+        }
+    }
+
+    public async Task<bool> WaitForSpeechThenSilenceAsync(int speechStartTimeoutMs, int silenceMs, CancellationToken token)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var timeoutTicks = speechStartTimeoutMs * (double)Stopwatch.Frequency / 1000.0;
+        while (!token.IsCancellationRequested && Volatile.Read(ref speechSeen) == 0)
+        {
+            if (Stopwatch.GetTimestamp() - started >= timeoutTicks)
+            {
+                Console.WriteLine($"Response VAD: no speech detected within {speechStartTimeoutMs} ms");
+                return false;
+            }
+            await Task.Delay(50, token);
+        }
+
+        Console.WriteLine("Response VAD: speech detected; waiting for end-of-response silence");
+        while (!token.IsCancellationRequested)
+        {
+            var last = Volatile.Read(ref lastSpeechTicks);
+            if (last != 0)
+            {
+                var quietMs = (Stopwatch.GetTimestamp() - last) * 1000.0 / Stopwatch.Frequency;
+                if (quietMs >= silenceMs)
+                {
+                    Console.WriteLine($"Response VAD: end detected after {quietMs:F0} ms silence");
+                    return true;
+                }
+            }
+            await Task.Delay(50, token);
+        }
+        return false;
     }
 
     async Task SenderLoop(CancellationToken token)

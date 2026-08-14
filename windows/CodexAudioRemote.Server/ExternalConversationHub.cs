@@ -86,6 +86,7 @@ internal sealed class ExternalSessionController : IDisposable
     {
         Console.WriteLine($"External conversation START · source={request.Source}");
         await SendJson(new { type = "activating" });
+        await BtcomBluetoothReconnect.EnsureSelectedOutputActiveAsync(cts.Token);
         if (!switcher.ActivateRemoteMic()) throw new InvalidOperationException("virtual_mic_not_found");
         switcher.BeginActivation();
         await Task.Delay(75, cts.Token);
@@ -97,20 +98,36 @@ internal sealed class ExternalSessionController : IDisposable
         Console.WriteLine("HA context injection complete");
 
         downlink?.Dispose();
-        downlink = new LoopbackDownlink(SendBinary);
+        downlink = new LoopbackDownlink(SendBinary, DownlinkDeviceSettings.SelectedDeviceId);
         await SendJson(new { type = "downlink_start", sampleRate = 16000, channels = 1 });
         downlink.Start();
 
-        var becameBusy = await WaitMicAsync(false, 15000);
-        Console.WriteLine(becameBusy ? "Codex processing external context" : "No inactive transition detected; using readiness fallback");
-        var ready = await WaitMicAsync(true, 45000);
-        Console.WriteLine(ready ? "Codex ready after external context" : "Readiness timeout; opening Android mic as fallback");
+        var becameBusy = await WaitForBusyAsync(12000);
+        Console.WriteLine(becameBusy ? "Codex processing external context" : "No explicit busy transition detected; response VAD remains primary");
 
+        // Primary signal: listen to the exact audio being sent to Android. As soon as Codex has
+        // spoken and stays quiet for ~0.9 s, its response is over. This is substantially faster
+        // and more reliable than waiting for accessibility/microphone state transitions.
+        var responseEnded = downlink != null && await downlink.WaitForSpeechThenSilenceAsync(45000, 900, cts.Token);
+        bool ready;
+        if (responseEnded)
+        {
+            ready = true;
+            Console.WriteLine("HA handoff: response audio ended; opening Android mic");
+        }
+        else
+        {
+            Console.WriteLine("HA handoff: response VAD unavailable; using short 4 s readiness fallback");
+            ready = await WaitForStableReadyAsync(4000);
+        }
+
+        // Allow the Android jitter buffer to drain the final packets before its microphone opens.
+        await Task.Delay(450, cts.Token);
         downlink?.Dispose();
         downlink = null;
         switcher.MarkListening();
         ExternalConversationHub.SetSuppressCodexEvents(false);
-        await SendJson(new { type = "codex_listening" });
+        await SendJson(new { type = "codex_listening", source = "external_context", readyConfirmed = ready, handoff = responseEnded ? "audio_end" : "4s_fallback" });
         Console.WriteLine("External conversation READY · Android microphone enabled");
     }
 
@@ -123,6 +140,40 @@ internal sealed class ExternalSessionController : IDisposable
             await Task.Delay(80, cts.Token);
         }
         return CodexMicDetector.IsActive() == desired;
+    }
+
+    async Task<bool> WaitForBusyAsync(int timeoutMs)
+    {
+        var started = Environment.TickCount64;
+        while (!cts.IsCancellationRequested && Environment.TickCount64 - started < timeoutMs)
+        {
+            var ui = CodexUiStateDetector.Detect();
+            if (!CodexMicDetector.IsActive() || ui.Busy) return true;
+            await Task.Delay(100, cts.Token);
+        }
+        return false;
+    }
+
+    async Task<bool> WaitForStableReadyAsync(int timeoutMs)
+    {
+        var started = Environment.TickCount64;
+        long readySince = 0;
+        const int StableMs = 700;
+        while (!cts.IsCancellationRequested && Environment.TickCount64 - started < timeoutMs)
+        {
+            var mic = CodexMicDetector.IsActive();
+            var ui = CodexUiStateDetector.Detect();
+            var candidate = mic && !ui.Busy;
+            var now = Environment.TickCount64;
+            if (candidate)
+            {
+                if (readySince == 0) readySince = now;
+                if (now - readySince >= StableMs) return true;
+            }
+            else readySince = 0;
+            await Task.Delay(100, cts.Token);
+        }
+        return false;
     }
 
     async Task SendJson(object payload)

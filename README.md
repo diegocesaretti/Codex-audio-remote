@@ -70,6 +70,35 @@ Optional arguments:
 
 The server binds to `http://+:8765/ws/`.
 
+### Optional Bluetooth reconnect with btcom
+
+When the saved response output is a paired Bluetooth device that is currently
+offline, the Windows companion can ask `btcom` to enable the A2DP sink service
+(`110b`) before opening Codex Voice. It then waits for the saved audio endpoint
+to become `Active`. If either the command or the wait fails, the existing safe
+fallback is used and the saved selection is left untouched.
+
+`btcom.exe` is detected from the configured path, the
+`CODEX_AUDIO_REMOTE_BTCOM` environment variable, `PATH`, and the usual
+`Program Files\\Bluetooth Command Line Tools` install folders. The path and the
+Active wait (1–15 seconds, 6 by default) can be changed from
+**Audio de respuesta / Downlink…** in the tray menu.
+
+Only A2DP `110b` is requested. The companion does not enable HFP/HSP. If it
+connected an offline Bluetooth output for the conversation, it disconnects
+that A2DP service before restoring the playback device that was active before
+the conversation. A Bluetooth output that was already connected is left alone.
+
+Bluetooth Command Line Tools 1.2 can return error 87 when A2DP is already
+registered but inactive. In that specific case only, the companion refreshes
+service `110b` (`-r` followed immediately by `-c`). It does not unpair the
+device and does not touch any hands-free service.
+
+`btcom.exe` is deliberately not bundled. Its publisher allows personal and
+commercial use but does not grant redistribution rights without express
+authorization. Install Bluetooth Command Line Tools separately from the
+publisher if you want this optional reconnect behavior.
+
 ### Safety / recovery behavior
 
 Before changing defaults, the companion writes `audio-restore.json` beside the executable. It stores the original endpoint IDs for the three Windows audio roles.

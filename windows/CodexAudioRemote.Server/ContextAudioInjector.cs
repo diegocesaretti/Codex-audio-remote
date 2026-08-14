@@ -39,7 +39,10 @@ internal static class ContextAudioInjector
                     .FirstOrDefault(v => v.Enabled && v.VoiceInfo.Culture.Name.StartsWith("es", StringComparison.OrdinalIgnoreCase));
                 if (spanish != null) synth.SelectVoice(spanish.VoiceInfo.Name);
                 synth.SetOutputToWaveFile(temp);
-                synth.Speak(text);
+                var escaped = System.Security.SecurityElement.Escape(text) ?? string.Empty;
+                var culture = spanish?.VoiceInfo.Culture.Name ?? "es-ES";
+                var ssml = $"<speak version='1.0' xml:lang='{culture}'><prosody rate='+25%'>{escaped}</prosody></speak>";
+                synth.SpeakSsml(ssml);
                 synth.SetOutputToNull();
             }, token);
             await PlayFileAsync(temp, cableDeviceName, token);

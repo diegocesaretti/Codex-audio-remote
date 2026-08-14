@@ -50,7 +50,10 @@ while (true)
             ExternalConversationHub.Register(externalHandler);
 
             using var cts = new CancellationTokenSource();
-            var registryTask = WatchCodexMic(socket, sendGate, switcher, cts.Token);
+            bool gracefulHold = false;
+            CancellationTokenSource? smartCloseCts = null;
+            string lastUiStateLog = "";
+            var registryTask = WatchCodexMic(socket, sendGate, switcher, () => gracefulHold, cts.Token);
             var buffer = new byte[32 * 1024];
             long audioBytes = 0;
             int uplinkBytesPerSecond = 32000;
@@ -61,6 +64,75 @@ while (true)
                 audioSink?.Dispose(); audioSink = null;
                 downlink?.Dispose(); downlink = null;
                 if (notify) await SendJson(socket, sendGate, new { type = "downlink_stop" });
+            }
+
+            async Task StopUplinkOnly()
+            {
+                codexInputRecorder?.Dispose(); codexInputRecorder = null;
+                audioSink?.Dispose(); audioSink = null;
+                await SendJson(socket, sendGate, new { type = "mic_stopped" });
+                Console.WriteLine("Remote microphone stopped; Codex Voice/downlink kept alive");
+            }
+
+            void CancelSmartClose()
+            {
+                try { smartCloseCts?.Cancel(); } catch { }
+                try { smartCloseCts?.Dispose(); } catch { }
+                smartCloseCts = null;
+            }
+
+            async Task ExecuteVoiceClose(string reason, string source)
+            {
+                gracefulHold = false;
+                Console.WriteLine($"Smart Voice close executing ({source}) · reason={reason}");
+                await SendJson(socket, sendGate, new { type = "session_ending", reason, source });
+                await StopAudioSession();
+
+                var ui = CodexUiStateDetector.Detect();
+                var shouldToggle = CodexMicDetector.IsActive() || ui.State != CodexUiState.Unknown;
+                if (shouldToggle)
+                {
+                    ShortcutSender.Send(options.Shortcut);
+                    await ForceRestoreAfterEnd(switcher, options.EndSessionRestoreTimeoutMs);
+                }
+                else
+                {
+                    Console.WriteLine("Voice close fallback: no active mic/UI state detected; restoring microphone without toggling Voice.");
+                    switcher.RestoreNow();
+                }
+            }
+
+            async Task RunSmartClose(string reason, int delaySeconds, CancellationToken token)
+            {
+                var remainingMs = Math.Clamp(delaySeconds, 0, 120) * 1000;
+                const int TickMs = 400;
+                Console.WriteLine($"Smart Voice close armed · delay={delaySeconds}s · UI Automation will pause countdown while Codex is busy");
+                await SendJson(socket, sendGate, new { type = "smart_close_armed", delaySeconds });
+
+                while (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
+                {
+                    var snapshot = CodexUiStateDetector.Detect();
+                    var stateLog = $"{snapshot.State}|{snapshot.MatchedText}|{snapshot.WindowFound}";
+                    if (!string.Equals(lastUiStateLog, stateLog, StringComparison.Ordinal))
+                    {
+                        lastUiStateLog = stateLog;
+                        Console.WriteLine($"Codex UI state: {snapshot.State} · text='{snapshot.MatchedText ?? "-"}' · scanned={snapshot.ElementsScanned} · window={snapshot.WindowFound}");
+                        await SendJson(socket, sendGate, new { type = "codex_ui_state", state = snapshot.State.ToString().ToLowerInvariant(), text = snapshot.MatchedText });
+                    }
+
+                    if (snapshot.Busy)
+                    {
+                        await Task.Delay(TickMs, token);
+                        continue;
+                    }
+
+                    if (remainingMs <= 0) break;
+                    await Task.Delay(TickMs, token);
+                    remainingMs -= TickMs;
+                }
+
+                if (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
+                    await ExecuteVoiceClose(reason, "smart_delay");
             }
 
             while (socket.State == WebSocketState.Open)
@@ -86,6 +158,7 @@ while (true)
                 {
                     case "wake":
                         await SendJson(socket, sendGate, new { type = "activating" });
+                        await BtcomBluetoothReconnect.EnsureSelectedOutputActiveAsync();
                         if (!switcher.ActivateRemoteMic())
                         {
                             await SendJson(socket, sendGate, new { type = "activation_failed", reason = "virtual_mic_not_found" });
@@ -98,6 +171,8 @@ while (true)
                         break;
 
                     case "audio_start":
+                        gracefulHold = false;
+                        CancelSmartClose();
                         audioBytes = 0;
                         await StopAudioSession(false);
                         var sampleRate = GetInt(doc.RootElement, "sampleRate", 16000, 8000, 48000);
@@ -112,18 +187,36 @@ while (true)
                             break;
                         }
                         codexInputRecorder = CableOutputRecorder.TryCreate(options.VirtualMicName);
-                        downlink = new LoopbackDownlink(async pcm => await SendBinary(socket, sendGate, pcm));
+                        downlink = new LoopbackDownlink(async pcm => await SendBinary(socket, sendGate, pcm), DownlinkDeviceSettings.SelectedDeviceId);
                         await SendJson(socket, sendGate, new { type = "downlink_start", sampleRate = 16000, channels = 1 });
                         downlink.Start();
                         Console.WriteLine($"Bidirectional session: {sampleRate} Hz, chunk {chunkMs} ms, quality {quality}%, latency {latency}%");
                         break;
 
+                    case "mic_stop":
+                        gracefulHold = true;
+                        await StopUplinkOnly();
+                        Console.WriteLine("Graceful hold ACTIVE: suppressing mic-idle session end until smart close completes");
+                        break;
+
+                    case "graceful_end":
+                        gracefulHold = true;
+                        var gracefulReason = doc.RootElement.TryGetProperty("reason", out var gracefulReasonProp) ? gracefulReasonProp.GetString() ?? "client" : "client";
+                        var gracefulDelay = GetInt(doc.RootElement, "delaySeconds", 15, 0, 120);
+                        CancelSmartClose();
+                        smartCloseCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                        _ = RunSmartClose(gracefulReason, gracefulDelay, smartCloseCts.Token);
+                        break;
+
                     case "audio_stop":
+                        gracefulHold = false;
                         await StopAudioSession();
                         Console.WriteLine("Bidirectional audio session stopped");
                         break;
 
                     case "end_session":
+                        gracefulHold = false;
+                        CancelSmartClose();
                         var reason = doc.RootElement.TryGetProperty("reason", out var reasonProp) ? reasonProp.GetString() : "client";
                         Console.WriteLine($"Ending conversation ({reason})");
                         await SendJson(socket, sendGate, new { type = "session_ending", reason });
@@ -141,6 +234,7 @@ while (true)
                 }
             }
 
+            CancelSmartClose();
             await StopAudioSession(false);
             cts.Cancel();
             try { await registryTask; } catch (OperationCanceledException) { }
@@ -202,7 +296,7 @@ async Task ConfirmActivation(WebSocket socket, SemaphoreSlim gate, AudioDeviceSw
     }
 }
 
-async Task WatchCodexMic(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitcher audioSwitcher, CancellationToken token)
+async Task WatchCodexMic(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitcher audioSwitcher, Func<bool> suppressIdle, CancellationToken token)
 {
     const int IdleConfirmMs = 1200;
     bool? announcedActive = null;
@@ -235,6 +329,13 @@ async Task WatchCodexMic(WebSocket socket, SemaphoreSlim gate, AudioDeviceSwitch
         }
         else
         {
+            if (suppressIdle())
+            {
+                if (idleSince != 0) idleSince = 0;
+                if (announcedActive == true) Console.WriteLine("Codex mic inactive but session end is suppressed during graceful hold (likely thinking/processing)");
+                await Task.Delay(100, token);
+                continue;
+            }
             if (announcedActive == true)
             {
                 if (idleSince == 0)
@@ -325,6 +426,10 @@ static class AudioDeviceManager
     {
         try { using var e = new MMDeviceEnumerator(); return e.GetDefaultAudioEndpoint(DataFlow.Capture, role).ID; } catch { return null; }
     }
+    public static string? GetDefaultRenderId(Role role)
+    {
+        try { using var e = new MMDeviceEnumerator(); return e.GetDefaultAudioEndpoint(DataFlow.Render, role).ID; } catch { return null; }
+    }
 }
 
 sealed class AudioCableSink : IDisposable
@@ -371,6 +476,8 @@ sealed class AudioDeviceSwitcher
 {
     readonly string virtualMicName; readonly int restoreDelayMs;
     readonly string recoveryPath = Path.Combine(AppContext.BaseDirectory, "audio-restore.json");
+    readonly string renderRecoveryPath = Path.Combine(AppContext.BaseDirectory, "audio-render-restore.json");
+    SavedDefaults? savedRender;
     readonly object sync = new(); CancellationTokenSource? restoreCts; SavedDefaults? saved;
     public bool RemoteMicIsActive { get; private set; }
     public AudioSessionState State { get; private set; } = AudioSessionState.Idle;
@@ -387,6 +494,23 @@ sealed class AudioDeviceSwitcher
             try
             {
                 PolicyConfig.SetDefaultEndpoint(target.ID, PolicyRole.Console); PolicyConfig.SetDefaultEndpoint(target.ID, PolicyRole.Multimedia); PolicyConfig.SetDefaultEndpoint(target.ID, PolicyRole.Communications);
+
+                var renderId = DownlinkDeviceSettings.SelectedDeviceId;
+                if (!string.IsNullOrWhiteSpace(renderId))
+                {
+                    using var render = new MMDeviceEnumerator().EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                        .FirstOrDefault(d => string.Equals(d.ID, renderId, StringComparison.Ordinal));
+                    if (render is not null && !DownlinkDeviceSettings.IsUnsafe(render.FriendlyName))
+                    {
+                        savedRender = new SavedDefaults(AudioDeviceManager.GetDefaultRenderId(Role.Console), AudioDeviceManager.GetDefaultRenderId(Role.Multimedia), AudioDeviceManager.GetDefaultRenderId(Role.Communications));
+                        File.WriteAllText(renderRecoveryPath, JsonSerializer.Serialize(savedRender));
+                        PolicyConfig.SetDefaultEndpoint(render.ID, PolicyRole.Console);
+                        PolicyConfig.SetDefaultEndpoint(render.ID, PolicyRole.Multimedia);
+                        PolicyConfig.SetDefaultEndpoint(render.ID, PolicyRole.Communications);
+                        Console.WriteLine($"Codex output temporarily switched to: {render.FriendlyName}");
+                    }
+                }
+
                 RemoteMicIsActive = true; Console.WriteLine($"Default capture temporarily switched to: {target.FriendlyName}"); return true;
             }
             catch (Exception ex) { Console.WriteLine($"Failed to switch default microphone: {ex.Message}"); RestoreNow(); return false; }
@@ -424,11 +548,35 @@ sealed class AudioDeviceSwitcher
             }
             catch (Exception ex) { Console.WriteLine($"Restore warning: {ex.Message}"); }
             try { if (File.Exists(recoveryPath)) File.Delete(recoveryPath); } catch { }
+
+            bool renderRestored = false;
+            try
+            {
+                BtcomBluetoothReconnect.DisconnectIfConnectedByCompanion();
+                if (savedRender is null && File.Exists(renderRecoveryPath)) savedRender = JsonSerializer.Deserialize<SavedDefaults>(File.ReadAllText(renderRecoveryPath));
+                if (savedRender is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(savedRender.Console)) { PolicyConfig.SetDefaultEndpoint(savedRender.Console, PolicyRole.Console); renderRestored = true; }
+                    if (!string.IsNullOrWhiteSpace(savedRender.Multimedia)) { PolicyConfig.SetDefaultEndpoint(savedRender.Multimedia, PolicyRole.Multimedia); renderRestored = true; }
+                    if (!string.IsNullOrWhiteSpace(savedRender.Communications)) { PolicyConfig.SetDefaultEndpoint(savedRender.Communications, PolicyRole.Communications); renderRestored = true; }
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"Render restore warning: {ex.Message}"); }
+            try { if (File.Exists(renderRecoveryPath)) File.Delete(renderRecoveryPath); } catch { }
+            savedRender = null;
+
             saved = null; RemoteMicIsActive = false; State = AudioSessionState.Idle;
             if (restored) Console.WriteLine("Default capture restored to the devices selected before the conversation.");
+            if (renderRestored) Console.WriteLine("Default playback restored to the devices selected before the conversation.");
         }
     }
-    public async Task TryRecoverAsync() { if (!File.Exists(recoveryPath)) return; Console.WriteLine("Recovering audio defaults from previous run..."); RestoreNow(); await Task.Delay(100); }
+    public async Task TryRecoverAsync()
+    {
+        if (!File.Exists(recoveryPath) && !File.Exists(renderRecoveryPath)) return;
+        Console.WriteLine("Recovering audio defaults from previous run...");
+        RestoreNow();
+        await Task.Delay(100);
+    }
 }
 
 sealed record SavedDefaults(string? Console, string? Multimedia, string? Communications);

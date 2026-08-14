@@ -10,6 +10,8 @@ internal static class DownlinkDeviceSettings
 
     public static string? SelectedDeviceId => Load().DownlinkDeviceId;
     public static string? SelectedDeviceName => Load().DownlinkDeviceName;
+    public static string? BtcomPath => Load().BtcomPath;
+    public static int BtcomWaitSeconds => Math.Clamp(Load().BtcomWaitSeconds, 1, 15);
 
     public static bool IsUnsafe(string name) =>
         name.Contains("CABLE", StringComparison.OrdinalIgnoreCase) ||
@@ -42,12 +44,12 @@ internal static class DownlinkDeviceSettings
 
         using var form = new Form
         {
-            Text = "Audio de respuesta / Downlink",
+            Text = "Salida de Codex / Downlink",
             StartPosition = FormStartPosition.CenterScreen,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false,
             MaximizeBox = false,
-            ClientSize = new Size(560, 190)
+            ClientSize = new Size(560, 270)
         };
         var label = new Label
         {
@@ -65,9 +67,13 @@ internal static class DownlinkDeviceSettings
         if (index >= 0) combo.SelectedIndex = index;
         else if (combo.Items.Count > 0) combo.SelectedIndex = 0;
 
-        var save = new Button { Left = 372, Top = 136, Width = 80, Text = "Guardar", DialogResult = DialogResult.OK };
-        var cancel = new Button { Left = 462, Top = 136, Width = 80, Text = "Cancelar", DialogResult = DialogResult.Cancel };
-        form.Controls.AddRange(new Control[] { label, combo, save, cancel });
+        var btcomLabel = new Label { Left = 12, Top = 112, Width = 530, Text = "btcom.exe (opcional; vacío = detectar automáticamente):" };
+        var btcomBox = new TextBox { Left = 12, Top = 136, Width = 530, Text = settings.BtcomPath ?? "" };
+        var waitLabel = new Label { Left = 12, Top = 174, Width = 300, Text = "Esperar endpoint Active (segundos):" };
+        var wait = new NumericUpDown { Left = 312, Top = 170, Width = 65, Minimum = 1, Maximum = 15, Value = Math.Clamp(settings.BtcomWaitSeconds, 1, 15) };
+        var save = new Button { Left = 372, Top = 222, Width = 80, Text = "Guardar", DialogResult = DialogResult.OK };
+        var cancel = new Button { Left = 462, Top = 222, Width = 80, Text = "Cancelar", DialogResult = DialogResult.Cancel };
+        form.Controls.AddRange(new Control[] { label, combo, btcomLabel, btcomBox, waitLabel, wait, save, cancel });
         form.AcceptButton = save;
         form.CancelButton = cancel;
 
@@ -75,6 +81,8 @@ internal static class DownlinkDeviceSettings
         {
             settings.DownlinkDeviceId = selected.Id;
             settings.DownlinkDeviceName = selected.BaseName;
+            settings.BtcomPath = string.IsNullOrWhiteSpace(btcomBox.Text) ? null : btcomBox.Text.Trim().Trim('"');
+            settings.BtcomWaitSeconds = (int)wait.Value;
             Save(settings);
             var suffix = selected.Active
                 ? "\nSe aplicará en la próxima conversación."
@@ -108,6 +116,8 @@ internal static class DownlinkDeviceSettings
     {
         public string? DownlinkDeviceId { get; set; }
         public string? DownlinkDeviceName { get; set; }
+        public string? BtcomPath { get; set; }
+        public int BtcomWaitSeconds { get; set; } = 6;
     }
 
     sealed record Choice(string Id, string Name, string BaseName, bool Active);
