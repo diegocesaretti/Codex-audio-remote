@@ -151,6 +151,7 @@ internal sealed class AudioDeviceSwitcher
     SavedDefaults? savedCapture;
     SavedDefaults? savedRender;
     bool remoteCaptureActive;
+    CancellationTokenSource? renderWatchCts;
 
     public AudioDeviceSwitcher(string virtualMicName)
     {
@@ -186,7 +187,7 @@ internal sealed class AudioDeviceSwitcher
                 }
             }
 
-            TryActivateSelectedRenderLocked();
+            if (!TryActivateSelectedRenderLocked()) StartSelectedRenderWatchLocked();
             return true;
         }
     }
@@ -213,6 +214,7 @@ internal sealed class AudioDeviceSwitcher
                 File.WriteAllText(renderRecoveryPath, JsonSerializer.Serialize(savedRender));
             }
             SetAllRoles(target.ID);
+            CancelRenderWatchLocked();
             Console.WriteLine("Default playback -> " + target.FriendlyName);
             return true;
         }
@@ -223,7 +225,49 @@ internal sealed class AudioDeviceSwitcher
         }
     }
 
-    // Kept as tiny compatibility methods for callers; session ownership lives in SessionServerV2.
+    void StartSelectedRenderWatchLocked()
+    {
+        var selectedId = DownlinkDeviceSettings.SelectedDeviceId;
+        if (string.IsNullOrWhiteSpace(selectedId)) return;
+
+        CancelRenderWatchLocked();
+        renderWatchCts = new CancellationTokenSource();
+        var token = renderWatchCts.Token;
+        Console.WriteLine("Selected playback is not active yet; handoff watcher armed.");
+
+        _ = Task.Run(async () =>
+        {
+            var started = Environment.TickCount64;
+            try
+            {
+                while (!token.IsCancellationRequested && Environment.TickCount64 - started < 12000)
+                {
+                    lock (sync)
+                    {
+                        if (!remoteCaptureActive) return;
+                        if (TryActivateSelectedRenderLocked())
+                        {
+                            Console.WriteLine($"Selected playback became active after {Environment.TickCount64 - started} ms.");
+                            return;
+                        }
+                    }
+                    await Task.Delay(200, token);
+                }
+                if (!token.IsCancellationRequested)
+                    Console.WriteLine("Selected playback handoff watcher expired; keeping current render device.");
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
+    void CancelRenderWatchLocked()
+    {
+        try { renderWatchCts?.Cancel(); } catch { }
+        try { renderWatchCts?.Dispose(); } catch { }
+        renderWatchCts = null;
+    }
+
+    // Compatibility no-ops. Session ownership lives exclusively in SessionServerV2.
     public void BeginActivation() { }
     public void MarkListening() { }
     public void ActivationFailed() { }
@@ -240,6 +284,7 @@ internal sealed class AudioDeviceSwitcher
     {
         lock (sync)
         {
+            CancelRenderWatchLocked();
             RestoreDefaults(captureRecoveryPath, ref savedCapture, "capture");
 
             try { BtcomBluetoothReconnect.DisconnectIfConnectedByCompanion(); }
