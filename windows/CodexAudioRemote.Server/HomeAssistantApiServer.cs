@@ -8,6 +8,7 @@ internal sealed class HomeAssistantApiServer : IDisposable
     readonly CancellationTokenSource cts = new();
     readonly int port;
     Task? loopTask;
+    bool disposed;
 
     public HomeAssistantApiServer(SessionServerV2 sessions, int port = 8766)
     {
@@ -141,6 +142,8 @@ internal sealed class HomeAssistantApiServer : IDisposable
 
     public void Dispose()
     {
+        if (disposed) return;
+        disposed = true;
         cts.Cancel();
         try { listener.Stop(); } catch { }
         try { listener.Close(); } catch { }
