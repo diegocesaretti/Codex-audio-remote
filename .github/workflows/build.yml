@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [ main, rewrite/state-machine-v2 ]
+    branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
   pull_request:
 
 concurrency:
