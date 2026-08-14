@@ -9,6 +9,15 @@ def replace_once(text, old, new, label):
     return text.replace(old, new, 1)
 
 
+def replace_any(text, replacements, label):
+    for old, new in replacements:
+        if new in text:
+            return text
+        if old in text:
+            return text.replace(old, new, 1)
+    raise RuntimeError(f"Patch anchor not found: {label}")
+
+
 # Android: accept codex_listening only once for each activating event.
 # This is deliberately independent from the streaming flag: if an audio error stops
 # streaming while duplicate codex_listening events are already queued, they still must
@@ -21,10 +30,20 @@ s = replace_once(s,
 '''    private boolean codexListeningAccepted;\n    private boolean wakeReceiverRegistered;''',
 'android listening dedupe field')
 
-s = replace_once(s,
+s = replace_any(s, [
+    (
+'''                socket = webSocket; connected = true; reconnectAttempt = 0;''',
+'''                socket = webSocket; connected = true; reconnectAttempt = 0; codexListeningAccepted = false;'''
+    ),
+    (
 '''                connected = true; socket = webSocket; reconnectAttempt = 0;''',
-'''                connected = true; socket = webSocket; reconnectAttempt = 0; codexListeningAccepted = false;''',
-'android reset dedupe on websocket open')
+'''                connected = true; socket = webSocket; reconnectAttempt = 0; codexListeningAccepted = false;'''
+    ),
+    (
+'''                connected = true; socket = webSocket;''',
+'''                connected = true; socket = webSocket; codexListeningAccepted = false;'''
+    )
+], 'android reset dedupe on websocket open')
 
 s = replace_once(s,
 '''                case "activating": stopWakeRecognition(); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;''',
