@@ -1,7 +1,7 @@
 using System.Net.WebSockets;
 using System.Text.Json;
 
-internal sealed record ExternalConversationRequest(string AudioUrl, string Source = "home_assistant");
+internal sealed record ExternalConversationRequest(string AudioUrl, string Source = "home_assistant", int EstimatedTtsMs = 0);
 
 internal static class ExternalConversationHub
 {
@@ -86,7 +86,7 @@ internal sealed class ExternalSessionController : IDisposable
 
     async Task RunAsync(ExternalConversationRequest request)
     {
-        Console.WriteLine($"External conversation START · source={request.Source}");
+        Console.WriteLine($"External conversation START · source={request.Source} · estimatedTtsMs={request.EstimatedTtsMs}");
 
         // Start Codex first. Its own activation delay is useful time in which we can
         // prepare the virtual microphone instead of blocking before sending the shortcut.
@@ -99,19 +99,27 @@ internal sealed class ExternalSessionController : IDisposable
 
         Console.WriteLine("Injecting HA context to virtual microphone only; Android microphone remains off");
         await ContextAudioInjector.PlayIntoVirtualCableAsync(request.AudioUrl, cableDeviceName, cts.Token);
-        Console.WriteLine("HA context injection complete");
+        Console.WriteLine("HA context injection complete; TTS/input playback itself is the utterance-end signal");
 
         downlink?.Dispose();
         downlink = new LoopbackDownlink(SendBinary);
         await SendJson(new { type = "downlink_start", sampleRate = 16000, channels = 1 });
         downlink.Start();
 
-        var becameBusy = await WaitMicAsync(false, 15000);
-        Console.WriteLine(becameBusy ? "Codex processing external context" : "No inactive transition detected; using readiness fallback");
-        var ready = await WaitMicAsync(true, 45000);
+        // No STT is used to decide when this REST session ends. The known TTS phrase
+        // duration only scales watchdogs; the normal completion signal remains Codex
+        // returning to its ready/listening state after producing the answer.
+        var ttsMs = Math.Max(0, request.EstimatedTtsMs);
+        var busyTimeoutMs = ttsMs > 0 ? Math.Clamp(5000 + ttsMs / 2, 5000, 15000) : 15000;
+        var responseTimeoutMs = ttsMs > 0 ? Math.Clamp(18000 + ttsMs * 2, 25000, 60000) : 45000;
+        Console.WriteLine($"REST watchdogs from TTS estimate · busy={busyTimeoutMs}ms · response={responseTimeoutMs}ms");
+
+        var becameBusy = await WaitMicAsync(false, busyTimeoutMs);
+        Console.WriteLine(becameBusy ? "Codex processing external context" : "No inactive transition detected; using TTS-sized readiness watchdog");
+        var ready = await WaitMicAsync(true, responseTimeoutMs);
         Console.WriteLine(ready
             ? "Codex response complete; closing REST one-shot conversation"
-            : "Readiness timeout; closing REST one-shot conversation without enabling Android microphone");
+            : "TTS-sized readiness watchdog expired; closing REST one-shot conversation without enabling Android microphone");
 
         // Give the downlink a tiny tail window so the last PCM already captured is not cut.
         try { await Task.Delay(150, cts.Token); } catch (OperationCanceledException) { }
@@ -126,7 +134,7 @@ internal sealed class ExternalSessionController : IDisposable
         }
         switcher.RestoreNow();
         await SendJson(new { type = "codex_idle" });
-        Console.WriteLine("External conversation END · Android microphone was never enabled");
+        Console.WriteLine("External conversation END · Android microphone was never enabled · no STT end detector used");
     }
 
     async Task<bool> WaitMicAsync(bool desired, int timeoutMs)
