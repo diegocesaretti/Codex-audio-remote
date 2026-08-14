@@ -17,6 +17,8 @@ jobs:
         run: python tools/apply_single_client_audio_ownership.py
       - name: Guard delayed smart close against stale owners
         run: python tools/apply_current_owner_smart_close_guard.py
+      - name: Parallelize Bluetooth activation and handoff
+        run: python tools/apply_parallel_bluetooth_activation.py
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
