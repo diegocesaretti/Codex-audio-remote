@@ -77,8 +77,11 @@ internal sealed partial class SessionServerV2
             try
             {
                 var bluetoothReady = await bluetoothTask;
-                if (bluetoothReady && IsSession(expectedSession, ServerSessionState.Activating))
-                    switcher.TryActivateSelectedRender();
+                if (IsSession(expectedSession, ServerSessionState.Activating))
+                {
+                    var routed = switcher.TryActivateSelectedRender();
+                    Console.WriteLine($"External output preparation · btcom={bluetoothReady} · selectedRoute={routed}");
+                }
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { Console.WriteLine("External Bluetooth preparation warning: " + ex.Message); }
