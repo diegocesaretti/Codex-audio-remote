@@ -56,9 +56,12 @@ internal sealed class HomeAssistantApiServer : IDisposable
 
             string? contextSource = null;
             string inputType;
+            int estimatedTtsMs = 0;
             if (!string.IsNullOrWhiteSpace(text))
             {
-                contextSource = ContextAudioInjector.PackText(text.Trim());
+                var cleanText = text.Trim();
+                contextSource = ContextAudioInjector.PackText(cleanText);
+                estimatedTtsMs = ContextAudioInjector.EstimateTextDurationMs(cleanText);
                 inputType = "text";
             }
             else if (!string.IsNullOrWhiteSpace(audioUrl))
@@ -72,10 +75,12 @@ internal sealed class HomeAssistantApiServer : IDisposable
                 return;
             }
 
-            Console.WriteLine($"HA conversation request · input={inputType}");
-            var started = await ExternalConversationHub.TryStartAsync(new ExternalConversationRequest(contextSource));
+            Console.WriteLine($"HA conversation request · input={inputType} · estimatedTtsMs={estimatedTtsMs}");
+            var started = await ExternalConversationHub.TryStartAsync(new ExternalConversationRequest(contextSource, "home_assistant", estimatedTtsMs));
             await WriteJson(context.Response, started ? 202 : 409,
-                started ? new { ok = true, status = "accepted", input = inputType } : new { ok = false, error = "android_not_connected" });
+                started
+                    ? new { ok = true, status = "accepted", input = inputType, estimated_tts_ms = estimatedTtsMs }
+                    : new { ok = false, error = "android_not_connected" });
         }
         catch (Exception ex)
         {

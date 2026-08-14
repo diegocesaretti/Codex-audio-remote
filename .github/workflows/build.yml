@@ -27,6 +27,8 @@ jobs:
         run: python tools/fix_smart_scope.py
       - name: Wire safe downlink selector
         run: python tools/apply_downlink_selector.py
+      - name: Guard duplicate voice session starts
+        run: python tools/apply_session_dedupe.py
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -51,6 +53,10 @@ jobs:
         run: python tools/toggle_speech_package.py hide
       - name: Apply smart Codex UI state patch
         run: python tools/apply_smart_ui_state.py
+      - name: Guard duplicate voice session starts
+        run: python tools/apply_session_dedupe.py
+      - name: Disable STT-driven session ending
+        run: python tools/disable_stt_session_end.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

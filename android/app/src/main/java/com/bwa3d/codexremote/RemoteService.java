@@ -480,6 +480,15 @@ public class RemoteService extends Service implements RecognitionListener {
         }
     }
 
+    private static String recognizedText(String json) {
+        try {
+            JSONObject o = new JSONObject(json);
+            return normalize(o.optString("text", o.optString("partial", "")));
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private static String normalize(String s) { return s == null ? "" : s.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " "); }
 
     private static int levenshtein(String a, String b) {
@@ -536,28 +545,49 @@ public class RemoteService extends Service implements RecognitionListener {
     private void startPhraseDetector(final int sourceRate) {
         if (voskModel == null || (phraseThread != null && phraseThread.isAlive())) return;
         final List<String> phrases = endPhrases();
-        if (phrases.isEmpty()) return;
         final int sensitivity = Math.max(0, Math.min(100, prefs().getInt("end_sensitivity", 30)));
+        final int silenceSeconds = Math.max(2, Math.min(10, prefs().getInt("silence_end_seconds", 4)));
+        final long silenceMs = silenceSeconds * 1000L;
         phraseQueue.clear();
         phraseThread = new Thread(() -> {
             Recognizer recognizer = null;
             try {
                 recognizer = new Recognizer(voskModel, sourceRate, endGrammar(phrases));
                 recognizer.setWords(true);
-                AndroidDebugLog.log("End phrase detector START · sensitivity=" + sensitivity + " · minConfidence=" + String.format(Locale.US, "%.3f", endPhraseMinConfidence(sensitivity)));
+                long lastSpeechMs = 0L;
+                boolean heardSpeech = false;
+                AndroidDebugLog.log("End detector START · sensitivity=" + sensitivity + " · silence=" + silenceSeconds + "s · minConfidence=" + String.format(Locale.US, "%.3f", endPhraseMinConfidence(sensitivity)));
                 while (streaming.get() || !phraseQueue.isEmpty()) {
                     byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (chunk == null) continue;
+                    if (chunk == null) {
+                        if (heardSpeech && !endingSession && System.currentTimeMillis() - lastSpeechMs >= silenceMs) {
+                            AndroidDebugLog.log("Conversation silence CONFIRMED · " + silenceSeconds + "s without recognized speech");
+                            requestEndSession("silence");
+                        }
+                        continue;
+                    }
+
                     boolean finalChunk = recognizer.acceptWaveForm(chunk, chunk.length);
-                    if (!finalChunk) continue;
-                    String result = recognizer.getResult();
-                    String matched = endingSession ? null : matchedEndPhrase(result, phrases, sensitivity);
-                    if (matched != null) {
-                        AndroidDebugLog.log("End phrase CONFIRMED · phrase=" + matched + " · result=" + result);
-                        requestEndSession("phrase");
+                    String result = finalChunk ? recognizer.getResult() : recognizer.getPartialResult();
+                    if (!recognizedText(result).isEmpty()) {
+                        heardSpeech = true;
+                        lastSpeechMs = System.currentTimeMillis();
+                    }
+
+                    if (finalChunk && !endingSession) {
+                        String matched = matchedEndPhrase(result, phrases, sensitivity);
+                        if (matched != null) {
+                            AndroidDebugLog.log("End phrase CONFIRMED · phrase=" + matched + " · result=" + result);
+                            requestEndSession("phrase");
+                        }
+                    }
+
+                    if (heardSpeech && !endingSession && System.currentTimeMillis() - lastSpeechMs >= silenceMs) {
+                        AndroidDebugLog.log("Conversation silence CONFIRMED · " + silenceSeconds + "s without recognized speech");
+                        requestEndSession("silence");
                     }
                 }
-            } catch (Exception e) { AndroidDebugLog.log("End phrase detector error: " + e); }
+            } catch (Exception e) { AndroidDebugLog.log("End detector error: " + e); }
             finally { if (recognizer != null) recognizer.close(); phraseQueue.clear(); phraseThread = null; }
         }, "EndPhraseVosk");
         phraseThread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1)); phraseThread.start();
