@@ -15,7 +15,7 @@ s = p.read_text(encoding='utf-8')
 s = replace_once(
     s,
 '''    private long lastWakeMs;\n    private String lastPartial = "";''',
-'''    private long lastWakeMs;\n    private PowerManager.WakeLock serviceWakeLock;\n    private Runnable wakeRearmRunnable;\n    private String lastPartial = "";''',
+'''    private long lastWakeMs;\n    private PowerManager.WakeLock serviceWakeLock;\n    private Runnable wakeRearmRunnable;\n    private boolean activationPending;\n    private String lastPartial = "";''',
     'persistent service fields')
 
 s = replace_once(
@@ -45,48 +45,76 @@ s = replace_once(
 '''                AndroidDebugLog.log("WS failure: " + t);\n                connected = false;\n                socket = null;\n                resetLocalAfterTransportLoss("failure");''',
     'failure clears current socket')
 
+# A fresh socket always starts outside a conversation/activation.
+s = replace_once(
+    s,
+'''                connected = true;\n                conversationActive = false;\n                AndroidDebugLog.log("WS open · current socket");''',
+'''                connected = true;\n                conversationActive = false;\n                activationPending = false;\n                AndroidDebugLog.log("WS open · current socket");''',
+    'open clears activation pending')
+
 # Faster reconnect, and keep retrying if a connect attempt never opens.
 s = replace_once(
     s,
 '''    private void scheduleReconnect() {\n        if (destroyed) return;\n        handler.removeCallbacks(reconnectRunnable);\n        handler.postDelayed(reconnectRunnable, 2500);\n    }\n    private final Runnable reconnectRunnable = () -> { if (!destroyed && !connected) connect(); };''',
-'''    private void scheduleReconnect() {\n        if (destroyed) return;\n        handler.removeCallbacks(reconnectRunnable);\n        handler.postDelayed(reconnectRunnable, 1200);\n    }\n    private final Runnable reconnectRunnable = () -> {\n        if (destroyed || connected) return;\n        AndroidDebugLog.log("WS reconnect watchdog firing");\n        connect();\n        if (!connected) handler.postDelayed(reconnectRunnable, 4000);\n    };\n\n    private final Runnable serviceWatchdogRunnable = new Runnable() {\n        @Override public void run() {\n            if (destroyed) return;\n            try {\n                if (!connected || socket == null) {\n                    AndroidDebugLog.log("Service watchdog: transport disconnected -> reconnect");\n                    scheduleReconnect();\n                } else if (!conversationActive && !streaming.get() && voskModel != null) {\n                    boolean wakeArmed = Build.VERSION.SDK_INT <= 23 ? legacyWakeRunning.get() : speechService != null;\n                    if (!wakeArmed) {\n                        AndroidDebugLog.log("Service watchdog: connected but wake not armed -> rearm");\n                        scheduleWakeRearm("watchdog");\n                    }\n                }\n            } catch (Exception e) { AndroidDebugLog.log("Service watchdog error: " + e); }\n            handler.postDelayed(this, 4000);\n        }\n    };''',
+'''    private void scheduleReconnect() {\n        if (destroyed) return;\n        handler.removeCallbacks(reconnectRunnable);\n        handler.postDelayed(reconnectRunnable, 1200);\n    }\n    private final Runnable reconnectRunnable = () -> {\n        if (destroyed || connected) return;\n        AndroidDebugLog.log("WS reconnect watchdog firing");\n        connect();\n        if (!connected) handler.postDelayed(reconnectRunnable, 4000);\n    };\n\n    private final Runnable serviceWatchdogRunnable = new Runnable() {\n        @Override public void run() {\n            if (destroyed) return;\n            try {\n                if (!connected || socket == null) {\n                    AndroidDebugLog.log("Service watchdog: transport disconnected -> reconnect");\n                    scheduleReconnect();\n                } else if (!conversationActive && !activationPending && !streaming.get() && voskModel != null) {\n                    boolean wakeArmed = Build.VERSION.SDK_INT <= 23 ? legacyWakeRunning.get() : speechService != null;\n                    if (!wakeArmed) {\n                        AndroidDebugLog.log("Service watchdog: connected but wake not armed -> rearm");\n                        scheduleWakeRearm("watchdog");\n                    }\n                }\n            } catch (Exception e) { AndroidDebugLog.log("Service watchdog error: " + e); }\n            handler.postDelayed(this, 4000);\n        }\n    };''',
     'reconnect and service watchdog')
+
+# Track the activation gap explicitly so background self-healing never steals AudioRecord while
+# a real wake is already in flight.
+s = replace_once(
+    s,
+'''                case "activating": stopWakeRecognition(); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;''',
+'''                case "activating": activationPending = true; stopWakeRecognition(); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;''',
+    'server activating state')
+
+s = replace_once(
+    s,
+'''                case "codex_listening":\n                    if (gracefulEndPending) {''',
+'''                case "codex_listening":\n                    activationPending = false;\n                    if (gracefulEndPending) {''',
+    'listening clears activation pending')
+
+s = replace_once(
+    s,
+'''        AndroidDebugLog.log("WAKE send=" + sent + " · thread=" + Thread.currentThread().getName());\n        stopWakeRecognition();''',
+'''        activationPending = sent;\n        AndroidDebugLog.log("WAKE send=" + sent + " · activationPending=" + activationPending + " · thread=" + Thread.currentThread().getName());\n        stopWakeRecognition();''',
+    'wake send activation pending')
 
 # Do not immediately contend for AudioRecord after conversation mic shutdown. Wait until MicUplink
 # has actually exited, with a bounded retry loop.
 s = replace_once(
     s,
 '''        gracefulEndPending = false;\n        conversationActive = false;\n        endingSession = false; stopMicStreaming(); stopSpeaker(); stopResponseTranscriber(); overlay.hide(); startWakeRecognition();\n        updateNotification("Conectado · " + wakeWord());''',
-'''        gracefulEndPending = false;\n        conversationActive = false;\n        endingSession = false; stopMicStreaming(); stopSpeaker(); stopResponseTranscriber(); overlay.hide();\n        scheduleWakeRearm("session_finished");\n        updateNotification("Conectado · rearmando " + wakeWord());''',
+'''        gracefulEndPending = false;\n        conversationActive = false;\n        activationPending = false;\n        endingSession = false; stopMicStreaming(); stopSpeaker(); stopResponseTranscriber(); overlay.hide();\n        scheduleWakeRearm("session_finished");\n        updateNotification("Conectado · rearmando " + wakeWord());''',
     'delayed wake rearm after session')
 
 # Add reusable rearm method before armConversationTimeout.
 s = replace_once(
     s,
 '''    private void armConversationTimeout() {''',
-'''    private void scheduleWakeRearm(String reason) {\n        if (destroyed) return;\n        if (wakeRearmRunnable != null) handler.removeCallbacks(wakeRearmRunnable);\n        final long started = System.currentTimeMillis();\n        wakeRearmRunnable = new Runnable() {\n            @Override public void run() {\n                if (destroyed || !connected || conversationActive || streaming.get()) return;\n                Thread micThread = audioThread;\n                if (micThread != null && micThread.isAlive()) {\n                    long elapsed = System.currentTimeMillis() - started;\n                    if (elapsed < 2500) {\n                        AndroidDebugLog.log("Wake rearm waiting for MicUplink release · " + reason + " · " + elapsed + "ms");\n                        handler.postDelayed(this, 100);\n                        return;\n                    }\n                    AndroidDebugLog.log("Wake rearm timeout waiting for MicUplink; retrying capture anyway");\n                }\n                wakeRearmRunnable = null;\n                AndroidDebugLog.log("Wake rearm NOW · " + reason);\n                startWakeRecognition();\n            }\n        };\n        handler.postDelayed(wakeRearmRunnable, Build.VERSION.SDK_INT <= 23 ? 180 : 50);\n    }\n\n    private void armConversationTimeout() {''',
+'''    private void scheduleWakeRearm(String reason) {\n        if (destroyed) return;\n        if (wakeRearmRunnable != null) handler.removeCallbacks(wakeRearmRunnable);\n        final long started = System.currentTimeMillis();\n        wakeRearmRunnable = new Runnable() {\n            @Override public void run() {\n                if (destroyed || !connected || conversationActive || activationPending || streaming.get()) return;\n                Thread micThread = audioThread;\n                if (micThread != null && micThread.isAlive()) {\n                    long elapsed = System.currentTimeMillis() - started;\n                    if (elapsed < 2500) {\n                        AndroidDebugLog.log("Wake rearm waiting for MicUplink release · " + reason + " · " + elapsed + "ms");\n                        handler.postDelayed(this, 100);\n                        return;\n                    }\n                    AndroidDebugLog.log("Wake rearm timeout waiting for MicUplink; retrying capture anyway");\n                }\n                wakeRearmRunnable = null;\n                AndroidDebugLog.log("Wake rearm NOW · " + reason);\n                startWakeRecognition();\n            }\n        };\n        handler.postDelayed(wakeRearmRunnable, Build.VERSION.SDK_INT <= 23 ? 180 : 50);\n    }\n\n    private void armConversationTimeout() {''',
     'wake rearm helper')
 
-# Legacy wake must self-retry if AudioRecord was temporarily unavailable/busy.
+# Legacy wake must self-retry if AudioRecord was temporarily unavailable/busy, but not when it was
+# intentionally stopped because a real activation is in flight.
 s = replace_once(
     s,
 '''                legacyWakeRunning.set(false);\n                legacyWakeThread = null;\n                AndroidDebugLog.log("Legacy wake STOP");''',
-'''                legacyWakeRunning.set(false);\n                legacyWakeThread = null;\n                AndroidDebugLog.log("Legacy wake STOP");\n                if (!destroyed && connected && !conversationActive && !streaming.get())\n                    handler.postDelayed(() -> scheduleWakeRearm("legacy_wake_stopped"), 500);''',
+'''                legacyWakeRunning.set(false);\n                legacyWakeThread = null;\n                AndroidDebugLog.log("Legacy wake STOP");\n                if (!destroyed && connected && !conversationActive && !activationPending && !streaming.get())\n                    handler.postDelayed(() -> scheduleWakeRearm("legacy_wake_stopped"), 500);''',
     'legacy wake self retry')
 
 # Mark audioThread ended so the wake rearm can verify the actual AudioRecord lifecycle.
 s = replace_once(
     s,
 '''            finally {\n                if (effects != null) effects.close();\n                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }\n            }\n        }, "MicUplink");''',
-'''            finally {\n                if (effects != null) effects.close();\n                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }\n                audioThread = null;\n                AndroidDebugLog.log("MicUplink AudioRecord RELEASED");\n                if (!destroyed && connected && !conversationActive && !streaming.get())\n                    handler.post(() -> scheduleWakeRearm("mic_released"));\n            }\n        }, "MicUplink");''',
+'''            finally {\n                if (effects != null) effects.close();\n                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }\n                audioThread = null;\n                AndroidDebugLog.log("MicUplink AudioRecord RELEASED");\n                if (!destroyed && connected && !conversationActive && !activationPending && !streaming.get())\n                    handler.post(() -> scheduleWakeRearm("mic_released"));\n            }\n        }, "MicUplink");''',
     'mic release signal')
 
 # Transport loss must actually stop the mic thread through the normal method when active; merely
 # flipping streaming earlier prevented stopMicStreaming from doing any cleanup/signal work.
 s = replace_once(
     s,
-'''        conversationActive = false;\n        if (streaming.getAndSet(false)) phraseQueue.clear();\n        stopWakeRecognition();''',
-'''        conversationActive = false;\n        if (streaming.get()) stopMicStreaming();\n        else phraseQueue.clear();\n        stopWakeRecognition();''',
+'''        gracefulEndPending = false;\n        endingSession = false;\n        conversationActive = false;\n        if (streaming.getAndSet(false)) phraseQueue.clear();\n        stopWakeRecognition();''',
+'''        gracefulEndPending = false;\n        endingSession = false;\n        conversationActive = false;\n        activationPending = false;\n        if (streaming.get()) stopMicStreaming();\n        else phraseQueue.clear();\n        stopWakeRecognition();''',
     'transport loss mic stop')
 
 # Release persistent lock cleanly.
