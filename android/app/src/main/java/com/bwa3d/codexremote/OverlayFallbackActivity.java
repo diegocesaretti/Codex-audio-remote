@@ -16,21 +16,12 @@ import android.view.WindowManager;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import java.util.concurrent.TimeUnit;
-
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
-import okhttp3.WebSocket;
-import okhttp3.WebSocketListener;
-
 public class OverlayFallbackActivity extends Activity {
     public static final String EXTRA_STATE = "state";
     public static final String STATE_HIDE = "__hide__";
     public static final String ACTION_TRANSCRIPT = "com.bwa3d.codexremote.OVERLAY_TRANSCRIPT";
     public static final String EXTRA_TRANSCRIPT = "transcript";
-    private TextView title;
-    private TextView subtitle;
+
     private TextView transcript;
     private boolean ending;
     private boolean receiverRegistered;
@@ -51,16 +42,16 @@ public class OverlayFallbackActivity extends Activity {
         float scale = OverlayPrefs.scale(this);
         boolean showTranscript = prefs.getBoolean("show_transcript", false);
 
-        Window w = getWindow();
-        w.setBackgroundDrawableResource(android.R.color.transparent);
-        w.setDimAmount(0f);
-        w.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL);
-        WindowManager.LayoutParams lp = w.getAttributes();
+        Window window = getWindow();
+        window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.setDimAmount(0f);
+        window.addFlags(WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL);
+        WindowManager.LayoutParams lp = window.getAttributes();
         lp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         lp.width = Math.round(300 * scale * getResources().getDisplayMetrics().density);
         lp.height = Math.round((showTranscript ? 180 : 110) * scale * getResources().getDisplayMetrics().density);
         lp.y = Math.round(32 * scale * getResources().getDisplayMetrics().density);
-        w.setAttributes(lp);
+        window.setAttributes(lp);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -72,13 +63,13 @@ public class OverlayFallbackActivity extends Activity {
         bg.setCornerRadius(28 * scale * getResources().getDisplayMetrics().density);
         root.setBackground(bg);
 
-        title = new TextView(this);
+        TextView title = new TextView(this);
         title.setGravity(Gravity.CENTER);
         title.setTextColor(OverlayPrefs.textColor(this));
         title.setTextSize(20f * scale);
         title.setText("Conversación activa");
 
-        subtitle = new TextView(this);
+        TextView subtitle = new TextView(this);
         subtitle.setGravity(Gravity.CENTER);
         subtitle.setTextColor(0xFFD0D0D0);
         subtitle.setTextSize(15f * scale);
@@ -106,8 +97,8 @@ public class OverlayFallbackActivity extends Activity {
             return;
         }
 
-        root.setOnClickListener(view -> endSessionDirectly());
-        AndroidDebugLog.log("Fixed fallback overlay activity shown · scale=" + scale + " · transcript=" + showTranscript);
+        root.setOnClickListener(view -> requestEndThroughService());
+        AndroidDebugLog.log("Fallback overlay v2 shown · scale=" + scale + " · transcript=" + showTranscript);
     }
 
     private void registerTranscriptReceiver() {
@@ -116,8 +107,21 @@ public class OverlayFallbackActivity extends Activity {
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(transcriptReceiver, filter, RECEIVER_NOT_EXPORTED);
             else registerReceiver(transcriptReceiver, filter);
             receiverRegistered = true;
+        } catch (Exception e) { AndroidDebugLog.log("Overlay transcript receiver error: " + e); }
+    }
+
+    private void requestEndThroughService() {
+        if (ending) return;
+        ending = true;
+        Intent intent = new Intent(this, RemoteService.class);
+        intent.setAction(RemoteService.ACTION_OVERLAY_END);
+        try {
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
+            AndroidDebugLog.log("Fallback overlay v2 -> persistent service end event");
+            finish();
         } catch (Exception e) {
-            AndroidDebugLog.log("Overlay transcript receiver error: " + e);
+            ending = false;
+            AndroidDebugLog.log("Fallback overlay v2 service end failed: " + e);
         }
     }
 
@@ -133,36 +137,5 @@ public class OverlayFallbackActivity extends Activity {
             receiverRegistered = false;
         }
         super.onDestroy();
-    }
-
-    private void endSessionDirectly() {
-        if (ending) return;
-        ending = true;
-        AndroidDebugLog.log("Fallback overlay tapped · direct end_session requested");
-
-        SharedPreferences p = getSharedPreferences("settings", MODE_PRIVATE);
-        String ip = p.getString("ip", "192.168.1.100");
-        int port = p.getInt("port", 8765);
-        OkHttpClient client = new OkHttpClient.Builder()
-                .connectTimeout(2, TimeUnit.SECONDS)
-                .readTimeout(2, TimeUnit.SECONDS)
-                .writeTimeout(2, TimeUnit.SECONDS)
-                .build();
-        Request request = new Request.Builder().url("ws://" + ip + ":" + port + "/ws/").build();
-        client.newWebSocket(request, new WebSocketListener() {
-            @Override public void onOpen(WebSocket webSocket, Response response) {
-                AndroidDebugLog.log("Fallback end socket open");
-                webSocket.send("{\"type\":\"end_session\",\"reason\":\"overlay_tap\"}");
-                webSocket.close(1000, "overlay end sent");
-                runOnUiThread(() -> finish());
-                client.dispatcher().executorService().shutdown();
-            }
-
-            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-                AndroidDebugLog.log("Fallback direct end failed: " + t);
-                ending = false;
-                client.dispatcher().executorService().shutdown();
-            }
-        });
     }
 }
