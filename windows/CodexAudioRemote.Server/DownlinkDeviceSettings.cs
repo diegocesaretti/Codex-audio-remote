@@ -19,18 +19,37 @@ internal static class DownlinkDeviceSettings
 
     public static void ShowDialog()
     {
-        using var enumerator = new MMDeviceEnumerator();
-        var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.All)
-            .Where(d => !IsUnsafe(d.FriendlyName))
-            .OrderByDescending(d => d.State == DeviceState.Active)
-            .ThenBy(d => d.FriendlyName)
-            .ToList();
+        var choices = new List<Choice>();
+        using (var enumerator = new MMDeviceEnumerator())
+        {
+            foreach (var device in enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.All))
+            {
+                try
+                {
+                    var id = device.ID;
+                    var name = device.FriendlyName;
+                    var active = device.State == DeviceState.Active;
+                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(name) || IsUnsafe(name)) continue;
+                    choices.Add(new Choice(id, active ? name : name + " (desconectado)", name, active));
+                }
+                catch (Exception ex)
+                {
+                    // Windows can retain stale Bluetooth/audio endpoints whose property store is
+                    // already invalid (for example COM 0xE000020B). One zombie endpoint must not
+                    // make the whole output selector crash.
+                    Console.WriteLine($"Skipping unreadable audio endpoint in output selector: {ex.GetType().Name} · {ex.Message}");
+                }
+                finally
+                {
+                    try { device.Dispose(); } catch { }
+                }
+            }
+        }
 
-        var choices = devices.Select(d => new Choice(
-            d.ID,
-            d.State == DeviceState.Active ? d.FriendlyName : d.FriendlyName + " (desconectado)",
-            d.FriendlyName,
-            d.State == DeviceState.Active)).ToList();
+        choices = choices
+            .OrderByDescending(c => c.Active)
+            .ThenBy(c => c.BaseName, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
 
         var settings = Load();
         var saved = settings.DownlinkDeviceId;
@@ -89,7 +108,6 @@ internal static class DownlinkDeviceSettings
                 : "\nLa selección queda guardada y se usará automáticamente cuando el dispositivo vuelva a conectarse.";
             MessageBox.Show("Audio de respuesta: " + selected.Name + suffix, "Codex Audio Remote", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        foreach (var d in devices) d.Dispose();
     }
 
     static Settings Load()
