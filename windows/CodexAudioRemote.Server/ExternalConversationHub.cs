@@ -70,6 +70,8 @@ internal sealed class ExternalSessionController : IDisposable
             catch (Exception ex)
             {
                 Console.WriteLine("External conversation error: " + ex.Message);
+                downlink?.Dispose();
+                downlink = null;
                 try { await SendJson(new { type = "activation_failed", reason = "external_context_error" }); } catch { }
                 switcher.RestoreNow();
             }
@@ -85,14 +87,17 @@ internal sealed class ExternalSessionController : IDisposable
     async Task RunAsync(ExternalConversationRequest request)
     {
         Console.WriteLine($"External conversation START · source={request.Source}");
+
+        // Start Codex first. Its own activation delay is useful time in which we can
+        // prepare the virtual microphone instead of blocking before sending the shortcut.
+        ShortcutSender.Send(shortcut);
         await SendJson(new { type = "activating" });
         if (!switcher.ActivateRemoteMic()) throw new InvalidOperationException("virtual_mic_not_found");
         switcher.BeginActivation();
-        await Task.Delay(75, cts.Token);
-        ShortcutSender.Send(shortcut);
         if (!await WaitMicAsync(true, activationTimeoutMs)) throw new TimeoutException("codex_mic_timeout");
+        switcher.MarkListening();
 
-        Console.WriteLine("Injecting HA context to virtual microphone only; Android downlink remains off");
+        Console.WriteLine("Injecting HA context to virtual microphone only; Android microphone remains off");
         await ContextAudioInjector.PlayIntoVirtualCableAsync(request.AudioUrl, cableDeviceName, cts.Token);
         Console.WriteLine("HA context injection complete");
 
@@ -104,14 +109,24 @@ internal sealed class ExternalSessionController : IDisposable
         var becameBusy = await WaitMicAsync(false, 15000);
         Console.WriteLine(becameBusy ? "Codex processing external context" : "No inactive transition detected; using readiness fallback");
         var ready = await WaitMicAsync(true, 45000);
-        Console.WriteLine(ready ? "Codex ready after external context" : "Readiness timeout; opening Android mic as fallback");
+        Console.WriteLine(ready
+            ? "Codex response complete; closing REST one-shot conversation"
+            : "Readiness timeout; closing REST one-shot conversation without enabling Android microphone");
 
+        // Give the downlink a tiny tail window so the last PCM already captured is not cut.
+        try { await Task.Delay(150, cts.Token); } catch (OperationCanceledException) { }
         downlink?.Dispose();
         downlink = null;
-        switcher.MarkListening();
-        ExternalConversationHub.SetSuppressCodexEvents(false);
-        await SendJson(new { type = "codex_listening" });
-        Console.WriteLine("External conversation READY · Android microphone enabled");
+
+        await SendJson(new { type = "session_ending", reason = "external_one_shot" });
+        if (CodexMicDetector.IsActive())
+        {
+            ShortcutSender.Send(shortcut);
+            await WaitMicAsync(false, Math.Max(activationTimeoutMs, 3000));
+        }
+        switcher.RestoreNow();
+        await SendJson(new { type = "codex_idle" });
+        Console.WriteLine("External conversation END · Android microphone was never enabled");
     }
 
     async Task<bool> WaitMicAsync(bool desired, int timeoutMs)
