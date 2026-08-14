@@ -11,13 +11,13 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 p = Path('android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java')
 s = p.read_text(encoding='utf-8')
 
-# Android 6 / API 23 devices often expose VOICE_RECOGNITION successfully but feed silence or
-# heavily processed audio. Prefer the raw MIC source first on the legacy wake path, then fall back
-# through other sources only if AudioRecord cannot initialize.
+# Android 6 / API23 audio routing is device-specific. On the target phone Android DEFAULT is the
+# reliable wake source, while VOICE_RECOGNITION can initialize successfully yet deliver unusable
+# audio. Prefer DEFAULT first and keep the other sources as fallbacks.
 s = replace_once(
     s,
 '''                record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, MediaRecorder.AudioSource.VOICE_RECOGNITION);\n                int source = MediaRecorder.AudioSource.VOICE_RECOGNITION;\n                if (record == null) {\n                    source = MediaRecorder.AudioSource.MIC;\n                    record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, source);\n                }\n                if (record == null) throw new IllegalStateException("No AudioRecord for legacy wake");''',
-'''                int[] wakeSources = new int[] {\n                        MediaRecorder.AudioSource.MIC,\n                        MediaRecorder.AudioSource.VOICE_RECOGNITION,\n                        MediaRecorder.AudioSource.DEFAULT,\n                        MediaRecorder.AudioSource.CAMCORDER\n                };\n                int source = -1;\n                for (int candidate : wakeSources) {\n                    record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, candidate);\n                    if (record != null) { source = candidate; break; }\n                }\n                if (record == null) throw new IllegalStateException("No AudioRecord for legacy wake");''',
+'''                int[] wakeSources = new int[] {\n                        MediaRecorder.AudioSource.DEFAULT,\n                        MediaRecorder.AudioSource.MIC,\n                        MediaRecorder.AudioSource.VOICE_RECOGNITION,\n                        MediaRecorder.AudioSource.CAMCORDER\n                };\n                int source = -1;\n                for (int candidate : wakeSources) {\n                    record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, candidate);\n                    if (record != null) { source = candidate; break; }\n                }\n                if (record == null) throw new IllegalStateException("No AudioRecord for legacy wake");''',
     'legacy wake source order')
 
 # Log actual input level on API23. This makes silent-source failures immediately visible in logs.
@@ -42,5 +42,15 @@ s = replace_once(
 '''                AndroidDebugLog.log("Legacy wake ARMED · word=" + wakeWord() + " · source=" + source + " · buffer=" + bufferBytes);\n                updateNotification("Conectado · wake API23 · " + wakeWord());''',
     'legacy wake armed log')
 
+# The legacy wake AudioRecord and the conversation AudioRecord cannot safely overlap on many API23
+# devices. Wait for the wake thread to finish its finally block (where it actually releases the
+# recorder) before opening the uplink capture. This removes the intermittent "Codex hears silence"
+# race immediately after a successful wake.
+s = replace_once(
+    s,
+'''        audioThread = new Thread(() -> {\n            AudioRecord record = null;\n            NativeAudioEffects effects = null;\n            try {\n                int actualRate = requestedRate;''',
+'''        audioThread = new Thread(() -> {\n            AudioRecord record = null;\n            NativeAudioEffects effects = null;\n            try {\n                if (Build.VERSION.SDK_INT <= 23) {\n                    Thread wakeThread = legacyWakeThread;\n                    if (wakeThread != null && wakeThread != Thread.currentThread()) {\n                        AndroidDebugLog.log("API23 uplink waiting for legacy wake AudioRecord release");\n                        try { wakeThread.join(900); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }\n                        if (wakeThread.isAlive()) {\n                            AndroidDebugLog.log("API23 wake release still pending after 900ms; adding guard delay");\n                            try { Thread.sleep(180); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }\n                        } else {\n                            AndroidDebugLog.log("API23 legacy wake AudioRecord released; starting uplink");\n                        }\n                    }\n                }\n                int actualRate = requestedRate;''',
+    'API23 wake to uplink handoff')
+
 p.write_text(s, encoding='utf-8')
-print('Android 6 legacy wake fix applied')
+print('Android 6 legacy wake + mic handoff fix applied')
