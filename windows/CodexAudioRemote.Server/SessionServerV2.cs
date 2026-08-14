@@ -11,7 +11,7 @@ internal enum ServerSessionState
     Ending
 }
 
-internal sealed class SessionServerV2 : IDisposable
+internal sealed partial class SessionServerV2 : IDisposable
 {
     readonly Options options;
     readonly AudioDeviceSwitcher switcher;
@@ -166,7 +166,6 @@ internal sealed class SessionServerV2 : IDisposable
                 await peer.SendJsonAsync(new { type = "pong", revision = CurrentRevision() });
                 return;
 
-            // v1 compatibility while old clients are being replaced.
             case "wake":
                 await BeginWakeAsync();
                 return;
