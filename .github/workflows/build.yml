@@ -58,6 +58,8 @@ jobs:
         run: python tools/apply_android_reconnect_compile_fix.py
       - name: Route Android controls through one persistent socket
         run: python tools/apply_android_single_socket_control.py
+      - name: Add live connection and wake health indicators
+        run: python tools/apply_runtime_health_and_activation_timeout.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
