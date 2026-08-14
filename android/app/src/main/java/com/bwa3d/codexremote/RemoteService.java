@@ -10,7 +10,6 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.media.AudioFormat;
-import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Build;
@@ -26,11 +25,8 @@ import org.vosk.Recognizer;
 import org.vosk.android.RecognitionListener;
 import org.vosk.android.SpeechService;
 
-import java.io.BufferedInputStream;
 import java.io.File;
-import java.io.FileOutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -38,8 +34,6 @@ import java.util.Locale;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -48,317 +42,505 @@ import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 import okio.ByteString;
 
+/**
+ * Protocol v2 Android satellite.
+ *
+ * Windows is the only authority for conversation state. Android never infers a session
+ * transition from microphone activity, timers, overlays, or socket side effects. Every local
+ * audio resource is derived from the latest server state through reconcileAudioPolicy().
+ */
 public class RemoteService extends Service implements RecognitionListener {
     public static final String ACTION_START = "com.bwa3d.codexremote.START";
     public static final String ACTION_WAKE = "com.bwa3d.codexremote.WAKE";
+    public static final String ACTION_OVERLAY_END = "com.bwa3d.codexremote.OVERLAY_END";
     public static final String ACTION_WAKE_WORD_CHANGED = "com.bwa3d.codexremote.WAKE_WORD_CHANGED";
-    private static final int NOTIFICATION_ID = 42;
-    private static final String CHANNEL_ID = "codex_remote";
-    private static final String MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip";
-    private static final int WAKE_SAMPLE_RATE = 16000;
+    public static final String ACTION_STATUS = "com.bwa3d.codexremote.STATUS_V2";
 
-    private final AtomicBoolean streaming = new AtomicBoolean(false);
-    private final AtomicBoolean legacyWakeRunning = new AtomicBoolean(false);
+    public static final String EXTRA_CONNECTED = "connected";
+    public static final String EXTRA_CONNECTING = "connecting";
+    public static final String EXTRA_SERVER_STATE = "server_state";
+    public static final String EXTRA_WAKE_RUNNING = "wake_running";
+    public static final String EXTRA_WAKE_HEALTHY = "wake_healthy";
+    public static final String EXTRA_WAKE_RMS = "wake_rms";
+    public static final String EXTRA_WAKE_AUDIO_AGE = "wake_audio_age";
+    public static final String EXTRA_MIC_RUNNING = "mic_running";
+    public static final String EXTRA_MIC_HEALTHY = "mic_healthy";
+    public static final String EXTRA_REVISION = "revision";
+    public static final String EXTRA_SESSION_ID = "session_id";
+
+    private static final int NOTIFICATION_ID = 42;
+    private static final String CHANNEL_ID = "codex_remote_v2";
+    private static final int WAKE_SAMPLE_RATE = 16000;
+    private static final long RECONNECT_MS = 1500L;
+    private static final long AUDIO_HEARTBEAT_STALE_MS = 7500L;
+    private static final long MIC_HEARTBEAT_STALE_MS = 5000L;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Object socketLock = new Object();
+    private final AtomicBoolean wakeRunning = new AtomicBoolean(false);
+    private final AtomicBoolean micRunning = new AtomicBoolean(false);
     private final ArrayBlockingQueue<byte[]> phraseQueue = new ArrayBlockingQueue<>(24);
+
     private OkHttpClient client;
     private WebSocket socket;
-    private SpeechService speechService;
+    private long socketGeneration;
+    private boolean connected;
+    private boolean connecting;
+    private boolean destroyed;
+
+    private String serverIp;
+    private int serverPort = 8765;
+    private String serverState = "disconnected";
+    private String sessionId = "";
+    private long serverRevision = -1;
+
     private Model voskModel;
-    private Thread audioThread;
+    private boolean modelLoading;
+    private SpeechService speechService;
+    private Thread wakeThread;
+    private AudioRecord wakeRecord;
+    private long lastWakeAudioMs;
+    private int lastWakeRms;
+    private long lastWakeMs;
+    private String wakeFirstWord = "";
+    private long wakeFirstWordMs;
+    private String lastWakeLogged = "";
+
+    private Thread micThread;
+    private AudioRecord micRecord;
+    private long lastMicAudioMs;
     private Thread phraseThread;
-    private Thread legacyWakeThread;
-    private AudioRecord legacyWakeRecord;
+
     private DownlinkPlayer speaker;
     private OverlayController overlay;
     private ResponseTranscriber responseTranscriber;
-    private String serverIp;
-    private int serverPort = 8765;
-    private boolean connected;
-    private boolean destroyed;
-    private boolean modelLoading;
-    private boolean endingSession;
+    private PowerManager.WakeLock serviceWakeLock;
     private boolean wakeReceiverRegistered;
-    private long lastWakeMs;
-    private String lastPartial = "";
-    private long lastPartialMs;
-    private String lastWakeLogged = "";
 
     private final BroadcastReceiver wakeWordReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             AndroidDebugLog.log("Wake word changed -> " + wakeWord());
-            stopWakeRecognition();
-            handler.postDelayed(RemoteService.this::startWakeRecognition, 180);
+            stopWakeCapture("wake_word_changed");
+            handler.postDelayed(RemoteService.this::reconcileAudioPolicy, 180);
+        }
+    };
+
+    private final Runnable reconnectRunnable = new Runnable() {
+        @Override public void run() {
+            if (destroyed || connected || connecting) return;
+            connectIfNeeded();
+        }
+    };
+
+    private final Runnable healthRunnable = new Runnable() {
+        @Override public void run() {
+            if (destroyed) return;
+            long now = System.currentTimeMillis();
+
+            if (connected && "idle".equals(serverState) && Build.VERSION.SDK_INT <= 23 && wakeRunning.get()) {
+                long age = lastWakeAudioMs <= 0 ? Long.MAX_VALUE : now - lastWakeAudioMs;
+                if (age > AUDIO_HEARTBEAT_STALE_MS) {
+                    AndroidDebugLog.log("Wake heartbeat stale " + age + "ms -> recycle capture");
+                    stopWakeCapture("heartbeat_stale");
+                }
+            }
+
+            if (connected && "listening".equals(serverState) && micRunning.get()) {
+                long age = lastMicAudioMs <= 0 ? Long.MAX_VALUE : now - lastMicAudioMs;
+                if (age > MIC_HEARTBEAT_STALE_MS) {
+                    AndroidDebugLog.log("Conversation mic heartbeat stale " + age + "ms -> recycle capture");
+                    stopConversationMic("heartbeat_stale");
+                }
+            }
+
+            reconcileAudioPolicy();
+            broadcastStatus();
+            handler.postDelayed(this, 2000L);
+        }
+    };
+
+    private final Runnable conversationTimeoutRunnable = new Runnable() {
+        @Override public void run() {
+            if (connected && "listening".equals(serverState)) sendEndEvent("timeout");
         }
     };
 
     @Override public void onCreate() {
         super.onCreate();
+        AndroidDebugLog.install(this);
         createChannel();
-        overlay = new OverlayController(this, () -> requestEndSession("overlay_tap"));
-        startForeground(NOTIFICATION_ID, notification("Iniciando…"));
-        client = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(15, TimeUnit.SECONDS).build();
+        startForeground(NOTIFICATION_ID, notification("Iniciando stack v2…"));
+
+        overlay = new OverlayController(this, new Runnable() {
+            @Override public void run() { sendEndEvent("overlay_tap"); }
+        });
+
+        client = new OkHttpClient.Builder()
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .pingInterval(10, TimeUnit.SECONDS)
+                .build();
+
+        try {
+            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
+            if (pm != null) {
+                serviceWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "codexremote:v2-service");
+                serviceWakeLock.setReferenceCounted(false);
+                serviceWakeLock.acquire();
+            }
+        } catch (Exception e) { AndroidDebugLog.log("Service wake-lock error: " + e); }
+
         IntentFilter filter = new IntentFilter(ACTION_WAKE_WORD_CHANGED);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(wakeWordReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(wakeWordReceiver, filter);
         wakeReceiverRegistered = true;
-        AndroidDebugLog.log("RemoteService created · API=" + Build.VERSION.SDK_INT);
+
+        loadBundledModel();
+        handler.post(healthRunnable);
+        AndroidDebugLog.log("RemoteService v2 created · API=" + Build.VERSION.SDK_INT);
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null) { startFromSavedSettings(); return START_STICKY; }
+        if (intent == null) {
+            loadTargetFromPrefs();
+            connectIfNeeded();
+            return START_STICKY;
+        }
+
         String action = intent.getAction();
-        AndroidDebugLog.log("Service command: " + action);
+        AndroidDebugLog.log("Service v2 command: " + action);
         if (ACTION_START.equals(action)) {
-            SharedPreferences p = prefs();
-            serverIp = intent.getStringExtra("ip");
-            serverPort = intent.getIntExtra("port", 8765);
-            if (serverIp == null || serverIp.trim().isEmpty()) serverIp = p.getString("ip", "192.168.1.100");
-            connect(); initVosk();
-        } else if (ACTION_WAKE.equals(action)) triggerWake();
+            String requestedIp = intent.getStringExtra("ip");
+            int requestedPort = intent.getIntExtra("port", prefs().getInt("port", 8765));
+            if (requestedIp == null || requestedIp.trim().isEmpty()) requestedIp = prefs().getString("ip", "192.168.1.100");
+            requestedIp = requestedIp.trim();
+
+            boolean targetChanged = serverIp != null && (!requestedIp.equals(serverIp) || requestedPort != serverPort);
+            serverIp = requestedIp;
+            serverPort = requestedPort;
+            if (targetChanged) disconnectTransport("target_changed");
+            connectIfNeeded();
+        } else if (ACTION_WAKE.equals(action)) {
+            sendWakeEvent("manual");
+        } else if (ACTION_OVERLAY_END.equals(action)) {
+            sendEndEvent("overlay_tap");
+        }
         return START_STICKY;
     }
 
-    private void startFromSavedSettings() {
+    private void loadTargetFromPrefs() {
         serverIp = prefs().getString("ip", "192.168.1.100");
         serverPort = prefs().getInt("port", 8765);
-        connect(); initVosk();
     }
 
-    private SharedPreferences prefs() { return getSharedPreferences("settings", MODE_PRIVATE); }
-
-    private String wakeWord() {
-        String w = normalize(prefs().getString("wake_word", "hola sol"));
-        return w.isEmpty() ? "hola sol" : w;
-    }
-
-    private String wakeGrammar() {
-        String word = wakeWord();
-        List<String> variants = new ArrayList<>();
-        variants.add(word);
-        String[] parts = word.split(" ");
-        if (parts.length == 2) {
-            variants.add(parts[0]);
-            variants.add(parts[1]);
-        }
-        variants.add("[unk]");
-        StringBuilder b = new StringBuilder("[");
-        for (int i = 0; i < variants.size(); i++) {
-            if (i > 0) b.append(',');
-            b.append('"').append(variants.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
-        }
-        return b.append(']').toString();
-    }
-
-    private synchronized void connect() {
-        if (destroyed || serverIp == null) return;
-        if (socket != null) try { socket.cancel(); } catch (Exception ignored) { }
-        connected = false;
-        updateNotification("Conectando a " + serverIp + "…");
-        AndroidDebugLog.log("WS connecting ws://" + serverIp + ":" + serverPort + "/ws/");
-        socket = client.newWebSocket(new Request.Builder().url("ws://" + serverIp + ":" + serverPort + "/ws/").build(), new WebSocketListener() {
-            @Override public void onOpen(WebSocket webSocket, Response response) {
-                connected = true; socket = webSocket;
-                AndroidDebugLog.log("WS open");
-                sendText("{\"type\":\"hello\",\"name\":\"Android satellite\"}");
-                updateNotification(voskModel != null ? "Conectado · " + wakeWord() : "Conectado · preparando wake");
-                handler.post(RemoteService.this::startWakeRecognition);
-            }
-            @Override public void onMessage(WebSocket webSocket, String text) {
-                AndroidDebugLog.log("WS <- " + text);
-                handler.post(() -> handleServerMessage(text));
-            }
-            @Override public void onMessage(WebSocket webSocket, ByteString bytes) { playDownlink(bytes.toByteArray()); }
-            @Override public void onClosed(WebSocket webSocket, int code, String reason) {
-                AndroidDebugLog.log("WS closed code=" + code + " reason=" + reason);
-                connected = false; scheduleReconnect();
-            }
-            @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-                AndroidDebugLog.log("WS failure: " + t);
-                connected = false; updateNotification("Sin conexión · reintentando…"); scheduleReconnect();
-            }
-        });
-    }
-
-    private void scheduleReconnect() {
+    private void connectIfNeeded() {
         if (destroyed) return;
-        handler.removeCallbacks(reconnectRunnable);
-        handler.postDelayed(reconnectRunnable, 2500);
+        if (serverIp == null || serverIp.trim().isEmpty()) loadTargetFromPrefs();
+        synchronized (socketLock) {
+            if (connected || connecting || destroyed) return;
+            connecting = true;
+            serverRevision = -1;
+            serverState = "disconnected";
+            sessionId = "";
+            final long generation = ++socketGeneration;
+            final String url = "ws://" + serverIp + ":" + serverPort + "/ws/";
+            AndroidDebugLog.log("WS v2 connecting · g=" + generation + " · " + url);
+            updateNotification("Conectando a " + serverIp + "…");
+            broadcastStatus();
+
+            socket = client.newWebSocket(new Request.Builder().url(url).build(), new WebSocketListener() {
+                @Override public void onOpen(WebSocket webSocket, Response response) {
+                    if (!isCurrentSocket(webSocket, generation)) {
+                        try { webSocket.close(1000, "stale"); } catch (Exception ignored) { }
+                        return;
+                    }
+                    connected = true;
+                    connecting = false;
+                    AndroidDebugLog.log("WS v2 OPEN · g=" + generation);
+                    sendText("{\"type\":\"hello\",\"protocol\":2,\"name\":\"Android satellite\"}");
+                    sendText("{\"type\":\"sync\"}");
+                    // Wait for the authoritative state snapshot before opening any microphone.
+                    broadcastStatus();
+                }
+
+                @Override public void onMessage(WebSocket webSocket, String text) {
+                    if (!isCurrentSocket(webSocket, generation)) return;
+                    AndroidDebugLog.log("WS v2 <- " + text);
+                    handler.post(new Runnable() {
+                        @Override public void run() { handleServerMessage(text); }
+                    });
+                }
+
+                @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
+                    if (!isCurrentSocket(webSocket, generation)) return;
+                    if (connected && "listening".equals(serverState)) playDownlink(bytes.toByteArray());
+                }
+
+                @Override public void onClosed(WebSocket webSocket, int code, String reason) {
+                    if (!isCurrentSocket(webSocket, generation)) return;
+                    AndroidDebugLog.log("WS v2 CLOSED · code=" + code + " · " + reason);
+                    onTransportLost(webSocket, generation, "closed:" + code);
+                }
+
+                @Override public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                    if (!isCurrentSocket(webSocket, generation)) return;
+                    AndroidDebugLog.log("WS v2 FAILURE · " + t);
+                    onTransportLost(webSocket, generation, "failure");
+                }
+            });
+        }
     }
-    private final Runnable reconnectRunnable = () -> { if (!destroyed && !connected) connect(); };
+
+    private boolean isCurrentSocket(WebSocket candidate, long generation) {
+        synchronized (socketLock) { return generation == socketGeneration && candidate == socket; }
+    }
+
+    private void onTransportLost(WebSocket webSocket, long generation, String reason) {
+        synchronized (socketLock) {
+            if (generation != socketGeneration || webSocket != socket) return;
+            connected = false;
+            connecting = false;
+            socket = null;
+            serverState = "disconnected";
+            sessionId = "";
+            serverRevision = -1;
+        }
+        AndroidDebugLog.log("Transport lost -> deterministic disconnected policy · " + reason);
+        reconcileAudioPolicy();
+        broadcastStatus();
+        handler.removeCallbacks(reconnectRunnable);
+        handler.postDelayed(reconnectRunnable, RECONNECT_MS);
+    }
+
+    private void disconnectTransport(String reason) {
+        WebSocket old;
+        synchronized (socketLock) {
+            socketGeneration++;
+            old = socket;
+            socket = null;
+            connected = false;
+            connecting = false;
+            serverState = "disconnected";
+            sessionId = "";
+            serverRevision = -1;
+        }
+        if (old != null) try { old.close(1000, reason); } catch (Exception ignored) { }
+        reconcileAudioPolicy();
+        broadcastStatus();
+    }
 
     private void handleServerMessage(String text) {
         try {
-            String type = new JSONObject(text).optString("type", "");
-            AndroidDebugLog.log("Server event: " + type + " · main=" + (Looper.myLooper() == Looper.getMainLooper()));
-            switch (type) {
-                case "activating": stopWakeRecognition(); overlay.clearTranscript(); overlay.show("Activando…"); updateNotification("Activando Codex…"); break;
-                case "codex_listening":
-                    endingSession = false; stopWakeRecognition(); stopResponseTranscriber(); startSpeaker(); startMicStreaming(); armConversationTimeout();
-                    overlay.show("Escuchando"); updateNotification("Codex escuchando"); break;
-                case "session_ending": endingSession = true; overlay.show("Finalizando…"); updateNotification("Finalizando conversación…"); break;
-                case "codex_idle": finishLocalSession(); break;
-                case "activation_failed":
-                case "audio_error": finishLocalSession(); updateNotification("Codex no respondió"); break;
-                case "downlink_start": startSpeaker(); break;
+            JSONObject o = new JSONObject(text);
+            String type = o.optString("type", "");
+            if ("state".equals(type)) {
+                applyAuthoritativeState(o);
+            } else if ("hello".equals(type)) {
+                if (o.optInt("protocol", 2) != 2) AndroidDebugLog.log("Server protocol mismatch: " + o);
+            } else if ("audio_error".equals(type)) {
+                AndroidDebugLog.log("Server audio error: " + o.optString("reason", "unknown"));
             }
-        } catch (Exception e) {
-            AndroidDebugLog.log("Server message error: " + e);
-        }
+        } catch (Exception e) { AndroidDebugLog.log("Server message parse error: " + e); }
     }
 
-    private void finishLocalSession() {
-        handler.removeCallbacks(conversationTimeoutRunnable);
-        endingSession = false; stopMicStreaming(); stopSpeaker(); stopResponseTranscriber(); overlay.hide(); startWakeRecognition();
-        updateNotification("Conectado · " + wakeWord());
-    }
-
-    private void armConversationTimeout() {
-        handler.removeCallbacks(conversationTimeoutRunnable);
-        int seconds = prefs().getInt("conversation_timeout", 300);
-        if (seconds > 0) handler.postDelayed(conversationTimeoutRunnable, seconds * 1000L);
-    }
-    private final Runnable conversationTimeoutRunnable = () -> requestEndSession("timeout");
-
-    private void requestEndSession(String reason) {
-        if (!streaming.get() || endingSession) return;
-        endingSession = true; handler.removeCallbacks(conversationTimeoutRunnable);
-        AndroidDebugLog.log("Request end session: " + reason);
-        sendText("{\"type\":\"end_session\",\"reason\":\"" + reason + "\"}");
-        overlay.show("Finalizando…"); updateNotification("Finalizando conversación…");
-    }
-
-    private void initVosk() {
-        if (voskModel != null || modelLoading) return;
-        File modelDir = new File(getFilesDir(), "vosk-es-small");
-        if (new File(modelDir, "am").exists()) { loadModel(modelDir); return; }
-        modelLoading = true;
-        new Thread(() -> {
-            File zip = new File(getCacheDir(), "vosk-es.zip");
-            try {
-                updateNotification("Descargando wake model (~39 MB)…");
-                downloadFile(MODEL_URL, zip);
-                if (modelDir.exists()) deleteRecursive(modelDir);
-                modelDir.mkdirs(); unzipStripRoot(zip, modelDir); loadModel(modelDir);
-            } catch (Exception e) { AndroidDebugLog.log("Vosk model download/load error: " + e); updateNotification("Wake manual · error descargando modelo"); }
-            finally { modelLoading = false; if (zip.exists()) zip.delete(); }
-        }, "VoskModelSetup").start();
-    }
-
-    private void loadModel(File dir) {
-        try {
-            voskModel = new Model(dir.getAbsolutePath());
-            AndroidDebugLog.log("Vosk model loaded");
-            updateNotification(connected ? "Conectado · " + wakeWord() : "Wake listo · esperando PC");
-            handler.post(this::startWakeRecognition);
-        } catch (Exception e) { AndroidDebugLog.log("Vosk model invalid: " + e); updateNotification("Wake model inválido"); }
-    }
-
-    private static void downloadFile(String urlString, File out) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(urlString).openConnection();
-        c.setConnectTimeout(15000); c.setReadTimeout(30000); c.setInstanceFollowRedirects(true);
-        try (BufferedInputStream in = new BufferedInputStream(c.getInputStream()); FileOutputStream fos = new FileOutputStream(out)) {
-            byte[] b = new byte[32768]; int n; while ((n = in.read(b)) > 0) fos.write(b, 0, n);
-        } finally { c.disconnect(); }
-    }
-
-    private static void unzipStripRoot(File zip, File dest) throws Exception {
-        String root = dest.getCanonicalPath() + File.separator;
-        try (ZipInputStream zin = new ZipInputStream(new BufferedInputStream(new java.io.FileInputStream(zip)))) {
-            ZipEntry e; byte[] b = new byte[32768];
-            while ((e = zin.getNextEntry()) != null) {
-                String name = e.getName(); int slash = name.indexOf('/'); if (slash >= 0) name = name.substring(slash + 1);
-                if (name.isEmpty()) continue;
-                File f = new File(dest, name);
-                if (!f.getCanonicalPath().startsWith(root)) throw new SecurityException("Bad zip path");
-                if (e.isDirectory()) { f.mkdirs(); continue; }
-                File parent = f.getParentFile(); if (parent != null) parent.mkdirs();
-                try (FileOutputStream target = new FileOutputStream(f)) { int n; while ((n = zin.read(b)) > 0) target.write(b, 0, n); }
-            }
-        }
-    }
-
-    private static void deleteRecursive(File f) {
-        if (f.isDirectory()) { File[] children = f.listFiles(); if (children != null) for (File c : children) deleteRecursive(c); }
-        f.delete();
-    }
-
-    private synchronized void startWakeRecognition() {
-        if (!connected || voskModel == null || streaming.get()) return;
-        if (Build.VERSION.SDK_INT <= 23) {
-            startLegacyWakeRecognition();
+    private void applyAuthoritativeState(JSONObject o) {
+        long revision = o.optLong("revision", -1);
+        if (revision >= 0 && serverRevision >= 0 && revision < serverRevision) {
+            AndroidDebugLog.log("Ignoring stale state revision " + revision + " < " + serverRevision);
             return;
         }
-        if (speechService != null) return;
-        try {
-            AndroidDebugLog.log("Wake SpeechService START · thread=" + Thread.currentThread().getName());
-            Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
-            speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE); speechService.startListening(this);
-        } catch (Exception e) { AndroidDebugLog.log("Wake recognition error: " + e); updateNotification("Vosk error: " + e.getClass().getSimpleName()); }
+
+        String next = o.optString("state", "idle").toLowerCase(Locale.ROOT);
+        if (!"idle".equals(next) && !"activating".equals(next) && !"listening".equals(next) && !"ending".equals(next)) {
+            AndroidDebugLog.log("Ignoring unknown server state: " + next);
+            return;
+        }
+
+        String previous = serverState;
+        String previousSession = sessionId;
+        serverRevision = revision;
+        serverState = next;
+        sessionId = o.optString("sessionId", "");
+        AndroidDebugLog.log("STATE v2 " + previous + " -> " + serverState + " · rev=" + serverRevision + " · session=" + sessionId + " · reason=" + o.optString("reason", ""));
+
+        if (!"listening".equals(serverState)) handler.removeCallbacks(conversationTimeoutRunnable);
+        if ("listening".equals(serverState) && (!"listening".equals(previous) || !sessionId.equals(previousSession))) armConversationTimeout();
+
+        reconcileAudioPolicy();
+        broadcastStatus();
     }
 
-    private synchronized void startLegacyWakeRecognition() {
-        if (legacyWakeRunning.get() || streaming.get() || !connected || voskModel == null) return;
-        legacyWakeRunning.set(true);
-        legacyWakeThread = new Thread(() -> {
-            AudioRecord record = null;
-            Recognizer recognizer = null;
-            try {
-                int min = AudioRecord.getMinBufferSize(WAKE_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-                int bufferBytes = Math.max(min > 0 ? min * 2 : 4096, 4096);
-                record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, MediaRecorder.AudioSource.VOICE_RECOGNITION);
-                int source = MediaRecorder.AudioSource.VOICE_RECOGNITION;
-                if (record == null) {
-                    source = MediaRecorder.AudioSource.MIC;
-                    record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, source);
-                }
-                if (record == null) throw new IllegalStateException("No AudioRecord for legacy wake");
-                legacyWakeRecord = record;
-                recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
-                byte[] buffer = new byte[4096];
-                record.startRecording();
-                AndroidDebugLog.log("Legacy wake START · word=" + wakeWord() + " · source=" + source + " · buffer=" + bufferBytes);
-                updateNotification("Conectado · " + wakeWord() + " · wake API23");
-                while (legacyWakeRunning.get() && connected && !streaming.get() && !destroyed) {
-                    int read = record.read(buffer, 0, buffer.length);
-                    if (read <= 0) continue;
-                    boolean finalResult = recognizer.acceptWaveForm(buffer, read);
-                    String json = finalResult ? recognizer.getResult() : recognizer.getPartialResult();
-                    checkWake(json);
-                }
-            } catch (Exception e) {
-                AndroidDebugLog.log("Legacy wake error: " + e);
-                updateNotification("Wake API23 error: " + e.getClass().getSimpleName());
-            } finally {
-                if (record != null) {
-                    try { record.stop(); } catch (Exception ignored) { }
-                    try { record.release(); } catch (Exception ignored) { }
-                }
-                legacyWakeRecord = null;
-                if (recognizer != null) try { recognizer.close(); } catch (Exception ignored) { }
-                legacyWakeRunning.set(false);
-                legacyWakeThread = null;
-                AndroidDebugLog.log("Legacy wake STOP");
+    /** The only place that decides which local audio resources may exist. */
+    private synchronized void reconcileAudioPolicy() {
+        if (destroyed) return;
+
+        if (!connected || "disconnected".equals(serverState)) {
+            stopWakeCapture("policy_disconnected");
+            stopConversationMic("policy_disconnected");
+            stopSpeaker();
+            stopResponseTranscriber();
+            if (overlay != null) overlay.hide();
+            updateNotification(connecting ? "Reconectando…" : "Sin conexión · reintentando…");
+            return;
+        }
+
+        if ("idle".equals(serverState)) {
+            stopConversationMic("policy_idle");
+            stopSpeaker();
+            stopResponseTranscriber();
+            if (overlay != null) overlay.hide();
+            if (!isThreadAlive(micThread)) startWakeCaptureIfReady();
+            updateNotification(wakeRunning.get() ? "Conectado · wake escuchando" : "Conectado · preparando wake");
+            return;
+        }
+
+        if ("activating".equals(serverState)) {
+            stopWakeCapture("policy_activating");
+            stopConversationMic("policy_activating");
+            stopSpeaker();
+            stopResponseTranscriber();
+            if (overlay != null) { overlay.clearTranscript(); overlay.show("Activando…"); }
+            updateNotification("Activando Codex…");
+            return;
+        }
+
+        if ("listening".equals(serverState)) {
+            stopWakeCapture("policy_listening");
+            if (isThreadAlive(wakeThread)) {
+                handler.postDelayed(new Runnable() { @Override public void run() { reconcileAudioPolicy(); } }, 60L);
+                return;
             }
-        }, "LegacyWakeVosk");
-        legacyWakeThread.setPriority(Thread.NORM_PRIORITY + 1);
-        legacyWakeThread.start();
+            startSpeaker();
+            startConversationMicIfReady();
+            if (overlay != null) overlay.show("Escuchando");
+            updateNotification(micRunning.get() ? "Codex escuchando · mic Android activo" : "Codex escuchando · abriendo mic…");
+            return;
+        }
+
+        // ENDING
+        stopWakeCapture("policy_ending");
+        stopConversationMic("policy_ending");
+        stopSpeaker();
+        stopResponseTranscriber();
+        if (overlay != null) overlay.show("Finalizando…");
+        updateNotification("Finalizando conversación…");
     }
 
-    private synchronized void stopWakeRecognition() {
-        if (legacyWakeRunning.getAndSet(false)) {
-            AudioRecord r = legacyWakeRecord;
-            if (r != null) try { r.stop(); } catch (Exception ignored) { }
-            Thread t = legacyWakeThread;
-            if (t != null) t.interrupt();
+    private void loadBundledModel() {
+        if (voskModel != null || modelLoading) return;
+        modelLoading = true;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    File dir = new File(getFilesDir(), "vosk-es-small");
+                    if (!new File(dir, "am").exists()) throw new IllegalStateException("Bundled Vosk model missing");
+                    Model loaded = new Model(dir.getAbsolutePath());
+                    voskModel = loaded;
+                    AndroidDebugLog.log("Vosk v2 model loaded · " + dir.getAbsolutePath());
+                } catch (Exception e) {
+                    AndroidDebugLog.log("Vosk v2 model load failed: " + e);
+                } finally {
+                    modelLoading = false;
+                    handler.post(new Runnable() { @Override public void run() { reconcileAudioPolicy(); broadcastStatus(); } });
+                }
+            }
+        }, "VoskModelV2").start();
+    }
+
+    private void startWakeCaptureIfReady() {
+        if (!connected || !"idle".equals(serverState) || voskModel == null || destroyed) return;
+        if (wakeRunning.get() || speechService != null || isThreadAlive(wakeThread) || isThreadAlive(micThread)) return;
+
+        if (Build.VERSION.SDK_INT > 23) {
+            try {
+                Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE);
+                wakeRunning.set(true);
+                lastWakeAudioMs = System.currentTimeMillis();
+                speechService.startListening(this);
+                AndroidDebugLog.log("Wake v2 SpeechService ARMED");
+                broadcastStatus();
+            } catch (Exception e) {
+                wakeRunning.set(false);
+                speechService = null;
+                AndroidDebugLog.log("Wake SpeechService start error: " + e);
+            }
+            return;
         }
-        SpeechService s = speechService;
-        speechService = null;
-        if (s != null) {
-            try { s.stop(); } catch (Exception e) { AndroidDebugLog.log("Wake stop error: " + e); }
-            try { s.shutdown(); } catch (Exception e) { AndroidDebugLog.log("Wake shutdown error: " + e); }
-            AndroidDebugLog.log("Wake SpeechService STOP");
+
+        if (!wakeRunning.compareAndSet(false, true)) return;
+        lastWakeAudioMs = System.currentTimeMillis();
+        wakeThread = new Thread(new Runnable() {
+            @Override public void run() {
+                AudioRecord record = null;
+                Recognizer recognizer = null;
+                try {
+                    int min = AudioRecord.getMinBufferSize(WAKE_SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                    int bufferBytes = Math.max(min > 0 ? min * 2 : 4096, 4096);
+                    int[] sources = new int[] {
+                            MediaRecorder.AudioSource.DEFAULT,
+                            MediaRecorder.AudioSource.MIC,
+                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            MediaRecorder.AudioSource.CAMCORDER
+                    };
+                    int source = -1;
+                    for (int candidate : sources) {
+                        record = createCapture(WAKE_SAMPLE_RATE, bufferBytes, candidate);
+                        if (record != null) { source = candidate; break; }
+                    }
+                    if (record == null) throw new IllegalStateException("No AudioRecord for wake");
+
+                    wakeRecord = record;
+                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                    byte[] buffer = new byte[4096];
+                    record.startRecording();
+                    AndroidDebugLog.log("Wake v2 ARMED · source=" + source + " · word=" + wakeWord());
+
+                    while (wakeRunning.get() && connected && "idle".equals(serverState) && !destroyed) {
+                        int read = record.read(buffer, 0, buffer.length);
+                        if (read <= 0) continue;
+                        lastWakeAudioMs = System.currentTimeMillis();
+                        lastWakeRms = pcmRms(buffer, read);
+                        boolean complete = recognizer.acceptWaveForm(buffer, read);
+                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult());
+                    }
+                } catch (Exception e) {
+                    if (wakeRunning.get()) AndroidDebugLog.log("Wake v2 capture error: " + e);
+                } finally {
+                    if (record != null) {
+                        try { record.stop(); } catch (Exception ignored) { }
+                        try { record.release(); } catch (Exception ignored) { }
+                    }
+                    if (recognizer != null) try { recognizer.close(); } catch (Exception ignored) { }
+                    wakeRecord = null;
+                    wakeRunning.set(false);
+                    wakeThread = null;
+                    AndroidDebugLog.log("Wake v2 RELEASED");
+                    handler.postDelayed(new Runnable() { @Override public void run() { reconcileAudioPolicy(); broadcastStatus(); } }, 120L);
+                }
+            }
+        }, "WakeV2");
+        wakeThread.setPriority(Thread.NORM_PRIORITY + 1);
+        wakeThread.start();
+        broadcastStatus();
+    }
+
+    private synchronized void stopWakeCapture(String reason) {
+        if (Build.VERSION.SDK_INT > 23) {
+            SpeechService service = speechService;
+            speechService = null;
+            wakeRunning.set(false);
+            if (service != null) {
+                try { service.stop(); } catch (Exception ignored) { }
+                try { service.shutdown(); } catch (Exception ignored) { }
+                AndroidDebugLog.log("Wake v2 SpeechService STOP · " + reason);
+            }
         }
+
+        if (wakeRunning.getAndSet(false)) AndroidDebugLog.log("Wake v2 stop requested · " + reason);
+        AudioRecord record = wakeRecord;
+        if (record != null) try { record.stop(); } catch (Exception ignored) { }
+        Thread thread = wakeThread;
+        if (thread != null) thread.interrupt();
     }
 
     private void checkWake(String json) {
@@ -368,75 +550,341 @@ public class RemoteService extends Service implements RecognitionListener {
             if (text.isEmpty()) return;
             if (!text.equals(lastWakeLogged)) {
                 lastWakeLogged = text;
-                AndroidDebugLog.log("Wake heard: " + text);
+                AndroidDebugLog.log("Wake v2 heard: " + text);
             }
+
             int sensitivity = prefs().getInt("sensitivity", 60);
             String target = wakeWord();
             boolean match = wakeMatches(text, sensitivity, target);
             long now = System.currentTimeMillis();
             String[] parts = target.split(" ");
-            if (!match && sensitivity >= 75 && parts.length == 2) {
-                if (text.equals(parts[0])) { lastPartial = text; lastPartialMs = now; }
-                else if (text.equals(parts[1]) && lastPartial.equals(parts[0]) && now - lastPartialMs < 1600) match = true;
+            if (!match && parts.length == 2) {
+                if (text.equals(parts[0])) {
+                    wakeFirstWord = parts[0];
+                    wakeFirstWordMs = now;
+                } else if (text.equals(parts[1]) && wakeFirstWord.equals(parts[0]) && now - wakeFirstWordMs < 2200L) {
+                    match = true;
+                }
             }
-            if (match && now - lastWakeMs > 2500) { lastWakeMs = now; handler.post(this::triggerWake); }
-        } catch (Exception e) { AndroidDebugLog.log("Wake parse error: " + e); }
+
+            if (match && now - lastWakeMs > 2500L) {
+                lastWakeMs = now;
+                handler.post(new Runnable() { @Override public void run() { sendWakeEvent("voice"); } });
+            }
+        } catch (Exception e) { AndroidDebugLog.log("Wake v2 parse error: " + e); }
     }
 
-    private void triggerWake() {
-        if (!connected || socket == null) {
-            AndroidDebugLog.log("WAKE not sent · disconnected");
-            updateNotification("Sin conexión · reintentando…"); scheduleReconnect(); return;
+    private void sendWakeEvent(String source) {
+        if (!connected || !"idle".equals(serverState)) {
+            AndroidDebugLog.log("Wake event ignored locally · connected=" + connected + " · state=" + serverState);
+            return;
         }
         wakeScreenIfEnabled();
-        boolean sent = false;
-        try { sent = socket.send("{\"type\":\"wake\"}"); } catch (Exception e) { AndroidDebugLog.log("WAKE socket exception: " + e); }
-        AndroidDebugLog.log("WAKE send=" + sent + " · thread=" + Thread.currentThread().getName());
-        stopWakeRecognition();
-        overlay.clearTranscript(); overlay.show("Activando…"); updateNotification(sent ? "Wake detectado · activando…" : "Wake no enviado · reconectando…");
-        if (!sent) { connected = false; scheduleReconnect(); }
+        boolean sent = sendText("{\"type\":\"event\",\"event\":\"wake\",\"source\":\"" + jsonEscape(source) + "\"}");
+        AndroidDebugLog.log("Wake v2 event sent=" + sent);
+        // Do not mutate local session state. The wake microphone remains governed by IDLE until
+        // Windows acknowledges with an ACTIVATING state snapshot.
     }
 
-    @SuppressWarnings("deprecation")
-    private void wakeScreenIfEnabled() {
-        if (!prefs().getBoolean("wake_screen_on", true)) return;
-        try {
-            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
-            if (pm == null) return;
-            boolean interactive = Build.VERSION.SDK_INT >= 20 ? pm.isInteractive() : pm.isScreenOn();
-            if (interactive) {
-                AndroidDebugLog.log("Wake screen skipped · already interactive");
-                return;
+    private void sendEndEvent(String reason) {
+        if (!connected) return;
+        if (!"listening".equals(serverState) && !"activating".equals(serverState)) return;
+        String payload = "{\"type\":\"event\",\"event\":\"end\",\"reason\":\"" + jsonEscape(reason) + "\",\"sessionId\":\"" + jsonEscape(sessionId) + "\"}";
+        boolean sent = sendText(payload);
+        AndroidDebugLog.log("End v2 event · reason=" + reason + " · sent=" + sent);
+        // Again, wait for authoritative ENDING/IDLE before changing audio policy.
+    }
+
+    private void startConversationMicIfReady() {
+        if (!connected || !"listening".equals(serverState) || destroyed) return;
+        if (micRunning.get() || isThreadAlive(micThread) || isThreadAlive(wakeThread)) return;
+        if (!micRunning.compareAndSet(false, true)) return;
+
+        final String micSession = sessionId;
+        final int quality = prefs().getInt("audio_quality", 80);
+        final int latency = prefs().getInt("audio_latency", 55);
+        final boolean manualLatency = prefs().getBoolean("manual_latency", true);
+        final int chunkMs = manualLatency
+                ? Math.max(20, Math.min(120, prefs().getInt("manual_chunk_ms", 45)))
+                : chunkMsForLatency(latency);
+        final int requestedRate = sampleRateForQuality(quality);
+        final int gainPct = Math.max(50, Math.min(400, prefs().getInt("mic_gain_pct", 100)));
+        final int requestedSource = audioSourceForKey(prefs().getString("audio_source", "default"));
+        final String enhancerMode = prefs().getString("voice_enhancer", VoiceEnhancer.OFF);
+        final boolean nativeNs = prefs().getBoolean("native_ns", false);
+        final boolean nativeAgc = prefs().getBoolean("native_agc", false);
+        final boolean nativeAec = prefs().getBoolean("native_aec", false);
+        lastMicAudioMs = System.currentTimeMillis();
+
+        micThread = new Thread(new Runnable() {
+            @Override public void run() {
+                AudioRecord record = null;
+                NativeAudioEffects effects = null;
+                try {
+                    int actualRate = requestedRate;
+                    int actualSource = requestedSource;
+                    int chunkBytes = actualRate * 2 * chunkMs / 1000;
+                    int bufferBytes = Math.max(chunkBytes * 6, 4096);
+                    record = createCapture(actualRate, bufferBytes, actualSource);
+
+                    if (record == null && actualRate != 16000) {
+                        actualRate = 16000;
+                        chunkBytes = actualRate * 2 * chunkMs / 1000;
+                        record = createCapture(actualRate, Math.max(chunkBytes * 6, 4096), actualSource);
+                    }
+                    if (record == null && actualSource != MediaRecorder.AudioSource.DEFAULT) {
+                        actualSource = MediaRecorder.AudioSource.DEFAULT;
+                        actualRate = requestedRate;
+                        chunkBytes = actualRate * 2 * chunkMs / 1000;
+                        record = createCapture(actualRate, Math.max(chunkBytes * 6, 4096), actualSource);
+                    }
+                    if (record == null && actualSource != MediaRecorder.AudioSource.VOICE_RECOGNITION) {
+                        actualSource = MediaRecorder.AudioSource.VOICE_RECOGNITION;
+                        actualRate = 16000;
+                        chunkBytes = actualRate * 2 * chunkMs / 1000;
+                        record = createCapture(actualRate, Math.max(chunkBytes * 6, 4096), actualSource);
+                    }
+                    if (record == null) throw new IllegalStateException("No compatible conversation AudioRecord");
+
+                    micRecord = record;
+                    effects = new NativeAudioEffects(record.getAudioSessionId(), nativeNs, nativeAgc, nativeAec);
+                    VoiceEnhancer enhancer = new VoiceEnhancer(enhancerMode, actualRate);
+                    final int finalRate = actualRate;
+                    final int finalSource = actualSource;
+                    final int finalChunkBytes = chunkBytes;
+
+                    String config = "{\"type\":\"audio_config\",\"sessionId\":\"" + jsonEscape(micSession) + "\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"gainPct\":" + gainPct + ",\"capture\":\"" + jsonEscape(audioSourceName(finalSource)) + "\"}";
+                    if (!sendText(config)) throw new IllegalStateException("audio_config send failed");
+
+                    startPhraseDetector(finalRate, micSession);
+                    byte[] buffer = new byte[finalChunkBytes];
+                    record.startRecording();
+                    AndroidDebugLog.log("Conversation mic v2 START · session=" + micSession + " · " + finalRate + " Hz · source=" + finalSource);
+                    broadcastStatus();
+
+                    while (micRunning.get() && connected && "listening".equals(serverState) && micSession.equals(sessionId) && !destroyed) {
+                        int read = record.read(buffer, 0, buffer.length);
+                        if (read <= 0) continue;
+                        lastMicAudioMs = System.currentTimeMillis();
+                        applyGainPcm16InPlace(buffer, read, gainPct);
+                        enhancer.processInPlace(buffer, read);
+                        WebSocket current = socket;
+                        if (current == null || !current.send(ByteString.of(buffer, 0, read))) throw new IllegalStateException("binary send failed");
+                        offerPhraseAudio(buffer, read);
+                    }
+                } catch (Exception e) {
+                    if (micRunning.get()) AndroidDebugLog.log("Conversation mic v2 error: " + e);
+                } finally {
+                    if (effects != null) effects.close();
+                    if (record != null) {
+                        try { record.stop(); } catch (Exception ignored) { }
+                        try { record.release(); } catch (Exception ignored) { }
+                    }
+                    micRecord = null;
+                    micRunning.set(false);
+                    micThread = null;
+                    phraseQueue.clear();
+                    AndroidDebugLog.log("Conversation mic v2 RELEASED · session=" + micSession);
+                    handler.postDelayed(new Runnable() { @Override public void run() { reconcileAudioPolicy(); broadcastStatus(); } }, 100L);
+                }
             }
-            int flags = PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE;
-            PowerManager.WakeLock lock = pm.newWakeLock(flags, "codexremote:wake-screen");
-            lock.setReferenceCounted(false);
-            lock.acquire(3000);
-            AndroidDebugLog.log("Wake screen requested · 3000ms");
-        } catch (Exception e) {
-            AndroidDebugLog.log("Wake screen error: " + e);
+        }, "MicV2");
+        micThread.setPriority(Thread.MAX_PRIORITY);
+        micThread.start();
+    }
+
+    private synchronized void stopConversationMic(String reason) {
+        if (micRunning.getAndSet(false)) AndroidDebugLog.log("Conversation mic v2 stop requested · " + reason);
+        phraseQueue.clear();
+        AudioRecord record = micRecord;
+        if (record != null) try { record.stop(); } catch (Exception ignored) { }
+        Thread thread = micThread;
+        if (thread != null) thread.interrupt();
+    }
+
+    private void startPhraseDetector(final int sourceRate, final String detectorSession) {
+        if (voskModel == null || isThreadAlive(phraseThread)) return;
+        final List<String> phrases = endPhrases();
+        if (phrases.isEmpty()) return;
+        final int sensitivity = Math.max(0, Math.min(100, prefs().getInt("end_sensitivity", 30)));
+        phraseQueue.clear();
+
+        phraseThread = new Thread(new Runnable() {
+            @Override public void run() {
+                Recognizer recognizer = null;
+                try {
+                    recognizer = new Recognizer(voskModel, sourceRate, endGrammar(phrases));
+                    recognizer.setWords(true);
+                    while ((micRunning.get() && detectorSession.equals(sessionId)) || !phraseQueue.isEmpty()) {
+                        byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
+                        if (chunk == null) continue;
+                        if (!recognizer.acceptWaveForm(chunk, chunk.length)) continue;
+                        String result = recognizer.getResult();
+                        String matched = matchedEndPhrase(result, phrases, sensitivity);
+                        if (matched != null && connected && "listening".equals(serverState) && detectorSession.equals(sessionId)) {
+                            AndroidDebugLog.log("End phrase v2 confirmed: " + matched);
+                            handler.post(new Runnable() { @Override public void run() { sendEndEvent("phrase"); } });
+                            break;
+                        }
+                    }
+                } catch (Exception e) { AndroidDebugLog.log("End phrase v2 error: " + e); }
+                finally {
+                    if (recognizer != null) try { recognizer.close(); } catch (Exception ignored) { }
+                    phraseQueue.clear();
+                    phraseThread = null;
+                }
+            }
+        }, "EndPhraseV2");
+        phraseThread.start();
+    }
+
+    private void offerPhraseAudio(byte[] buffer, int read) {
+        if (!isThreadAlive(phraseThread)) return;
+        byte[] copy = Arrays.copyOf(buffer, read);
+        if (!phraseQueue.offer(copy)) {
+            phraseQueue.poll();
+            phraseQueue.offer(copy);
         }
+    }
+
+    private synchronized void startSpeaker() {
+        if (speaker != null) return;
+        int latency = prefs().getInt("audio_latency", 55);
+        int prebufferMs = Build.VERSION.SDK_INT <= 23
+                ? (latency >= 80 ? 260 : latency >= 45 ? 320 : 400)
+                : (latency >= 80 ? 100 : latency >= 45 ? 170 : 260);
+        speaker = new DownlinkPlayer(prebufferMs, pcm -> {
+            if (prefs().getBoolean("show_transcript", false)) {
+                ensureResponseTranscriber();
+                ResponseTranscriber transcriber = responseTranscriber;
+                if (transcriber != null) transcriber.accept(pcm);
+            }
+        });
+    }
+
+    private synchronized void playDownlink(byte[] pcm) {
+        if (!"listening".equals(serverState) || pcm == null || pcm.length == 0) return;
+        if (speaker == null) startSpeaker();
+        if (speaker != null) speaker.enqueue(pcm);
+    }
+
+    private synchronized void stopSpeaker() {
+        DownlinkPlayer old = speaker;
+        speaker = null;
+        if (old != null) try { old.close(); } catch (Exception ignored) { }
+    }
+
+    private synchronized void ensureResponseTranscriber() {
+        if (!prefs().getBoolean("show_transcript", false) || voskModel == null || responseTranscriber != null) return;
+        try {
+            responseTranscriber = new ResponseTranscriber(voskModel, text -> handler.post(new Runnable() {
+                @Override public void run() { if (overlay != null) overlay.setTranscript(text); }
+            }));
+        } catch (Exception e) { responseTranscriber = null; }
+    }
+
+    private synchronized void stopResponseTranscriber() {
+        if (responseTranscriber != null) {
+            try { responseTranscriber.close(); } catch (Exception ignored) { }
+            responseTranscriber = null;
+        }
+        if (overlay != null) overlay.clearTranscript();
+    }
+
+    private void armConversationTimeout() {
+        handler.removeCallbacks(conversationTimeoutRunnable);
+        int seconds = prefs().getInt("conversation_timeout", 300);
+        if (seconds > 0) handler.postDelayed(conversationTimeoutRunnable, seconds * 1000L);
+    }
+
+    private boolean sendText(String text) {
+        WebSocket current = socket;
+        boolean ok = false;
+        try { if (connected && current != null) ok = current.send(text); }
+        catch (Exception e) { AndroidDebugLog.log("WS v2 send error: " + e); }
+        AndroidDebugLog.log("WS v2 -> " + text + " · sent=" + ok);
+        if (!ok && connected) {
+            connected = false;
+            connecting = false;
+            serverState = "disconnected";
+            reconcileAudioPolicy();
+            handler.removeCallbacks(reconnectRunnable);
+            handler.postDelayed(reconnectRunnable, RECONNECT_MS);
+        }
+        return ok;
+    }
+
+    private void broadcastStatus() {
+        long now = System.currentTimeMillis();
+        long wakeAge = lastWakeAudioMs <= 0 ? -1 : Math.max(0, now - lastWakeAudioMs);
+        long micAge = lastMicAudioMs <= 0 ? -1 : Math.max(0, now - lastMicAudioMs);
+        boolean wakeHealthy = connected && "idle".equals(serverState) && wakeRunning.get()
+                && (Build.VERSION.SDK_INT > 23 || (wakeAge >= 0 && wakeAge < AUDIO_HEARTBEAT_STALE_MS));
+        boolean micHealthy = connected && "listening".equals(serverState) && micRunning.get()
+                && micAge >= 0 && micAge < MIC_HEARTBEAT_STALE_MS;
+
+        Intent status = new Intent(ACTION_STATUS);
+        status.setPackage(getPackageName());
+        status.putExtra(EXTRA_CONNECTED, connected);
+        status.putExtra(EXTRA_CONNECTING, connecting);
+        status.putExtra(EXTRA_SERVER_STATE, serverState);
+        status.putExtra(EXTRA_WAKE_RUNNING, wakeRunning.get());
+        status.putExtra(EXTRA_WAKE_HEALTHY, wakeHealthy);
+        status.putExtra(EXTRA_WAKE_RMS, lastWakeRms);
+        status.putExtra(EXTRA_WAKE_AUDIO_AGE, wakeAge);
+        status.putExtra(EXTRA_MIC_RUNNING, micRunning.get());
+        status.putExtra(EXTRA_MIC_HEALTHY, micHealthy);
+        status.putExtra(EXTRA_REVISION, serverRevision);
+        status.putExtra(EXTRA_SESSION_ID, sessionId);
+        sendBroadcast(status);
+    }
+
+    private String wakeWord() {
+        String value = normalize(prefs().getString("wake_word", "hola sol"));
+        return value.isEmpty() ? "hola sol" : value;
+    }
+
+    private String wakeGrammar() {
+        String word = wakeWord();
+        List<String> variants = new ArrayList<>();
+        variants.add(word);
+        String[] parts = word.split(" ");
+        if (parts.length == 2) { variants.add(parts[0]); variants.add(parts[1]); }
+        variants.add("[unk]");
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < variants.size(); i++) {
+            if (i > 0) b.append(',');
+            b.append('"').append(variants.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        return b.append(']').toString();
     }
 
     private static boolean wakeMatches(String text, int sensitivity, String target) {
-        if (text.contains(target)) return true;
-        int d = levenshtein(text, target);
-        if (sensitivity >= 80) return d <= Math.max(2, target.length() / 5);
-        if (sensitivity >= 45) return d <= Math.max(1, target.length() / 8);
+        if (text.equals(target) || text.contains(target)) return true;
+        int distance = levenshtein(text, target);
+        if (sensitivity >= 80) return distance <= Math.max(2, target.length() / 5);
+        if (sensitivity >= 45) return distance <= Math.max(1, target.length() / 8);
         return false;
     }
 
     private List<String> endPhrases() {
         String raw = prefs().getString("end_phrases", "gracias sol,chau sol,adiós sol,listo sol");
         List<String> out = new ArrayList<>();
-        if (raw != null) for (String s : raw.split(",")) { String n = normalize(s); if (!n.isEmpty() && !out.contains(n)) out.add(n); }
+        if (raw != null) for (String value : raw.split(",")) {
+            String normalized = normalize(value);
+            if (!normalized.isEmpty() && !out.contains(normalized)) out.add(normalized);
+        }
         return out;
     }
 
     private String endGrammar(List<String> phrases) {
         StringBuilder b = new StringBuilder("[");
-        for (int i = 0; i < phrases.size(); i++) { if (i > 0) b.append(','); b.append('"').append(phrases.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"'); }
-        if (!phrases.isEmpty()) b.append(','); b.append("\"[unk]\"]"); return b.toString();
+        for (int i = 0; i < phrases.size(); i++) {
+            if (i > 0) b.append(',');
+            b.append('"').append(phrases.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+        if (!phrases.isEmpty()) b.append(',');
+        return b.append("\"[unk]\"]").toString();
     }
 
     public static double endPhraseMinConfidence(int sensitivity) {
@@ -449,47 +897,77 @@ public class RemoteService extends Service implements RecognitionListener {
             JSONObject o = new JSONObject(json);
             String text = normalize(o.optString("text", ""));
             if (text.isEmpty()) return null;
-
             String matched = null;
             for (String phrase : phrases) {
-                if (text.equals(phrase) || text.endsWith(" " + phrase)) {
-                    matched = phrase;
-                    break;
-                }
+                if (text.equals(phrase) || text.endsWith(" " + phrase)) { matched = phrase; break; }
             }
             if (matched == null) return null;
 
             JSONArray words = o.optJSONArray("result");
             double sum = 0.0;
             int count = 0;
-            if (words != null) {
-                for (int i = 0; i < words.length(); i++) {
-                    JSONObject w = words.optJSONObject(i);
-                    if (w == null || !w.has("conf")) continue;
-                    sum += w.optDouble("conf", 0.0);
-                    count++;
-                }
+            if (words != null) for (int i = 0; i < words.length(); i++) {
+                JSONObject w = words.optJSONObject(i);
+                if (w != null && w.has("conf")) { sum += w.optDouble("conf", 0.0); count++; }
             }
             double confidence = count > 0 ? sum / count : 0.0;
-            double required = endPhraseMinConfidence(sensitivity);
-            AndroidDebugLog.log("End phrase candidate · phrase=" + matched + " · confidence=" + String.format(Locale.US, "%.3f", confidence) + " · required=" + String.format(Locale.US, "%.3f", required) + " · sensitivity=" + sensitivity);
-            return confidence >= required ? matched : null;
+            return confidence >= endPhraseMinConfidence(sensitivity) ? matched : null;
+        } catch (Exception e) { return null; }
+    }
+
+    private AudioRecord createCapture(int sampleRate, int bufferBytes, int source) {
+        try {
+            int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            if (min <= 0) return null;
+            AudioRecord record = new AudioRecord(source, sampleRate, AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT, Math.max(min, bufferBytes));
+            if (record.getState() != AudioRecord.STATE_INITIALIZED) { record.release(); return null; }
+            return record;
         } catch (Exception e) {
-            AndroidDebugLog.log("End phrase parse error: " + e);
+            AndroidDebugLog.log("AudioRecord v2 create failed · rate=" + sampleRate + " · source=" + source + " · " + e);
             return null;
         }
     }
 
-    private static String normalize(String s) { return s == null ? "" : s.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " "); }
+    private static int pcmRms(byte[] data, int count) {
+        long sum = 0;
+        int samples = 0;
+        for (int i = 0; i + 1 < count; i += 2) {
+            int sample = (short)((data[i] & 0xff) | (data[i + 1] << 8));
+            sum += (long)sample * sample;
+            samples++;
+        }
+        return samples == 0 ? 0 : (int)Math.sqrt(sum / (double)samples);
+    }
+
+    private static boolean isThreadAlive(Thread thread) { return thread != null && thread.isAlive(); }
+
+    private static String normalize(String value) {
+        if (value == null) return "";
+        String s = Normalizer.normalize(value.toLowerCase(Locale.ROOT), Normalizer.Form.NFD)
+                .replaceAll("\\p{InCombiningDiacriticalMarks}+", "")
+                .replaceAll("[^a-z0-9ñ ]", " ")
+                .trim()
+                .replaceAll("\\s+", " ");
+        return s;
+    }
 
     private static int levenshtein(String a, String b) {
-        int[] prev = new int[b.length()+1]; for (int j=0;j<=b.length();j++) prev[j]=j;
-        for (int i=1;i<=a.length();i++) {
-            int[] cur = new int[b.length()+1]; cur[0]=i;
-            for (int j=1;j<=b.length();j++) cur[j]=Math.min(Math.min(cur[j-1]+1, prev[j]+1), prev[j-1]+(a.charAt(i-1)==b.charAt(j-1)?0:1));
-            prev=cur;
+        int[] prev = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) prev[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            int[] cur = new int[b.length() + 1];
+            cur[0] = i;
+            for (int j = 1; j <= b.length(); j++)
+                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
+            prev = cur;
         }
         return prev[b.length()];
+    }
+
+    private static String jsonEscape(String value) {
+        if (value == null) return "";
+        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", " ").replace("\r", " ");
     }
 
     public static int sampleRateForQuality(int quality) {
@@ -513,11 +991,11 @@ public class RemoteService extends Service implements RecognitionListener {
     }
 
     public static String audioSourceName(int source) {
-        if (source == MediaRecorder.AudioSource.VOICE_COMMUNICATION) return "Llamada";
-        if (source == MediaRecorder.AudioSource.MIC) return "Mic normal";
-        if (source == MediaRecorder.AudioSource.DEFAULT) return "Default";
-        if (source == MediaRecorder.AudioSource.CAMCORDER) return "Camcorder";
-        return "Reconocimiento";
+        if (source == MediaRecorder.AudioSource.VOICE_COMMUNICATION) return "voice_communication";
+        if (source == MediaRecorder.AudioSource.MIC) return "mic";
+        if (source == MediaRecorder.AudioSource.DEFAULT) return "default";
+        if (source == MediaRecorder.AudioSource.CAMCORDER) return "camcorder";
+        return "voice_recognition";
     }
 
     public static void applyGainPcm16InPlace(byte[] data, int count, int gainPct) {
@@ -533,230 +1011,86 @@ public class RemoteService extends Service implements RecognitionListener {
         }
     }
 
-    private void startPhraseDetector(final int sourceRate) {
-        if (voskModel == null || (phraseThread != null && phraseThread.isAlive())) return;
-        final List<String> phrases = endPhrases();
-        if (phrases.isEmpty()) return;
-        final int sensitivity = Math.max(0, Math.min(100, prefs().getInt("end_sensitivity", 30)));
-        phraseQueue.clear();
-        phraseThread = new Thread(() -> {
-            Recognizer recognizer = null;
-            try {
-                recognizer = new Recognizer(voskModel, sourceRate, endGrammar(phrases));
-                recognizer.setWords(true);
-                AndroidDebugLog.log("End phrase detector START · sensitivity=" + sensitivity + " · minConfidence=" + String.format(Locale.US, "%.3f", endPhraseMinConfidence(sensitivity)));
-                while (streaming.get() || !phraseQueue.isEmpty()) {
-                    byte[] chunk = phraseQueue.poll(100, TimeUnit.MILLISECONDS);
-                    if (chunk == null) continue;
-                    boolean finalChunk = recognizer.acceptWaveForm(chunk, chunk.length);
-                    if (!finalChunk) continue;
-                    String result = recognizer.getResult();
-                    String matched = endingSession ? null : matchedEndPhrase(result, phrases, sensitivity);
-                    if (matched != null) {
-                        AndroidDebugLog.log("End phrase CONFIRMED · phrase=" + matched + " · result=" + result);
-                        requestEndSession("phrase");
-                    }
-                }
-            } catch (Exception e) { AndroidDebugLog.log("End phrase detector error: " + e); }
-            finally { if (recognizer != null) recognizer.close(); phraseQueue.clear(); phraseThread = null; }
-        }, "EndPhraseVosk");
-        phraseThread.setPriority(Math.max(Thread.MIN_PRIORITY, Thread.NORM_PRIORITY - 1)); phraseThread.start();
-    }
-
-    private void offerPhraseAudio(byte[] buffer, int read) {
-        if (phraseThread == null || !phraseThread.isAlive() || endingSession) return;
-        byte[] copy = Arrays.copyOf(buffer, read);
-        if (!phraseQueue.offer(copy)) { phraseQueue.poll(); phraseQueue.offer(copy); }
-    }
-
-    private AudioRecord createCapture(int sampleRate, int bufferBytes, int audioSource) {
+    @SuppressWarnings("deprecation")
+    private void wakeScreenIfEnabled() {
+        if (!prefs().getBoolean("wake_screen_on", true)) return;
         try {
-            int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-            if (min <= 0) return null;
-            AudioRecord record = new AudioRecord(audioSource, sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, bufferBytes));
-            if (record.getState() != AudioRecord.STATE_INITIALIZED) { record.release(); return null; }
-            return record;
-        } catch (Exception e) { AndroidDebugLog.log("AudioRecord create failed rate=" + sampleRate + " source=" + audioSource + " · " + e); return null; }
+            PowerManager pm = (PowerManager)getSystemService(POWER_SERVICE);
+            if (pm == null) return;
+            boolean interactive = Build.VERSION.SDK_INT >= 20 ? pm.isInteractive() : pm.isScreenOn();
+            if (interactive) return;
+            PowerManager.WakeLock lock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP | PowerManager.ON_AFTER_RELEASE,
+                    "codexremote:wake-screen");
+            lock.setReferenceCounted(false);
+            lock.acquire(3000L);
+        } catch (Exception e) { AndroidDebugLog.log("Wake screen error: " + e); }
     }
 
-    private void startMicStreaming() {
-        if (!streaming.compareAndSet(false, true)) return;
-        final int quality = prefs().getInt("audio_quality", 80);
-        final int latency = prefs().getInt("audio_latency", 55);
-        final boolean manualLatency = prefs().getBoolean("manual_latency", true);
-        final int requestedManualMs = prefs().getInt("manual_chunk_ms", 45);
-        final int chunkMs = manualLatency ? Math.max(20, Math.min(120, requestedManualMs)) : chunkMsForLatency(latency);
-        final int requestedRate = sampleRateForQuality(quality);
-        final int gainPct = Math.max(50, Math.min(400, prefs().getInt("mic_gain_pct", 100)));
-        final String sourceKey = prefs().getString("audio_source", "voice_recognition");
-        final int requestedSource = audioSourceForKey(sourceKey);
-        final String enhancerMode = prefs().getString("voice_enhancer", VoiceEnhancer.OFF);
-        final boolean nativeNs = prefs().getBoolean("native_ns", false);
-        final boolean nativeAgc = prefs().getBoolean("native_agc", false);
-        final boolean nativeAec = prefs().getBoolean("native_aec", false);
-        AndroidDebugLog.log("Mic stream requested rate=" + requestedRate + " source=" + requestedSource + " chunk=" + chunkMs);
-
-        audioThread = new Thread(() -> {
-            AudioRecord record = null;
-            NativeAudioEffects effects = null;
-            try {
-                int actualRate = requestedRate;
-                int actualSource = requestedSource;
-                int chunkBytes = actualRate * 2 * chunkMs / 1000;
-                int safetyChunks = quality >= 75 ? 6 : quality >= 40 ? 5 : 4;
-                record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
-
-                if (record == null && actualRate != 16000) {
-                    actualRate = 16000;
-                    chunkBytes = actualRate * 2 * chunkMs / 1000;
-                    record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
-                }
-                if (record == null && actualSource != MediaRecorder.AudioSource.VOICE_RECOGNITION) {
-                    actualSource = MediaRecorder.AudioSource.VOICE_RECOGNITION;
-                    actualRate = requestedRate;
-                    chunkBytes = actualRate * 2 * chunkMs / 1000;
-                    record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
-                    if (record == null && actualRate != 16000) {
-                        actualRate = 16000;
-                        chunkBytes = actualRate * 2 * chunkMs / 1000;
-                        record = createCapture(actualRate, chunkBytes * safetyChunks, actualSource);
-                    }
-                }
-                if (record == null) throw new IllegalStateException("No compatible AudioRecord format");
-
-                final int finalRate = actualRate;
-                final int finalChunkBytes = chunkBytes;
-                final int finalSource = actualSource;
-                effects = new NativeAudioEffects(record.getAudioSessionId(), nativeNs, nativeAgc, nativeAec);
-                VoiceEnhancer enhancer = new VoiceEnhancer(enhancerMode, finalRate);
-                final String effectSummary = effects.summary();
-                String captureName = audioSourceName(finalSource).replace(" ", "_").toLowerCase(Locale.ROOT);
-                sendText("{\"type\":\"audio_start\",\"sampleRate\":" + finalRate + ",\"channels\":1,\"chunkMs\":" + chunkMs + ",\"quality\":" + quality + ",\"latency\":" + latency + ",\"manualLatency\":" + manualLatency + ",\"gainPct\":" + gainPct + ",\"enhancer\":\"" + enhancerMode + "\",\"capture\":\"" + captureName + "\"}");
-                startPhraseDetector(finalRate);
-                updateNotification("Codex escuchando · " + audioSourceName(finalSource) + " · " + (finalRate / 1000) + " kHz · gain " + gainPct + "% · enh " + enhancerMode + " · " + effectSummary);
-
-                byte[] buffer = new byte[finalChunkBytes];
-                record.startRecording();
-                AndroidDebugLog.log("Mic stream START rate=" + finalRate + " source=" + finalSource + " chunkBytes=" + finalChunkBytes);
-                long sentBytes = 0;
-                while (streaming.get()) {
-                    int read = record.read(buffer, 0, buffer.length);
-                    if (read > 0 && socket != null) {
-                        applyGainPcm16InPlace(buffer, read, gainPct);
-                        enhancer.processInPlace(buffer, read);
-                        boolean sent = socket.send(ByteString.of(buffer, 0, read));
-                        if (!sent) AndroidDebugLog.log("Mic binary send=false");
-                        sentBytes += read;
-                        offerPhraseAudio(buffer, read);
-                    }
-                }
-                AndroidDebugLog.log("Mic stream STOP bytes=" + sentBytes);
-            } catch (Exception e) { AndroidDebugLog.log("Mic stream error: " + e); updateNotification("Audio error: " + e.getClass().getSimpleName()); }
-            finally {
-                if (effects != null) effects.close();
-                if (record != null) { try { record.stop(); } catch (Exception ignored) { } record.release(); }
-            }
-        }, "MicUplink");
-        audioThread.setPriority(Thread.MAX_PRIORITY); audioThread.start();
-    }
-
-    private void stopMicStreaming() {
-        if (!streaming.compareAndSet(true, false)) return;
-        phraseQueue.clear(); sendText("{\"type\":\"audio_stop\"}");
-    }
-
-    private synchronized void startSpeaker() {
-        if (speaker != null) return;
-        int latency = prefs().getInt("audio_latency", 55);
-        int prebufferMs;
-        if (Build.VERSION.SDK_INT <= 23) {
-            prebufferMs = latency >= 80 ? 260 : latency >= 45 ? 320 : 400;
-        } else {
-            prebufferMs = latency >= 80 ? 100 : latency >= 45 ? 170 : 260;
-        }
-        speaker = new DownlinkPlayer(prebufferMs, pcm -> {
-            if (prefs().getBoolean("show_transcript", false)) {
-                ensureResponseTranscriber();
-                ResponseTranscriber t = responseTranscriber;
-                if (t != null) t.accept(pcm);
-            }
-        });
-        AndroidDebugLog.log("Downlink jitter configured · prebuffer=" + prebufferMs + "ms · API=" + Build.VERSION.SDK_INT);
-    }
-
-    private synchronized void ensureResponseTranscriber() {
-        if (!prefs().getBoolean("show_transcript", false) || voskModel == null || responseTranscriber != null) return;
-        try {
-            responseTranscriber = new ResponseTranscriber(voskModel, text -> handler.post(() -> overlay.setTranscript(text)));
-        } catch (Exception e) {
-            responseTranscriber = null;
-            updateNotification("Transcripción no disponible");
-        }
-    }
-
-    private synchronized void stopResponseTranscriber() {
-        if (responseTranscriber != null) {
-            try { responseTranscriber.close(); } catch (Exception ignored) { }
-            responseTranscriber = null;
-        }
-        if (overlay != null) overlay.clearTranscript();
-    }
-
-    private synchronized void playDownlink(byte[] pcm) {
-        if (pcm == null || pcm.length == 0) return;
-        if (speaker == null) startSpeaker();
-        DownlinkPlayer s = speaker;
-        if (s != null) s.enqueue(pcm);
-    }
-
-    private synchronized void stopSpeaker() {
-        DownlinkPlayer s = speaker;
-        speaker = null;
-        if (s != null) try { s.close(); } catch (Exception ignored) { }
-    }
-
-    private boolean sendText(String text) {
-        boolean ok = false;
-        try { if (socket != null && connected) ok = socket.send(text); }
-        catch (Exception e) { AndroidDebugLog.log("WS text send exception: " + e); }
-        AndroidDebugLog.log("WS -> " + text + " · sent=" + ok);
-        return ok;
-    }
+    private SharedPreferences prefs() { return getSharedPreferences("settings", MODE_PRIVATE); }
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel c = new NotificationChannel(CHANNEL_ID, "Codex Audio Remote", NotificationManager.IMPORTANCE_LOW);
-            getSystemService(NotificationManager.class).createNotificationChannel(c);
+            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Codex Audio Remote", NotificationManager.IMPORTANCE_LOW);
+            getSystemService(NotificationManager.class).createNotificationChannel(channel);
         }
     }
 
     private Notification notification(String text) {
-        Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
-        return b.setContentTitle("Codex Audio Remote").setContentText(text).setSmallIcon(android.R.drawable.ic_btn_speak_now).setOngoing(true).build();
+        Notification.Builder b = Build.VERSION.SDK_INT >= 26
+                ? new Notification.Builder(this, CHANNEL_ID)
+                : new Notification.Builder(this);
+        return b.setContentTitle("Codex Audio Remote v2")
+                .setContentText(text)
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setOngoing(true)
+                .build();
     }
 
-    private void updateNotification(String text) {
-        handler.post(() -> ((NotificationManager)getSystemService(NOTIFICATION_SERVICE)).notify(NOTIFICATION_ID, notification(text)));
+    private void updateNotification(final String text) {
+        handler.post(new Runnable() {
+            @Override public void run() {
+                NotificationManager manager = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+                if (manager != null) manager.notify(NOTIFICATION_ID, notification(text));
+            }
+        });
     }
 
-    @Override public void onPartialResult(String hypothesis) { checkWake(hypothesis); }
-    @Override public void onResult(String hypothesis) { checkWake(hypothesis); }
-    @Override public void onFinalResult(String hypothesis) { checkWake(hypothesis); }
-    @Override public void onError(Exception exception) { AndroidDebugLog.log("Vosk callback error: " + exception); updateNotification("Vosk error"); }
-    @Override public void onTimeout() { handler.post(this::startWakeRecognition); }
+    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
+    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
+    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
+    @Override public void onError(Exception exception) {
+        AndroidDebugLog.log("Wake SpeechService callback error: " + exception);
+        wakeRunning.set(false);
+        speechService = null;
+        handler.postDelayed(new Runnable() { @Override public void run() { reconcileAudioPolicy(); } }, 250L);
+    }
+    @Override public void onTimeout() {
+        wakeRunning.set(false);
+        speechService = null;
+        handler.postDelayed(new Runnable() { @Override public void run() { reconcileAudioPolicy(); } }, 100L);
+    }
 
     @Override public void onDestroy() {
-        destroyed = true; handler.removeCallbacksAndMessages(null);
-        stopMicStreaming(); stopWakeRecognition(); stopSpeaker(); stopResponseTranscriber(); overlay.hide();
-        if (socket != null) socket.close(1000, "service stopped");
-        if (client != null) client.dispatcher().executorService().shutdown();
+        destroyed = true;
+        handler.removeCallbacksAndMessages(null);
+        handler.removeCallbacks(conversationTimeoutRunnable);
+        stopWakeCapture("service_destroy");
+        stopConversationMic("service_destroy");
+        stopSpeaker();
+        stopResponseTranscriber();
+        if (overlay != null) overlay.hide();
+        disconnectTransport("service_stopped");
+
         if (wakeReceiverRegistered) {
             try { unregisterReceiver(wakeWordReceiver); } catch (Exception ignored) { }
             wakeReceiverRegistered = false;
         }
-        if (voskModel != null) voskModel.close();
-        AndroidDebugLog.log("RemoteService destroyed");
+        try { if (voskModel != null) voskModel.close(); } catch (Exception ignored) { }
+        voskModel = null;
+        try { if (serviceWakeLock != null && serviceWakeLock.isHeld()) serviceWakeLock.release(); } catch (Exception ignored) { }
+        try { if (client != null) client.dispatcher().executorService().shutdown(); } catch (Exception ignored) { }
+        AndroidDebugLog.log("RemoteService v2 destroyed");
         super.onDestroy();
     }
 
