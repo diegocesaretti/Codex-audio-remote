@@ -5,6 +5,11 @@ def replace_once(text, old, new, label):
     if new in text:
         return text
     if old not in text:
+        # REST/Home Assistant one-shot mode intentionally never hands control to the
+        # Android microphone after the response, so this legacy handoff block is absent.
+        if label == 'external response-audio handoff' and \
+                'External conversation END · Android microphone was never enabled' in text:
+            return text
         raise RuntimeError(f'Patch anchor not found: {label}')
     return text.replace(old, new, 1)
 
