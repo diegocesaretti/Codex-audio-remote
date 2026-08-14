@@ -25,9 +25,27 @@ internal static class ContextAudioInjector
         finally { try { File.Delete(temp); } catch { } }
     }
 
+    public static int EstimateTextDurationMs(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return 0;
+
+        var words = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        // Windows TTS is patched to +25% speed in the build pipeline. Roughly 205 wpm
+        // tracks that rate well for Spanish while punctuation adds natural pauses.
+        const double wordsPerMinute = 205.0;
+        var speechMs = words * 60000.0 / wordsPerMinute;
+        var commaPauses = text.Count(c => c is ',' or ';' or ':') * 90.0;
+        var sentencePauses = text.Count(c => c is '.' or '!' or '?') * 190.0;
+        var tailMs = 300.0;
+        return (int)Math.Clamp(Math.Ceiling(speechMs + commaPauses + sentencePauses + tailMs), 650.0, 120000.0);
+    }
+
     public static async Task PlayTextIntoVirtualCableAsync(string text, string cableDeviceName, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(text)) throw new ArgumentException("Context text is empty", nameof(text));
+        var estimatedMs = EstimateTextDurationMs(text);
+        Console.WriteLine($"TTS phrase estimate: {estimatedMs} ms · words={text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length}");
+
         var temp = Path.Combine(Path.GetTempPath(), "codex-context-" + Guid.NewGuid().ToString("N") + ".wav");
         try
         {
@@ -42,7 +60,10 @@ internal static class ContextAudioInjector
                 synth.Speak(text);
                 synth.SetOutputToNull();
             }, token);
+
+            var started = Environment.TickCount64;
             await PlayFileAsync(temp, cableDeviceName, token);
+            Console.WriteLine($"TTS playback complete · actual={Environment.TickCount64 - started} ms · estimated={estimatedMs} ms");
         }
         finally { try { File.Delete(temp); } catch { } }
     }
