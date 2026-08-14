@@ -5,6 +5,10 @@ on:
     branches: [ main, rewrite/state-machine-v2 ]
   pull_request:
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     runs-on: windows-latest
