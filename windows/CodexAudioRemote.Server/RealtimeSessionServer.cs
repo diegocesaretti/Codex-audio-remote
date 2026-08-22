@@ -15,6 +15,7 @@ internal sealed class RealtimeSessionServer : IDisposable
     readonly CodexRealtimeBridge bridge;
 
     WebSocket? client;
+    long clientGeneration;
     long revision;
     string state = "idle";
     string stateReason = "startup";
@@ -65,30 +66,71 @@ internal sealed class RealtimeSessionServer : IDisposable
         }
 
         WebSocket? old;
-        lock (sync) { old = client; client = socket; }
-        if (old is not null) try { old.Abort(); } catch { }
+        long generation;
+        lock (sync)
+        {
+            old = client;
+            client = socket;
+            generation = ++clientGeneration;
+        }
 
-        Console.WriteLine("Realtime Android client connected · " + context.Request.RemoteEndPoint);
+        Console.WriteLine($"Realtime Android client connected · generation={generation} · {context.Request.RemoteEndPoint}");
+
+        // Make the replacement socket authoritative and fully initialize it before aborting
+        // the superseded connection. This avoids a short false-disconnected window on Android.
         await SendJsonAsync(socket, new { type = "hello", protocol = 2, server = "CodexAudioRemote", voiceBackend = "realtime-v3" });
         await SendStateAsync(socket);
 
-        try { await ReceiveLoopAsync(socket); }
+        if (old is not null && !ReferenceEquals(old, socket))
+        {
+            Console.WriteLine($"Realtime Android client superseded · new generation={generation}");
+            try { old.Abort(); } catch { }
+        }
+
+        try { await ReceiveLoopAsync(socket, generation); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { Console.WriteLine("Realtime Android client error: " + ex.Message); }
+        catch (WebSocketException ex)
+        {
+            if (IsCurrent(socket, generation))
+                Console.WriteLine($"Realtime Android client socket error · generation={generation}: {ex.Message}");
+            else
+                Console.WriteLine($"Realtime stale Android socket ended · generation={generation}");
+        }
+        catch (Exception ex)
+        {
+            if (IsCurrent(socket, generation))
+                Console.WriteLine($"Realtime Android client error · generation={generation}: {ex.Message}");
+            else
+                Console.WriteLine($"Realtime stale Android client ended · generation={generation}");
+        }
         finally
         {
-            lock (sync) if (ReferenceEquals(client, socket)) client = null;
+            bool wasCurrent;
+            lock (sync)
+            {
+                wasCurrent = ReferenceEquals(client, socket) && clientGeneration == generation;
+                if (wasCurrent) client = null;
+            }
             try { socket.Dispose(); } catch { }
+
+            if (!wasCurrent)
+            {
+                Console.WriteLine($"Realtime stale client cleanup ignored · generation={generation}");
+                return;
+            }
+
+            Console.WriteLine($"Realtime current client disconnected · generation={generation} · state={CurrentState()}");
             if (CurrentState() != "idle") await EndSessionAsync("transport_lost");
         }
     }
 
-    async Task ReceiveLoopAsync(WebSocket socket)
+    async Task ReceiveLoopAsync(WebSocket socket, long generation)
     {
         var buffer = new byte[64 * 1024];
-        while (!disposed && socket.State == WebSocketState.Open)
+        while (!disposed && IsCurrent(socket, generation) && socket.State == WebSocketState.Open)
         {
             var result = await socket.ReceiveAsync(buffer, CancellationToken.None);
+            if (!IsCurrent(socket, generation)) return;
             if (result.MessageType == WebSocketMessageType.Close) break;
 
             if (result.MessageType == WebSocketMessageType.Binary)
@@ -108,7 +150,7 @@ internal sealed class RealtimeSessionServer : IDisposable
             if (!result.EndOfMessage) continue;
             var text = Encoding.UTF8.GetString(buffer, 0, result.Count);
             using var doc = JsonDocument.Parse(text);
-            await HandleControlAsync(doc.RootElement);
+            if (IsCurrent(socket, generation)) await HandleControlAsync(doc.RootElement);
         }
     }
 
@@ -310,6 +352,11 @@ internal sealed class RealtimeSessionServer : IDisposable
         finally { sendGate.Release(); }
     }
 
+    bool IsCurrent(WebSocket socket, long generation)
+    {
+        lock (sync) return ReferenceEquals(client, socket) && clientGeneration == generation;
+    }
+
     string CurrentState() { lock (sync) return state; }
     string CurrentSessionId() { lock (sync) return sessionId; }
 
@@ -328,7 +375,9 @@ internal sealed class RealtimeSessionServer : IDisposable
         lock (sync)
         {
             sessionCts?.Cancel();
+            clientGeneration++;
             try { client?.Abort(); } catch { }
+            client = null;
         }
         bridge.Dispose();
         sendGate.Dispose();
