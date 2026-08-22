@@ -2,14 +2,15 @@ diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/real
 index dc6056d5..929eccc9 100644
 --- a/codex-rs/core/src/realtime_conversation.rs
 +++ b/codex-rs/core/src/realtime_conversation.rs
-@@ -1236,8 +1236,19 @@ async fn prepare_realtime_start(
+@@ -1236,8 +1236,20 @@ async fn prepare_realtime_start(
              ConfiguredRealtimeVoice::Use
          }
      };
-+    let omit_server_assigned_model = matches!(
-+        auth.as_ref().map(CodexAuth::api_auth_mode),
-+        Some(AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens)
-+    ) && matches!(&transport, ConversationStartTransport::Webrtc { .. });
++    // Frameless V3 WebRTC calls are assigned a model by the Codex backend.
++    // Including session.model is rejected for ChatGPT OAuth, and auth can be
++    // absent here even though the provider has already supplied OAuth headers.
++    let omit_server_assigned_model = version == RealtimeWsVersion::V3
++        && matches!(&transport, ConversationStartTransport::Webrtc { .. });
      let mut session_config =
 -        build_realtime_session_config(sess, &params, version, configured_voice).await?;
 +        build_realtime_session_config(
@@ -23,7 +24,7 @@ index dc6056d5..929eccc9 100644
      if matches!(&transport, ConversationStartTransport::ExistingCall { .. }) {
          session_config.session_id = params.realtime_session_id.clone();
      }
-@@ -1311,6 +1322,7 @@ pub(crate) async fn build_realtime_session_config(
+@@ -1311,6 +1323,7 @@ pub(crate) async fn build_realtime_session_config(
      params: &ConversationStartParams,
      version: RealtimeWsVersion,
      configured_voice: ConfiguredRealtimeVoice,
@@ -31,7 +32,7 @@ index dc6056d5..929eccc9 100644
  ) -> CodexResult<RealtimeSessionConfig> {
      for (name, instructions) in [
          (
-@@ -1379,7 +1391,7 @@ pub(crate) async fn build_realtime_session_config(
+@@ -1379,7 +1392,7 @@ pub(crate) async fn build_realtime_session_config(
              "initial realtime items must not exceed {REALTIME_INITIAL_ITEMS_MAX_TOKENS} estimated tokens in total"
          )));
      }
