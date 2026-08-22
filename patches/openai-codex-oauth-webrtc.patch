@@ -56,7 +56,7 @@ diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-a
 index b43e02d9..af73a751 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
-@@ -132,6 +132,12 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
+@@ -132,6 +132,10 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
          let mut session = realtime_session_json(session_config)?;
          if let Some(session) = session.as_object_mut() {
              session.remove("id");
