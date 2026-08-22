@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: openai/codex
-          ref: 343074d
+          ref: 343074d4207d572809bd8cea15f4be1d09d98e0b
           path: upstream-codex
 
       - name: Apply ChatGPT OAuth WebRTC compatibility patch
