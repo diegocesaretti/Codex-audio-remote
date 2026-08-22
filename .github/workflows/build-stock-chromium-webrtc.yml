@@ -25,34 +25,37 @@ jobs:
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
 
+      - name: Publish official Codex compatibility launcher
+        shell: pwsh
+        run: |
+          dotnet publish windows/CodexCompatibilityLauncher/CodexCompatibilityLauncher.csproj -c Release -r win-x64 --self-contained false -o dist/codex-shim
+          Copy-Item -Path dist/codex-shim/* -Destination dist/windows -Force
+          Remove-Item dist/codex-shim -Recurse -Force
+
       - name: Add experiment notes
         shell: pwsh
         run: |
           @'
-          STOCK CODEX + CHROMIUM WEBRTC EXPERIMENT
+          OFFICIAL CODEX + CHROMIUM WEBRTC COMPATIBILITY EXPERIMENT
 
-          This package intentionally does NOT contain codex.exe.
-          It uses the official Codex CLI from PATH and the existing ChatGPT OAuth login.
+          This package includes a small codex.exe launcher, NOT a forked Codex build.
+          The launcher locates your installed official Codex executable, copies it to
+          a local compatibility cache, and changes only the equal-length realtime
+          alpha marker quicksilver=v1 -> quicksilver=v2 in that temporary copy.
+          Your installed Codex executable and OAuth credentials are not modified.
 
           Before testing:
             codex login
 
-          The companion starts:
-            codex --enable realtime_conversation app-server --listen ws://127.0.0.1:4282
-
-          Chromium/WebView2 creates the RTCPeerConnection, audio transceiver and
-          oai-events data channel. Android PCM still uses app-server appendAudio and
-          outputAudio/delta sideband notifications.
-
-          Extract this build into a NEW folder so an old patched codex.exe is not
-          accidentally picked up from a previous OAuthRealtime package.
+          Chromium/WebView2 creates the RTCPeerConnection. Android PCM still uses
+          app-server appendAudio/outputAudio sideband notifications.
           '@ | Set-Content -Encoding UTF8 dist/windows/STOCK-CODEX-CHROMIUM-WEBRTC.txt
 
       - name: Verify package
         shell: pwsh
         run: |
           if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
-          if (Test-Path dist/windows/codex.exe) { throw 'Stock Codex experiment must not bundle codex.exe' }
+          if (-not (Test-Path dist/windows/codex.exe)) { throw 'Codex compatibility launcher missing' }
           Get-ChildItem dist/windows | Select-Object Name, Length | Format-Table
 
       - name: Upload artifact
