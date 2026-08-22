@@ -133,6 +133,9 @@ internal sealed class CodexOAuthWebRtcPeer : IDisposable
         await InvokeAsync("applyAnswer", sdp);
     }
 
+    public void ApplyAnswer(string sdp)
+        => ApplyAnswerAsync(sdp).GetAwaiter().GetResult();
+
     public void Close(string reason = "normal")
     {
         if (disposed || !ready.Task.IsCompletedSuccessfully) return;
