@@ -5,10 +5,12 @@ using System.Text.Json;
 
 /// <summary>
 /// Experimental protocol-v2 server that keeps the Android satellite unchanged while replacing
-/// the virtual-cable/Codex Desktop path with Codex app-server thread/realtime V3.
+/// the virtual-cable/Codex Desktop path with Codex app-server realtime over WebRTC.
 /// </summary>
 internal sealed class RealtimeSessionServer : IDisposable
 {
+    const long WakeRetryCooldownMs = 3500;
+
     readonly Options options;
     readonly HttpListener listener = new();
     readonly object sync = new();
@@ -19,6 +21,7 @@ internal sealed class RealtimeSessionServer : IDisposable
     WebSocket? client;
     long clientGeneration;
     long revision;
+    long wakeSuppressedUntil;
     string state = "idle";
     string stateReason = "startup";
     string sessionId = "";
@@ -36,8 +39,8 @@ internal sealed class RealtimeSessionServer : IDisposable
     public async Task RunAsync()
     {
         listener.Start();
-        Console.WriteLine($"Codex Audio Remote · EXPERIMENTAL Realtime V3 · ws://0.0.0.0:{options.Port}/ws/");
-        Console.WriteLine("Backend: codex app-server + ChatGPT OAuth · no virtual audio cable.");
+        Console.WriteLine($"Codex Audio Remote · EXPERIMENTAL Realtime WebRTC · ws://0.0.0.0:{options.Port}/ws/");
+        Console.WriteLine("Backend: official Codex app-server + ChatGPT OAuth + Chromium WebRTC.");
         Console.WriteLine("Working directory: " + TrayController.RealtimeWorkingDirectory);
 
         while (!disposed)
@@ -78,7 +81,7 @@ internal sealed class RealtimeSessionServer : IDisposable
 
         Console.WriteLine($"Realtime Android client connected · generation={generation} · {context.Request.RemoteEndPoint}");
 
-        await SendJsonAsync(socket, new { type = "hello", protocol = 2, server = "CodexAudioRemote", voiceBackend = "realtime-v3" });
+        await SendJsonAsync(socket, new { type = "hello", protocol = 2, server = "CodexAudioRemote", voiceBackend = "realtime-webrtc" });
         await SendStateAsync(socket);
 
         if (old is not null && !ReferenceEquals(old, socket))
@@ -203,6 +206,13 @@ internal sealed class RealtimeSessionServer : IDisposable
                     return;
                 }
 
+                var now = Environment.TickCount64;
+                if (now < wakeSuppressedUntil)
+                {
+                    Console.WriteLine($"Realtime wake ignored · retry cooldown={wakeSuppressedUntil - now}ms");
+                    return;
+                }
+
                 sessionCts?.Cancel();
                 sessionCts?.Dispose();
                 sessionCts = new CancellationTokenSource();
@@ -218,17 +228,18 @@ internal sealed class RealtimeSessionServer : IDisposable
             }
 
             await SendStateToCurrentAsync();
-            Console.WriteLine("Session " + id + ": starting Codex Realtime V3");
+            Console.WriteLine("Session " + id + ": starting Codex Realtime WebRTC");
 
             try
             {
                 await bridge.StartAsync(TrayController.RealtimeWorkingDirectory, token);
                 if (token.IsCancellationRequested || !IsCurrentSession(id)) return;
+                lock (sync) wakeSuppressedUntil = 0;
                 await SetStateAsync("listening", "realtime_ready");
                 await SendJsonToCurrentAsync(new
                 {
                     type = "realtime_status",
-                    backend = "codex-app-server-v3",
+                    backend = "codex-app-server-webrtc",
                     authMode = bridge.AuthMode,
                     planType = bridge.PlanType,
                     inputSampleRate,
@@ -243,7 +254,12 @@ internal sealed class RealtimeSessionServer : IDisposable
                 Console.WriteLine("Realtime activation failed: " + ex);
                 await SendJsonToCurrentAsync(new { type = "realtime_error", message = ex.Message, sessionId = id });
                 if (IsCurrentSession(id))
+                {
+                    lock (sync)
+                        wakeSuppressedUntil = Environment.TickCount64 + WakeRetryCooldownMs;
                     await SetStateAsync("idle", "realtime_start_failed", clearSession: true);
+                    Console.WriteLine($"Realtime wake retry suppressed for {WakeRetryCooldownMs}ms after activation failure");
+                }
             }
         }
         finally { activationGate.Release(); }
@@ -334,7 +350,7 @@ internal sealed class RealtimeSessionServer : IDisposable
             sessionId = snapshotSession,
             revision = snapshotRevision,
             reason = snapshotReason,
-            voiceBackend = "realtime-v3"
+            voiceBackend = "realtime-webrtc"
         });
     }
 
