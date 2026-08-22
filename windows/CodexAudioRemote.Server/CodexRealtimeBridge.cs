@@ -9,7 +9,6 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     const string AppServerUrl = "ws://127.0.0.1:4282";
     readonly Func<byte[], int, Task> onAudio;
     readonly Func<string, string, bool, Task> onTranscript;
-    readonly CodexOAuthWebRtcPeer oauthWebRtcPeer = new();
     readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> pending = new();
     readonly SemaphoreSlim sendGate = new(1, 1);
     readonly CancellationTokenSource lifetime = new();
@@ -21,7 +20,6 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     string threadId = "";
     int inputSampleRate = 16000;
     bool realtimeStarted;
-    TaskCompletionSource<bool>? realtimeSdpApplied;
     bool disposed;
 
     public string AuthMode { get; private set; } = "unknown";
@@ -52,8 +50,6 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
             throw new InvalidOperationException("Codex App Server is not logged in with ChatGPT OAuth. Run 'codex login' first.");
 
         realtimeStarted = false;
-        realtimeSdpApplied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var offerSdp = await oauthWebRtcPeer.CreateOfferAsync();
 
         var threadParams = new Dictionary<string, object?>();
         if (!string.IsNullOrWhiteSpace(cwd) && Directory.Exists(cwd))
@@ -64,20 +60,16 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         if (string.IsNullOrWhiteSpace(threadId))
             throw new InvalidOperationException("thread/start did not return a thread id.");
 
+        // Omit transport intentionally. Codex app-server then uses its official
+        // Realtime WebSocket path while preserving the user's ChatGPT OAuth session.
         await RequestAsync("thread/realtime/start", new
         {
             threadId,
             outputModality = "audio",
             version = "v3",
-            includeStartupContext = true,
-            transport = new
-            {
-                type = "webrtc",
-                sdp = offerSdp
-            }
+            includeStartupContext = true
         }, cancellationToken);
 
-        // The request only means startup was accepted. The notification marks the live session.
         var startedAt = Environment.TickCount64;
         while (!realtimeStarted && Environment.TickCount64 - startedAt < 12000)
         {
@@ -87,9 +79,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         }
 
         if (!realtimeStarted)
-            throw new TimeoutException("Codex realtime V3 did not emit thread/realtime/started within 12 seconds.");
-
-        await realtimeSdpApplied.Task.WaitAsync(TimeSpan.FromSeconds(12), cancellationToken);
+            throw new TimeoutException("Codex realtime V3 WebSocket did not emit thread/realtime/started within 12 seconds.");
     }
 
     public async Task AppendAudioAsync(byte[] pcm, int count, CancellationToken cancellationToken = default)
@@ -117,7 +107,6 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
             try { await RequestAsync("thread/realtime/stop", new { threadId }, cancellationToken); }
             catch { }
         }
-        oauthWebRtcPeer.Close("session ended");
         realtimeStarted = false;
         threadId = "";
     }
@@ -165,10 +154,9 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     void StartAppServerProcess()
     {
         if (appServerProcess is { HasExited: false }) return;
-        var bundledCodex = Path.Combine(AppContext.BaseDirectory, "codex.exe");
         var psi = new ProcessStartInfo
         {
-            FileName = File.Exists(bundledCodex) ? bundledCodex : "codex",
+            FileName = "codex",
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
@@ -179,7 +167,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         psi.ArgumentList.Add("app-server");
         psi.ArgumentList.Add("--listen");
         psi.ArgumentList.Add(AppServerUrl);
-        appServerProcess = Process.Start(psi) ?? throw new InvalidOperationException("Could not start codex app-server.");
+        appServerProcess = Process.Start(psi) ?? throw new InvalidOperationException("Could not start official codex app-server. Ensure Codex CLI is installed and available in PATH.");
         _ = Task.Run(async () =>
         {
             try
@@ -199,7 +187,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     {
         await RequestAsync("initialize", new
         {
-            clientInfo = new { name = "codex-audio-remote", title = "Codex Audio Remote", version = "0.2.0" },
+            clientInfo = new { name = "codex-audio-remote", title = "Codex Audio Remote", version = "0.2.0-official-ws" },
             capabilities = new { experimentalApi = true }
         }, cancellationToken);
         await SendNotificationAsync("initialized", new { }, cancellationToken);
@@ -305,28 +293,11 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
                 realtimeStarted = true;
                 if (parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("threadId", out var startedThread))
                     threadId = startedThread.GetString() ?? threadId;
-                Console.WriteLine($"Codex Realtime V3 started · thread={threadId} · auth={AuthMode} · plan={PlanType}");
+                Console.WriteLine($"Codex Realtime V3 WebSocket started · thread={threadId} · auth={AuthMode} · plan={PlanType}");
                 break;
 
             case "thread/realtime/sdp":
-                try
-                {
-                    var sdp = parameters.ValueKind == JsonValueKind.Object
-                        && parameters.TryGetProperty("sdp", out var answer)
-                        ? answer.GetString()
-                        : null;
-                    if (string.IsNullOrWhiteSpace(sdp))
-                        throw new InvalidOperationException("Codex realtime SDP notification did not contain an answer.");
-                    oauthWebRtcPeer.ApplyAnswer(sdp);
-                    realtimeSdpApplied?.TrySetResult(true);
-                    Console.WriteLine("Codex OAuth WebRTC SDP answer applied");
-                }
-                catch (Exception ex)
-                {
-                    LastError = "Codex OAuth WebRTC negotiation failed: " + ex.Message;
-                    realtimeSdpApplied?.TrySetException(new InvalidOperationException(LastError, ex));
-                    Console.WriteLine(LastError);
-                }
+                Console.WriteLine("Ignoring unexpected SDP notification in official WebSocket mode");
                 break;
 
             case "thread/realtime/outputAudio/delta":
@@ -354,14 +325,12 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
                 LastError = parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("message", out var msg)
                     ? msg.GetString() ?? "Realtime error"
                     : "Realtime error";
-                Console.WriteLine("Codex Realtime V3 error: " + LastError);
-                realtimeSdpApplied?.TrySetException(new InvalidOperationException(LastError));
+                Console.WriteLine("Codex Realtime V3 WebSocket error: " + LastError);
                 break;
 
             case "thread/realtime/closed":
                 realtimeStarted = false;
-                oauthWebRtcPeer.Close("realtime closed");
-                Console.WriteLine("Codex Realtime V3 closed");
+                Console.WriteLine("Codex Realtime V3 WebSocket closed");
                 break;
         }
     }
@@ -399,7 +368,6 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     {
         if (disposed) return;
         disposed = true;
-        oauthWebRtcPeer.Dispose();
         lifetime.Cancel();
         try { socket?.Abort(); } catch { }
         try { socket?.Dispose(); } catch { }
