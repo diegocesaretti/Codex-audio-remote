@@ -76,8 +76,6 @@ internal sealed class RealtimeSessionServer : IDisposable
 
         Console.WriteLine($"Realtime Android client connected · generation={generation} · {context.Request.RemoteEndPoint}");
 
-        // Make the replacement socket authoritative and fully initialize it before aborting
-        // the superseded connection. This avoids a short false-disconnected window on Android.
         await SendJsonAsync(socket, new { type = "hello", protocol = 2, server = "CodexAudioRemote", voiceBackend = "realtime-v3" });
         await SendStateAsync(socket);
 
@@ -87,6 +85,7 @@ internal sealed class RealtimeSessionServer : IDisposable
             try { old.Abort(); } catch { }
         }
 
+        bool wasCurrent = false;
         try { await ReceiveLoopAsync(socket, generation); }
         catch (OperationCanceledException) { }
         catch (WebSocketException ex)
@@ -105,20 +104,20 @@ internal sealed class RealtimeSessionServer : IDisposable
         }
         finally
         {
-            bool wasCurrent;
             lock (sync)
             {
                 wasCurrent = ReferenceEquals(client, socket) && clientGeneration == generation;
                 if (wasCurrent) client = null;
             }
             try { socket.Dispose(); } catch { }
+        }
 
-            if (!wasCurrent)
-            {
-                Console.WriteLine($"Realtime stale client cleanup ignored · generation={generation}");
-                return;
-            }
-
+        if (!wasCurrent)
+        {
+            Console.WriteLine($"Realtime stale client cleanup ignored · generation={generation}");
+        }
+        else
+        {
             Console.WriteLine($"Realtime current client disconnected · generation={generation} · state={CurrentState()}");
             if (CurrentState() != "idle") await EndSessionAsync("transport_lost");
         }
