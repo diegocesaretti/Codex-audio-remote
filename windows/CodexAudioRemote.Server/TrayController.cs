@@ -11,10 +11,25 @@ static class TrayController
     const string RunName = "CodexAudioRemote";
     const string AppKey = @"Software\CodexAudioRemote";
     const string HomeAssistantUrlName = "HomeAssistantUrl";
+    const string VoiceBackendName = "VoiceBackend";
+    const string RealtimeCwdName = "RealtimeWorkingDirectory";
     const string DefaultHomeAssistantUrl = "http://homeassistant.local:8123";
+    public const string ClassicBackend = "classic";
+    public const string RealtimeV3Backend = "realtime-v3";
     static NotifyIcon? icon;
 
     public static string HomeAssistantBaseUrl => GetHomeAssistantUrl();
+    public static string VoiceBackend => ReadString(VoiceBackendName) == RealtimeV3Backend ? RealtimeV3Backend : ClassicBackend;
+    public static string RealtimeWorkingDirectory
+    {
+        get
+        {
+            var configured = ReadString(RealtimeCwdName);
+            return !string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured)
+                ? configured
+                : Environment.CurrentDirectory;
+        }
+    }
 
     [ModuleInitializer]
     public static void Initialize()
@@ -37,6 +52,34 @@ static class TrayController
         haUrl.Click += (_, _) => ShowHomeAssistantUrlDialog();
         var downlink = new ToolStripMenuItem("Audio de respuesta / Downlink…");
         downlink.Click += (_, _) => DownlinkDeviceSettings.ShowDialog();
+
+        var backendMenu = new ToolStripMenuItem("Backend de voz");
+        var classic = new ToolStripMenuItem("Clásico · Codex Desktop + cable virtual") { CheckOnClick = true };
+        var realtime = new ToolStripMenuItem("Experimental · Codex Realtime V3 (OAuth)") { CheckOnClick = true };
+        void RefreshBackendChecks()
+        {
+            classic.Checked = VoiceBackend == ClassicBackend;
+            realtime.Checked = VoiceBackend == RealtimeV3Backend;
+        }
+        classic.Click += (_, _) =>
+        {
+            WriteString(VoiceBackendName, ClassicBackend);
+            RefreshBackendChecks();
+            icon?.ShowBalloonTip(1500, "Codex Audio Remote", "Backend clásico seleccionado", ToolTipIcon.Info);
+        };
+        realtime.Click += (_, _) =>
+        {
+            WriteString(VoiceBackendName, RealtimeV3Backend);
+            RefreshBackendChecks();
+            icon?.ShowBalloonTip(2200, "Codex Audio Remote", "Codex Realtime V3 seleccionado. Usa el login OAuth existente de Codex.", ToolTipIcon.Info);
+        };
+        RefreshBackendChecks();
+        backendMenu.DropDownItems.Add(classic);
+        backendMenu.DropDownItems.Add(realtime);
+
+        var realtimeFolder = new ToolStripMenuItem("Carpeta de trabajo Realtime…");
+        realtimeFolder.Click += (_, _) => ShowRealtimeWorkingDirectoryDialog();
+
         var status = new ToolStripMenuItem("Codex Audio Remote activo") { Enabled = false };
         var exit = new ToolStripMenuItem("Salir");
         exit.Click += (_, _) =>
@@ -48,6 +91,8 @@ static class TrayController
         menu.Items.Add(status);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(startup);
+        menu.Items.Add(backendMenu);
+        menu.Items.Add(realtimeFolder);
         menu.Items.Add(haUrl);
         menu.Items.Add(downlink);
         menu.Items.Add(new ToolStripSeparator());
@@ -60,9 +105,23 @@ static class TrayController
             Visible = true,
             ContextMenuStrip = menu
         };
-        icon.DoubleClick += (_, _) => icon.ShowBalloonTip(1200, "Codex Audio Remote", "Servidor activo en segundo plano", ToolTipIcon.Info);
+        icon.DoubleClick += (_, _) => icon.ShowBalloonTip(1200, "Codex Audio Remote", "Servidor activo en segundo plano · " + VoiceBackend, ToolTipIcon.Info);
 
         Application.Run();
+    }
+
+    static void ShowRealtimeWorkingDirectoryDialog()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Elegí la carpeta/proyecto que recibirá las nuevas conversaciones Codex Realtime.",
+            UseDescriptionForTitle = true,
+            SelectedPath = RealtimeWorkingDirectory,
+            ShowNewFolderButton = false
+        };
+        if (dialog.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath)) return;
+        WriteString(RealtimeCwdName, dialog.SelectedPath);
+        icon?.ShowBalloonTip(1800, "Codex Audio Remote", "Carpeta Realtime: " + dialog.SelectedPath, ToolTipIcon.Info);
     }
 
     static void ShowHomeAssistantUrlDialog()
@@ -96,21 +155,28 @@ static class TrayController
 
     static string GetHomeAssistantUrl()
     {
-        try
-        {
-            using var key = Registry.CurrentUser.OpenSubKey(AppKey, false);
-            var value = key?.GetValue(HomeAssistantUrlName) as string;
-            return NormalizeBaseUrl(value) ?? DefaultHomeAssistantUrl;
-        }
+        try { return NormalizeBaseUrl(ReadString(HomeAssistantUrlName)) ?? DefaultHomeAssistantUrl; }
         catch { return DefaultHomeAssistantUrl; }
     }
 
-    static void SetHomeAssistantUrl(string url)
+    static void SetHomeAssistantUrl(string url) => WriteString(HomeAssistantUrlName, url);
+
+    static string? ReadString(string name)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(AppKey, false);
+            return key?.GetValue(name) as string;
+        }
+        catch { return null; }
+    }
+
+    static void WriteString(string name, string value)
     {
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(AppKey, true);
-            key.SetValue(HomeAssistantUrlName, url);
+            key.SetValue(name, value);
         }
         catch { }
     }

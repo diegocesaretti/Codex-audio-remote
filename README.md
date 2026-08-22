@@ -181,6 +181,18 @@ cd windows/CodexAudioRemote.Server
 dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
+The experimental OAuth Realtime build also bundles a patched `codex.exe`. Codex
+Realtime V3 requires WebRTC for ChatGPT OAuth, and the ChatGPT backend assigns
+the realtime model server-side. The patch in
+`patches/openai-codex-oauth-webrtc.patch` omits the unsupported `session.model`
+field only for ChatGPT-authenticated WebRTC calls. It does not read, copy or
+store OAuth tokens; Codex continues to own login and token refresh.
+
+Run the **Build OAuth Realtime Windows** workflow manually to produce the
+`CodexAudioRemote-Windows-OAuthRealtime` artifact. The Windows companion uses
+the bundled `codex.exe` when present and falls back to the installed Codex CLI
+for ordinary source builds.
+
 Useful options:
 
 ```text
