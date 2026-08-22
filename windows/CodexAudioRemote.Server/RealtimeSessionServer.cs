@@ -13,6 +13,8 @@ internal sealed class RealtimeSessionServer : IDisposable
     readonly HttpListener listener = new();
     readonly object sync = new();
     readonly CodexRealtimeBridge bridge;
+    readonly SemaphoreSlim sendGate = new(1, 1);
+    readonly SemaphoreSlim activationGate = new(1, 1);
 
     WebSocket? client;
     long clientGeneration;
@@ -188,46 +190,63 @@ internal sealed class RealtimeSessionServer : IDisposable
 
     async Task BeginSessionAsync()
     {
-        CancellationToken token;
-        string id;
-        lock (sync)
-        {
-            if (state != "idle") return;
-            sessionCts?.Cancel();
-            sessionCts?.Dispose();
-            sessionCts = new CancellationTokenSource();
-            token = sessionCts.Token;
-            sessionId = Guid.NewGuid().ToString("N");
-            id = sessionId;
-        }
-
-        await SetStateAsync("activating", "realtime_start");
-        Console.WriteLine("Session " + id + ": starting Codex Realtime V3");
-
+        await activationGate.WaitAsync();
         try
         {
-            await bridge.StartAsync(TrayController.RealtimeWorkingDirectory, token);
-            if (token.IsCancellationRequested || CurrentSessionId() != id) return;
-            await SetStateAsync("listening", "realtime_ready");
-            await SendJsonToCurrentAsync(new
+            CancellationToken token;
+            string id;
+            lock (sync)
             {
-                type = "realtime_status",
-                backend = "codex-app-server-v3",
-                authMode = bridge.AuthMode,
-                planType = bridge.PlanType,
-                inputSampleRate,
-                outputSampleRate = 16000,
-                sessionId = id
-            });
-            Console.WriteLine($"Session {id}: LISTENING · OAuth={bridge.AuthMode} · plan={bridge.PlanType}");
+                if (state != "idle")
+                {
+                    Console.WriteLine($"Realtime wake ignored · state={state} · session={sessionId}");
+                    return;
+                }
+
+                sessionCts?.Cancel();
+                sessionCts?.Dispose();
+                sessionCts = new CancellationTokenSource();
+                token = sessionCts.Token;
+                sessionId = Guid.NewGuid().ToString("N");
+                id = sessionId;
+
+                // Claim the activation atomically before any await. This closes the small window
+                // where simultaneous Android wake events could all observe state=idle.
+                state = "activating";
+                stateReason = "realtime_start";
+                revision++;
+            }
+
+            await SendStateToCurrentAsync();
+            Console.WriteLine("Session " + id + ": starting Codex Realtime V3");
+
+            try
+            {
+                await bridge.StartAsync(TrayController.RealtimeWorkingDirectory, token);
+                if (token.IsCancellationRequested || !IsCurrentSession(id)) return;
+                await SetStateAsync("listening", "realtime_ready");
+                await SendJsonToCurrentAsync(new
+                {
+                    type = "realtime_status",
+                    backend = "codex-app-server-v3",
+                    authMode = bridge.AuthMode,
+                    planType = bridge.PlanType,
+                    inputSampleRate,
+                    outputSampleRate = 16000,
+                    sessionId = id
+                });
+                Console.WriteLine($"Session {id}: LISTENING · OAuth={bridge.AuthMode} · plan={bridge.PlanType}");
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Realtime activation failed: " + ex);
+                await SendJsonToCurrentAsync(new { type = "realtime_error", message = ex.Message, sessionId = id });
+                if (IsCurrentSession(id))
+                    await SetStateAsync("idle", "realtime_start_failed", clearSession: true);
+            }
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Realtime activation failed: " + ex);
-            await SendJsonToCurrentAsync(new { type = "realtime_error", message = ex.Message, sessionId = id });
-            await SetStateAsync("idle", "realtime_start_failed", clearSession: true);
-        }
+        finally { activationGate.Release(); }
     }
 
     public async Task EndSessionAsync(string reason)
@@ -240,13 +259,17 @@ internal sealed class RealtimeSessionServer : IDisposable
             endingId = sessionId;
             cancellation = sessionCts;
             sessionCts = null;
+            state = "ending";
+            stateReason = reason;
+            revision++;
         }
         cancellation?.Cancel();
         cancellation?.Dispose();
-        await SetStateAsync("ending", reason);
+        await SendStateToCurrentAsync();
         try { await bridge.StopAsync(); }
         catch (Exception ex) { Console.WriteLine("Realtime stop warning: " + ex.Message); }
-        await SetStateAsync("idle", reason, clearSession: true);
+        if (IsCurrentSession(endingId))
+            await SetStateAsync("idle", reason, clearSession: true);
         Console.WriteLine("Session " + endingId + ": ended · " + reason);
     }
 
@@ -322,8 +345,6 @@ internal sealed class RealtimeSessionServer : IDisposable
         if (socket is not null) await SendJsonAsync(socket, payload);
     }
 
-    readonly SemaphoreSlim sendGate = new(1, 1);
-
     async Task SendJsonAsync(WebSocket socket, object payload)
     {
         if (socket.State != WebSocketState.Open) return;
@@ -356,6 +377,11 @@ internal sealed class RealtimeSessionServer : IDisposable
         lock (sync) return ReferenceEquals(client, socket) && clientGeneration == generation;
     }
 
+    bool IsCurrentSession(string id)
+    {
+        lock (sync) return !string.IsNullOrEmpty(id) && sessionId == id;
+    }
+
     string CurrentState() { lock (sync) return state; }
     string CurrentSessionId() { lock (sync) return sessionId; }
 
@@ -380,5 +406,6 @@ internal sealed class RealtimeSessionServer : IDisposable
         }
         bridge.Dispose();
         sendGate.Dispose();
+        activationGate.Dispose();
     }
 }
