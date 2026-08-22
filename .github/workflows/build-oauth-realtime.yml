@@ -1,6 +1,9 @@
 name: Build OAuth Realtime Windows
 
 on:
+  push:
+    branches:
+      - fix/oauth-webrtc
   workflow_dispatch:
 
 permissions:
