@@ -60,12 +60,10 @@ index b43e02d9..af73a751 100644
          let mut session = realtime_session_json(session_config)?;
          if let Some(session) = session.as_object_mut() {
              session.remove("id");
-+            // ChatGPT's backend assigns the Frameless model for OAuth calls and rejects the
-+            // property even when it originated from a configured Codex default. Remove it at
-+            // the final backend request boundary while leaving direct API multipart calls intact.
-+            if self.uses_backend_request_shape() {
-+                session.remove("model");
-+            }
++            // WebRTC call creation is assigned a model by the realtime service. Remove the
++            // configured Codex default at the final request boundary so it cannot be sent as
++            // session.model, which ChatGPT OAuth rejects.
++            session.remove("model");
          }
          // TODO(aibrahim): Align the SIWC route with the API multipart shape and remove this branch.
          if self.uses_backend_request_shape() {
