@@ -7,6 +7,7 @@ using System.Text.Json;
 internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
 {
     const string AppServerUrl = "ws://127.0.0.1:4282";
+    const string RealtimeVersion = "v1";
     readonly Func<byte[], int, Task> onAudio;
     readonly Func<string, string, bool, Task> onTranscript;
     readonly CodexOAuthWebRtcPeer oauthWebRtcPeer = new();
@@ -69,11 +70,12 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         if (string.IsNullOrWhiteSpace(threadId))
             throw new InvalidOperationException("thread/start did not return a thread id.");
 
+        Console.WriteLine($"Starting Codex WebRTC compatibility session · version={RealtimeVersion}");
         await RequestAsync("thread/realtime/start", new
         {
             threadId,
             outputModality = "audio",
-            version = "v3",
+            version = RealtimeVersion,
             includeStartupContext = true,
             transport = new
             {
@@ -91,7 +93,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         }
 
         if (!realtimeStarted)
-            throw new TimeoutException("Codex realtime V3 did not emit thread/realtime/started within 12 seconds.");
+            throw new TimeoutException($"Codex realtime {RealtimeVersion} did not emit thread/realtime/started within 12 seconds.");
 
         await realtimeSdpApplied.Task.WaitAsync(TimeSpan.FromSeconds(12), cancellationToken);
     }
@@ -326,7 +328,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
                 realtimeStarted = true;
                 if (parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("threadId", out var startedThread))
                     threadId = startedThread.GetString() ?? threadId;
-                Console.WriteLine($"Codex Realtime V3 started · thread={threadId} · auth={AuthMode} · plan={PlanType}");
+                Console.WriteLine($"Codex Realtime {RealtimeVersion} started · thread={threadId} · auth={AuthMode} · plan={PlanType}");
                 break;
 
             case "thread/realtime/sdp":
@@ -375,14 +377,14 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
                 LastError = parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("message", out var msg)
                     ? msg.GetString() ?? "Realtime error"
                     : "Realtime error";
-                Console.WriteLine("Codex Realtime V3 error: " + LastError);
+                Console.WriteLine($"Codex Realtime {RealtimeVersion} error: " + LastError);
                 realtimeSdpApplied?.TrySetException(new InvalidOperationException(LastError));
                 break;
 
             case "thread/realtime/closed":
                 realtimeStarted = false;
                 oauthWebRtcPeer.Close("realtime closed");
-                Console.WriteLine("Codex Realtime V3 closed");
+                Console.WriteLine($"Codex Realtime {RealtimeVersion} closed");
                 break;
         }
     }
