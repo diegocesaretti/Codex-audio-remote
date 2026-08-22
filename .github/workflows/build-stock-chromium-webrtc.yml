@@ -1,0 +1,63 @@
+name: Build Stock Codex Chromium WebRTC
+
+on:
+  push:
+    branches:
+      - experimental/stock-codex-chromium-webrtc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+
+      - name: Add experiment notes
+        shell: pwsh
+        run: |
+          @'
+          STOCK CODEX + CHROMIUM WEBRTC EXPERIMENT
+
+          This package intentionally does NOT contain codex.exe.
+          It uses the official Codex CLI from PATH and the existing ChatGPT OAuth login.
+
+          Before testing:
+            codex login
+
+          The companion starts:
+            codex --enable realtime_conversation app-server --listen ws://127.0.0.1:4282
+
+          Chromium/WebView2 creates the RTCPeerConnection, audio transceiver and
+          oai-events data channel. Android PCM still uses app-server appendAudio and
+          outputAudio/delta sideband notifications.
+
+          Extract this build into a NEW folder so an old patched codex.exe is not
+          accidentally picked up from a previous OAuthRealtime package.
+          '@ | Set-Content -Encoding UTF8 dist/windows/STOCK-CODEX-CHROMIUM-WEBRTC.txt
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
+          if (Test-Path dist/windows/codex.exe) { throw 'Stock Codex experiment must not bundle codex.exe' }
+          Get-ChildItem dist/windows | Select-Object Name, Length | Format-Table
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-StockCodex-ChromiumWebRTC
+          path: dist/windows
+          if-no-files-found: error
