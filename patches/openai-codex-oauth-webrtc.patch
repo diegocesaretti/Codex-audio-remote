@@ -52,3 +52,20 @@ index dc6056d5..929eccc9 100644
      let event_parser = match version {
          RealtimeWsVersion::V1 => RealtimeEventParser::V1,
          RealtimeWsVersion::V2 => RealtimeEventParser::RealtimeV2,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+index b43e02d9..af73a751 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+@@ -132,6 +132,12 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
+         let mut session = realtime_session_json(session_config)?;
+         if let Some(session) = session.as_object_mut() {
+             session.remove("id");
++            // ChatGPT's backend assigns the Frameless model for OAuth calls and rejects the
++            // property even when it originated from a configured Codex default. Remove it at
++            // the final backend request boundary while leaving direct API multipart calls intact.
++            if self.uses_backend_request_shape() {
++                session.remove("model");
++            }
+         }
+         // TODO(aibrahim): Align the SIWC route with the API multipart shape and remove this branch.
+         if self.uses_backend_request_shape() {
