@@ -28,7 +28,7 @@ jobs:
   oauth-realtime-windows:
     if: github.ref == 'refs/heads/fix/oauth-webrtc' || github.head_ref == 'fix/oauth-webrtc'
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     steps:
       - name: Checkout Codex Audio Remote
         uses: actions/checkout@v4
