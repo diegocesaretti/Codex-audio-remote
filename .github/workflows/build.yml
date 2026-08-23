@@ -19,14 +19,11 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
-      - name: Publish Codex realtime compatibility launcher
+      - name: Verify stock Codex package
         if: github.ref == 'refs/heads/experimental/stock-codex-chromium-webrtc' || github.head_ref == 'experimental/stock-codex-chromium-webrtc'
         shell: pwsh
         run: |
-          dotnet publish windows/CodexCompatibilityLauncher/CodexCompatibilityLauncher.csproj -c Release -r win-x64 --self-contained false -o dist/codex-shim
-          Copy-Item -Path dist/codex-shim/* -Destination dist/windows -Force
-          Remove-Item dist/codex-shim -Recurse -Force
-          if (-not (Test-Path dist/windows/codex.exe)) { throw 'Codex compatibility launcher missing' }
+          if (Test-Path dist/windows/codex.exe) { throw 'ExistingCall experiment must use stock Codex from PATH and must not bundle codex.exe' }
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
