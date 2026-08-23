@@ -52,6 +52,9 @@ jobs:
           $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
           $settings = Get-Content windows/CodexAudioRemote.Server/AppSettings.cs -Raw
           $ui = Get-Content windows/CodexAudioRemote.Server/SettingsForm.cs -Raw
+          $haUi = Get-Content windows/CodexAudioRemote.Server/HomeAssistantSettingsPanel.cs -Raw
+          $haClient = Get-Content windows/CodexAudioRemote.Server/HomeAssistantMediaClient.cs -Raw
+          $haApi = Get-Content windows/CodexAudioRemote.Server/RealtimeHomeAssistantApiServer.cs -Raw
           $mirror = Get-Content windows/CodexAudioRemote.Server/RealtimeSecondaryAudioMirror.cs -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'v3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'gpt-live-1-codex missing' }
@@ -76,11 +79,18 @@ jobs:
           if ($server -notmatch 'secondaryMirror\.PushPcm16k') { throw 'secondary mirror fanout missing' }
           if ($program -notmatch 'RealtimeHomeAssistantApiServer') { throw 'Realtime Home Assistant API missing' }
           if ($settings -notmatch '"sol"') { throw 'Sol voice setting missing' }
-          if ($ui -notmatch 'SecondaryOutputSettingsForm') { throw 'secondary mirror settings UI missing' }
+          if ($ui -notmatch 'HomeAssistantSettingsPanel') { throw 'unified Home Assistant settings tab missing' }
+          if ($ui -notmatch 'SecondaryOutputSettingsForm') { throw 'Windows/Bluetooth mirror settings UI missing' }
           if ($ui -notmatch 'RealtimeLifecycleSettingsForm') { throw 'lifecycle settings UI missing' }
+          if ($haUi -notmatch 'Probar stream LIVE') { throw 'Home Assistant stream diagnostic UI missing' }
+          if ($haUi -notmatch 'PostLocalSpeechTestAsync') { throw 'Home Assistant local /api/speak test missing' }
+          if ($haClient -notmatch 'media_content_type = "music"') { throw 'HA play_media logical media type fix missing' }
+          if ($haApi -notmatch 'HEAD') { throw 'Cast HEAD probe support missing' }
+          if ($haApi -notmatch 'IsLoopback') { throw 'localhost API test exemption missing' }
           if ($mirror -notmatch 'Android remains the primary output') { throw 'Android-primary mirror invariant missing' }
-          if ($mirror -notmatch 'HomeAssistantMediaClient\.StartLiveStreamAsync') { throw 'Home Assistant mirror transport missing' }
-          Write-Host 'Official flow verified: V3 + Sol + appendSpeech + PAUSED lifecycle + Android-primary mirrors.'
+          if ($mirror -notmatch 'ResolveLanIPv4ForHomeAssistantAsync') { throw 'HA route-aware LAN IP selection missing' }
+          if ($mirror -notmatch 'TestHomeAssistantMirrorAsync') { throw 'real LIVE mirror test missing' }
+          Write-Host 'Official flow verified: V3 + Sol + appendSpeech + PAUSED + unified HA diagnostics + hardened mirrors.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
