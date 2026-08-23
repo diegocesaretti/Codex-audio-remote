@@ -6,7 +6,7 @@ $peerPath = Join-Path $root 'CodexOAuthWebRtcPeer.cs'
 $serverPath = Join-Path $root 'RealtimeSessionServer.cs'
 $settingsPath = Join-Path $root 'SettingsForm.cs'
 
-# ---- WebRTC control: pause/resume microphone without closing the call ----
+# WebRTC datachannel control: pause/resume microphone without closing the call.
 $peer = Get-Content -LiteralPath $peerPath -Raw
 if (-not $peer.Contains('public async Task SetInputPausedAsync')) {
     $jsMarker = '    async applyAnswer(id, sdp) {'
@@ -72,18 +72,18 @@ if (-not $bridge.Contains('public async Task SetInputPausedAsync')) {
     Set-Content -LiteralPath $bridgePath -Value $bridge -Encoding utf8 -NoNewline
 }
 
-# ---- Authoritative server: LISTENING -> PAUSED -> IDLE lifecycle + mirrors ----
+# Authoritative server: LISTENING -> PAUSED -> IDLE plus secondary mirrors.
 $server = Get-Content -LiteralPath $serverPath -Raw
 if (-not $server.Contains('RealtimeSecondaryAudioMirror secondaryMirror')) {
     $fieldMarker = '    readonly SemaphoreSlim activationGate = new(1, 1);'
-    $replacement = @'
+    $fieldReplacement = @'
     readonly SemaphoreSlim activationGate = new(1, 1);
     readonly RealtimeSecondaryAudioMirror secondaryMirror = new();
     CancellationTokenSource? listenSilenceCts;
     CancellationTokenSource? conversationIdleCts;
 '@
     if (-not $server.Contains($fieldMarker)) { throw 'Realtime server activation field marker missing.' }
-    $server = $server.Replace($fieldMarker, $replacement)
+    $server = $server.Replace($fieldMarker, $fieldReplacement)
 
     $eventOld = @'
                 if (evt == "wake") await BeginSessionAsync();
@@ -217,7 +217,16 @@ if (-not $server.Contains('RealtimeSecondaryAudioMirror secondaryMirror')) {
 '@
     $server = $server.Substring(0, $speechIndex) + $lifecycle + $server.Substring($speechIndex)
 
-    $server = $server.Replace('        if (CurrentState() != "listening")`r`n            return new RealtimeSpeechRequestResult(false, "busy", CurrentSessionId());', '        if (CurrentState() != "listening" && CurrentState() != "paused")`r`n            return new RealtimeSpeechRequestResult(false, "busy", CurrentSessionId());')
+    $busyOld = @'
+        if (CurrentState() != "listening")
+            return new RealtimeSpeechRequestResult(false, "busy", CurrentSessionId());
+'@
+    $busyNew = @'
+        if (CurrentState() != "listening" && CurrentState() != "paused")
+            return new RealtimeSpeechRequestResult(false, "busy", CurrentSessionId());
+'@
+    if (-not $server.Contains($busyOld)) { throw 'External speech state marker missing.' }
+    $server = $server.Replace($busyOld, $busyNew)
     $server = $server.Replace('if (IsCurrentSession(targetSession) && CurrentState() == "listening")', 'if (IsCurrentSession(targetSession) && (CurrentState() == "listening" || CurrentState() == "paused"))')
 
     $endOld = @'
@@ -263,14 +272,16 @@ if (-not $server.Contains('RealtimeSecondaryAudioMirror secondaryMirror')) {
         });
     }
 
-    async Task SetStateAsync'@
+    async Task SetStateAsync
+'@
     $transcriptNew = @'
             sessionId = CurrentSessionId()
         });
         NoteRealtimeActivity(role, done);
     }
 
-    async Task SetStateAsync'@
+    async Task SetStateAsync
+'@
     if (-not $server.Contains($transcriptOld)) { throw 'Realtime transcript marker missing.' }
     $server = $server.Replace($transcriptOld, $transcriptNew)
 
@@ -290,7 +301,7 @@ if (-not $server.Contains('RealtimeSecondaryAudioMirror secondaryMirror')) {
     Set-Content -LiteralPath $serverPath -Value $server -Encoding utf8 -NoNewline
 }
 
-# ---- Settings UI: lifecycle button + secondary mirrors dialog ----
+# Settings UI: lifecycle and secondary mirror dialogs.
 $settings = Get-Content -LiteralPath $settingsPath -Raw
 if (-not $settings.Contains('SecondaryOutputSettingsForm.ShowSettings')) {
     $audioOld = @'
@@ -323,7 +334,6 @@ if (-not $settings.Contains('SecondaryOutputSettingsForm.ShowSettings')) {
     Set-Content -LiteralPath $settingsPath -Value $settings -Encoding utf8 -NoNewline
 }
 
-# Validation.
 $peerCheck = Get-Content -LiteralPath $peerPath -Raw
 $bridgeCheck = Get-Content -LiteralPath $bridgePath -Raw
 $serverCheck = Get-Content -LiteralPath $serverPath -Raw
