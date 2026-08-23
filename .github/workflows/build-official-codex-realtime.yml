@@ -51,6 +51,10 @@ jobs:
         shell: pwsh
         run: ./scripts/fix-ha-speak-race-and-mirror-persistence.ps1
 
+      - name: Make HA mirror live-toggleable
+        shell: pwsh
+        run: ./scripts/fix-ha-live-mirror-runtime.ps1
+
       - name: Verify official-flow source transform
         shell: pwsh
         run: |
@@ -64,6 +68,7 @@ jobs:
           $haClient = Get-Content windows/CodexAudioRemote.Server/HomeAssistantMediaClient.cs -Raw
           $haApi = Get-Content windows/CodexAudioRemote.Server/RealtimeHomeAssistantApiServer.cs -Raw
           $mirror = Get-Content windows/CodexAudioRemote.Server/RealtimeSecondaryAudioMirror.cs -Raw
+          $mirrorSettings = Get-Content windows/CodexAudioRemote.Server/RealtimeMirrorSettings.cs -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'v3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'gpt-live-1-codex missing' }
           if ($bridge -notmatch 'RealtimeVoice => AppSettings\.RealtimeVoice') { throw 'settings-backed realtime voice missing' }
@@ -106,7 +111,12 @@ jobs:
           if ($mirror -notmatch 'ResolveLanIPv4ForHomeAssistantAsync') { throw 'HA route-aware LAN IP selection missing' }
           if ($mirror -notmatch 'WaitForGetAsync') { throw 'HA receiver GET verification missing' }
           if ($mirror -notmatch 'BytesServed') { throw 'HA stream byte diagnostics missing' }
-          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + readiness wait + PAUSED + persistent HA mirror + resilient mirrors.'
+          if ($mirror -notmatch 'ArmHomeAssistantMirrorForCurrentSession') { throw 'HA live mirror arm missing' }
+          if ($mirror -notmatch 'DisarmHomeAssistantMirrorForCurrentSession') { throw 'HA live mirror disarm missing' }
+          if ($mirror -notmatch 'lazy runtime refresh') { throw 'HA live mirror lazy refresh missing' }
+          if ($mirror -notmatch 'Realtime HA mirror config') { throw 'HA mirror config diagnostic missing' }
+          if ($mirrorSettings -notmatch 'HomeAssistantMirrorEnabledChanged') { throw 'HA mirror change event missing' }
+          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + readiness wait + PAUSED + persistent/live HA mirror + resilient mirrors.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
