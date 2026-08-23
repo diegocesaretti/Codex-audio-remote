@@ -21,3 +21,6 @@ if ($remaining -ne 0) { throw "Per-chunk LAME Flush calls remain: $remaining" }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
 Write-Host "Removed $before terminal LAME Flush call(s); HA MP3 encoder now remains open until producer disposal."
+
+# End phrases are a listening-stop signal, not a conversation-stop signal.
+& (Join-Path $PSScriptRoot 'fix-end-phrases-pause.ps1')
