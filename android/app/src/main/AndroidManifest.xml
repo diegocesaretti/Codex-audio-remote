@@ -29,10 +29,6 @@
             android:exported="false" />
 
         <activity
-            android:name=".WakeGifPickerActivity"
-            android:exported="false" />
-
-        <activity
             android:name=".OverlayFallbackActivity"
             android:exported="false"
             android:excludeFromRecents="true"
