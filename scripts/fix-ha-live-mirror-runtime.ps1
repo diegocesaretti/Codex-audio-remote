@@ -168,6 +168,6 @@ if ($mirrorCheck -notmatch 'lazy runtime refresh') { throw 'HA mirror lazy runti
 if ($mirrorCheck -notmatch 'Realtime HA mirror config') { throw 'HA mirror config diagnostics missing.' }
 Write-Host 'Made Home Assistant mirror live-toggleable during active Realtime sessions.'
 
-# NAudio.Lame Flush() finalizes the encoder, so apply the streaming fix after the
-# live-mirror transform has finished producing RealtimeSecondaryAudioMirror.cs.
+# First keep the MP3 streaming path correct, then replace it with the lower-latency WAV path.
 & (Join-Path $PSScriptRoot 'fix-ha-lame-stream-flush.ps1')
+& (Join-Path $PSScriptRoot 'optimize-ha-cast-low-latency.ps1')
