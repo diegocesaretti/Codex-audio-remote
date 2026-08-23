@@ -11,17 +11,27 @@ import android.media.MediaPlayer;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 
-/** Local lifecycle sounds. Each cue can use its built-in chime or a persisted user audio URI. */
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+/** Local lifecycle sounds. Wake can randomly choose among up to three persisted user audio URIs. */
 public final class AudioCuePlayer {
     public enum Cue { WAKE, UPLINK, LISTEN_END, END }
 
     private static final int SAMPLE_RATE = 44100;
     private static final String PREFS = "settings";
+    private static final Random RANDOM = new Random();
+    private static int lastWakeCandidate = -1;
 
     private AudioCuePlayer() { }
 
     public static void play(Context context, Cue cue) {
         if (context == null || cue == null) return;
+        if (cue == Cue.WAKE) {
+            playWakeRandom(context);
+            return;
+        }
         Context app = context.getApplicationContext();
         SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         if (!isEnabled(prefs, cue)) return;
@@ -33,8 +43,51 @@ public final class AudioCuePlayer {
             playCustom(app, cue, Uri.parse(customUri), volume);
             return;
         }
-
         new Thread(() -> playBuiltInBlocking(cue, volume), "AudioCue-" + cue.name()).start();
+    }
+
+    /** Plays one random configured wake greeting and returns the local mic suppression duration. */
+    public static int playWakeRandom(Context context) {
+        if (context == null) return 0;
+        Context app = context.getApplicationContext();
+        SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (!isEnabled(prefs, Cue.WAKE)) return 0;
+        int volume = Math.max(0, Math.min(100, prefs.getInt("cue_volume", 45)));
+        if (volume <= 0) return 0;
+
+        List<WakeCandidate> candidates = configuredWakeCandidates(prefs);
+        if (candidates.isEmpty()) {
+            new Thread(() -> playBuiltInBlocking(Cue.WAKE, volume), "AudioCue-WAKE").start();
+            return builtInDurationMs(Cue.WAKE) + 100;
+        }
+
+        int choice;
+        synchronized (AudioCuePlayer.class) {
+            choice = RANDOM.nextInt(candidates.size());
+            if (candidates.size() > 1 && choice == lastWakeCandidate)
+                choice = (choice + 1 + RANDOM.nextInt(candidates.size() - 1)) % candidates.size();
+            lastWakeCandidate = choice;
+        }
+        WakeCandidate selected = candidates.get(choice);
+        Uri uri = Uri.parse(selected.uri);
+        playCustom(app, Cue.WAKE, uri, volume);
+        int suppressMs = durationForUri(app, uri, 450);
+        AndroidDebugLog.log("Wake greeting random · slot=" + selected.slot + " · candidates=" + candidates.size() + " · suppress=" + suppressMs + "ms");
+        return suppressMs;
+    }
+
+    /** Test one specific wake slot without affecting random selection. */
+    public static void playWakeSlot(Context context, int slot) {
+        if (context == null) return;
+        Context app = context.getApplicationContext();
+        SharedPreferences prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        int volume = Math.max(0, Math.min(100, prefs.getInt("cue_volume", 45)));
+        String value = prefs.getString(wakeUriPrefKey(slot), "");
+        if (value != null && !value.trim().isEmpty()) {
+            playCustom(app, Cue.WAKE, Uri.parse(value), volume);
+        } else if (slot == 1) {
+            new Thread(() -> playBuiltInBlocking(Cue.WAKE, volume), "AudioCue-WAKE-Test").start();
+        }
     }
 
     /** How long mic uplink should be locally suppressed so a cue is not fed back into Realtime. */
@@ -43,15 +96,18 @@ public final class AudioCuePlayer {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String customUri = prefs.getString(uriPrefKey(cue), "");
         if (customUri == null || customUri.trim().isEmpty()) return builtInDurationMs(cue) + 100;
+        return durationForUri(context, Uri.parse(customUri), 350);
+    }
 
+    private static int durationForUri(Context context, Uri uri, int fallback) {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         try {
-            retriever.setDataSource(context, Uri.parse(customUri));
+            retriever.setDataSource(context, uri);
             String duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-            int ms = duration == null ? 220 : Integer.parseInt(duration);
-            return Math.max(180, Math.min(3000, ms + 90));
+            int ms = duration == null ? fallback : Integer.parseInt(duration);
+            return Math.max(180, Math.min(5000, ms + 90));
         } catch (Exception ignored) {
-            return 350;
+            return fallback;
         } finally {
             try { retriever.release(); } catch (Exception ignored) { }
         }
@@ -59,12 +115,18 @@ public final class AudioCuePlayer {
 
     public static String uriPrefKey(Cue cue) {
         switch (cue) {
-            case WAKE: return "cue_wake_uri";
+            case WAKE: return wakeUriPrefKey(1);
             case UPLINK: return "cue_uplink_uri";
             case LISTEN_END: return "cue_listen_end_uri";
             case END:
             default: return "cue_end_uri";
         }
+    }
+
+    public static String wakeUriPrefKey(int slot) {
+        if (slot == 2) return "cue_wake_uri_2";
+        if (slot == 3) return "cue_wake_uri_3";
+        return "cue_wake_uri";
     }
 
     public static void setCustomUri(Context context, Cue cue, Uri uri) {
@@ -73,18 +135,49 @@ public final class AudioCuePlayer {
                 .edit().putString(uriPrefKey(cue), uri.toString()).apply();
     }
 
+    public static void setCustomWakeUri(Context context, int slot, Uri uri) {
+        if (context == null || uri == null) return;
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(wakeUriPrefKey(slot), uri.toString()).apply();
+    }
+
     public static void clearCustomUri(Context context, Cue cue) {
         if (context == null || cue == null) return;
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().remove(uriPrefKey(cue)).apply();
     }
 
+    public static void clearCustomWakeUri(Context context, int slot) {
+        if (context == null) return;
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().remove(wakeUriPrefKey(slot)).apply();
+    }
+
+    public static boolean hasCustomWakeUri(Context context, int slot) {
+        if (context == null) return false;
+        String value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(wakeUriPrefKey(slot), "");
+        return value != null && !value.trim().isEmpty();
+    }
+
     public static String describeSelection(Context context, Cue cue) {
+        if (cue == Cue.WAKE) return describeWakeSelection(context, 1);
         if (context == null || cue == null) return "Chime interno";
         String value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(uriPrefKey(cue), "");
         if (value == null || value.trim().isEmpty()) return "Chime interno";
-        Uri uri = Uri.parse(value);
+        return describeUri(context, Uri.parse(value));
+    }
+
+    public static String describeWakeSelection(Context context, int slot) {
+        if (context == null) return slot == 1 ? "Chime interno" : "Sin archivo";
+        String value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(wakeUriPrefKey(slot), "");
+        if (value == null || value.trim().isEmpty()) return slot == 1 ? "Chime interno" : "Sin archivo";
+        return describeUri(context, Uri.parse(value));
+    }
+
+    private static String describeUri(Context context, Uri uri) {
         Cursor cursor = null;
         try {
             cursor = context.getContentResolver().query(uri,
@@ -104,6 +197,15 @@ public final class AudioCuePlayer {
         return last == null || last.trim().isEmpty() ? "Audio personalizado" : last;
     }
 
+    private static List<WakeCandidate> configuredWakeCandidates(SharedPreferences prefs) {
+        List<WakeCandidate> out = new ArrayList<>();
+        for (int slot = 1; slot <= 3; slot++) {
+            String value = prefs.getString(wakeUriPrefKey(slot), "");
+            if (value != null && !value.trim().isEmpty()) out.add(new WakeCandidate(slot, value));
+        }
+        return out;
+    }
+
     private static boolean isEnabled(SharedPreferences prefs, Cue cue) {
         switch (cue) {
             case WAKE: return prefs.getBoolean("cue_wake_enabled", true);
@@ -121,10 +223,7 @@ public final class AudioCuePlayer {
                 player = new MediaPlayer();
                 player.setAudioStreamType(AudioManager.STREAM_MUSIC);
                 player.setDataSource(context, uri);
-                final MediaPlayer releasePlayer = player;
-                player.setOnCompletionListener(mp -> {
-                    try { mp.release(); } catch (Exception ignored) { }
-                });
+                player.setOnCompletionListener(mp -> { try { mp.release(); } catch (Exception ignored) { } });
                 player.setOnErrorListener((mp, what, extra) -> {
                     AndroidDebugLog.log("Custom cue playback error · " + cue + " · what=" + what + " extra=" + extra);
                     try { mp.release(); } catch (Exception ignored) { }
@@ -135,7 +234,6 @@ public final class AudioCuePlayer {
                 player.setVolume(volume, volume);
                 player.start();
                 AndroidDebugLog.log("Audio cue custom · " + cue + " · " + uri);
-                // Ownership transfers to completion/error listener once started.
                 player = null;
             } catch (Exception e) {
                 AndroidDebugLog.log("Custom audio cue unavailable · " + cue + " · " + e.getMessage() + " · using built-in");
@@ -150,23 +248,11 @@ public final class AudioCuePlayer {
         try {
             short[] pcm;
             switch (cue) {
-                case WAKE:
-                    pcm = sequence(volumePct,
-                            note(880.0, 42), silence(18), note(1174.7, 62));
-                    break;
-                case UPLINK:
-                    pcm = sequence(volumePct,
-                            note(1046.5, 38), silence(12), note(1396.9, 58));
-                    break;
-                case LISTEN_END:
-                    pcm = sequence(volumePct,
-                            note(932.3, 42), silence(12), note(698.5, 58));
-                    break;
+                case WAKE: pcm = sequence(volumePct, note(880.0, 42), silence(18), note(1174.7, 62)); break;
+                case UPLINK: pcm = sequence(volumePct, note(1046.5, 38), silence(12), note(1396.9, 58)); break;
+                case LISTEN_END: pcm = sequence(volumePct, note(932.3, 42), silence(12), note(698.5, 58)); break;
                 case END:
-                default:
-                    pcm = sequence(volumePct,
-                            note(784.0, 48), silence(18), note(523.3, 82));
-                    break;
+                default: pcm = sequence(volumePct, note(784.0, 48), silence(18), note(523.3, 82)); break;
             }
 
             int bytes = pcm.length * 2;
@@ -211,13 +297,9 @@ public final class AudioCuePlayer {
         short[] out = new short[total];
         int pos = 0;
         double master = (volumePct / 100.0) * 0.24;
-
         for (Segment s : segments) {
             int count = Math.max(1, SAMPLE_RATE * s.ms / 1000);
-            if (s.silence) {
-                pos += count;
-                continue;
-            }
+            if (s.silence) { pos += count; continue; }
             int fade = Math.min(count / 3, Math.max(1, SAMPLE_RATE * 5 / 1000));
             for (int i = 0; i < count; i++) {
                 double envelope = 1.0;
@@ -232,14 +314,16 @@ public final class AudioCuePlayer {
         return out;
     }
 
+    private static final class WakeCandidate {
+        final int slot;
+        final String uri;
+        WakeCandidate(int slot, String uri) { this.slot = slot; this.uri = uri; }
+    }
+
     private static final class Segment {
         final double hz;
         final int ms;
         final boolean silence;
-        Segment(double hz, int ms, boolean silence) {
-            this.hz = hz;
-            this.ms = ms;
-            this.silence = silence;
-        }
+        Segment(double hz, int ms, boolean silence) { this.hz = hz; this.ms = ms; this.silence = silence; }
     }
 }
