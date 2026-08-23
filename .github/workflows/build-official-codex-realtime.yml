@@ -23,17 +23,27 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-official-realtime.ps1
 
+      - name: Route V3 audio through WebRTC media track
+        shell: pwsh
+        run: ./scripts/prepare-webrtc-media-audio.ps1
+
       - name: Verify official-flow source transform
         shell: pwsh
         run: |
           $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
+          $peer = Get-Content windows/CodexAudioRemote.Server/CodexOAuthWebRtcPeer.cs -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'v3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'gpt-live-1-codex missing' }
           if ($bridge -notmatch 'type = "webrtc"') { throw 'webrtc transport missing' }
           if ($bridge -match 'type = "existingCall"') { throw 'existingCall still present' }
           if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'manual realtime/calls still present' }
           if ($bridge -notmatch 'includeStartupContext = false') { throw 'official startup context setting missing' }
-          Write-Host 'Official flow verified: app-server owns realtime/calls.'
+          if ($bridge -match 'thread/realtime/appendAudio') { throw 'legacy sideband audio append still present' }
+          if ($bridge -notmatch 'oauthWebRtcPeer\.PushPcmAsync') { throw 'WebRTC media uplink missing' }
+          if ($bridge -notmatch 'oauthWebRtcPeer\.AudioReceived') { throw 'WebRTC media downlink callback missing' }
+          if ($peer -notmatch 'MediaStreamTrackGenerator') { throw 'WebRTC audio track generator missing' }
+          if ($peer -notmatch 'MediaStreamTrackProcessor') { throw 'WebRTC audio track processor missing' }
+          Write-Host 'Official flow verified: app-server owns realtime/calls and WebRTC owns V3 audio.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
