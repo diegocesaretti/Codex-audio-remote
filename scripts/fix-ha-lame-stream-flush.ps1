@@ -18,7 +18,7 @@ $source = $source.Replace('            encoder.Flush();' + "`n", '')
 # Add explicit diagnostics to make the next runtime log unambiguous.
 $runMarker = '            using var encoder = new LameMP3FileWriter(sink, new WaveFormat(16000, 16, 1), 64);'
 if ($source.Contains($runMarker) -and -not $source.Contains('Realtime HA MP3 encoder streaming · continuous mode')) {
-    $source = $source.Replace($runMarker, $runMarker + "`r`n            Console.WriteLine(\"Realtime HA MP3 encoder streaming · continuous mode\");", 1)
+    $source = $source.Replace($runMarker, $runMarker + "`r`n            Console.WriteLine(\"Realtime HA MP3 encoder streaming · continuous mode\");")
 }
 
 $remaining = ([regex]::Matches($source, 'encoder\.Flush\(\);')).Count
