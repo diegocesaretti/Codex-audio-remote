@@ -11,6 +11,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     readonly Func<byte[], int, Task> onAudio;
     readonly Func<string, string, bool, Task> onTranscript;
     readonly CodexOAuthWebRtcPeer oauthWebRtcPeer = new();
+    readonly CodexDirectRealtimeCall directRealtimeCall = new();
     readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> pending = new();
     readonly SemaphoreSlim sendGate = new(1, 1);
     readonly SemaphoreSlim initializeGate = new(1, 1);
@@ -49,6 +50,10 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         LastError = "";
         await EnsureConnectedAsync(cancellationToken);
         await InitializeOnceAsync(cancellationToken);
+
+        // Ask Codex to refresh its own OAuth material first. We then reuse the refreshed local
+        // access token only for the one realtime/calls request that the current stock client cannot
+        // shape correctly for the backend.
         await ReadAccountAsync(cancellationToken);
 
         if (!string.Equals(AuthMode, "chatgpt", StringComparison.OrdinalIgnoreCase))
@@ -70,7 +75,16 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         if (string.IsNullOrWhiteSpace(threadId))
             throw new InvalidOperationException("thread/start did not return a thread id.");
 
-        Console.WriteLine($"Starting Codex WebRTC compatibility session · version={RealtimeVersion}");
+        Console.WriteLine($"Starting direct OAuth WebRTC compatibility session · version={RealtimeVersion}");
+
+        // Create the media call ourselves with the backend-compatible AVAS session payload.
+        // This deliberately omits session.model. Then hand only the resulting call id to stock
+        // Codex, which officially supports attaching its sideband to an existing call.
+        var directCall = await directRealtimeCall.CreateAsync(offerSdp, cancellationToken);
+        await oauthWebRtcPeer.ApplyAnswerAsync(directCall.Sdp);
+        realtimeSdpApplied.TrySetResult(true);
+        Console.WriteLine("Codex Chromium WebRTC SDP answer applied · source=direct-call");
+
         await RequestAsync("thread/realtime/start", new
         {
             threadId,
@@ -79,8 +93,8 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
             includeStartupContext = true,
             transport = new
             {
-                type = "webrtc",
-                sdp = offerSdp
+                type = "existingCall",
+                callId = directCall.CallId
             }
         }, cancellationToken);
 
@@ -93,7 +107,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         }
 
         if (!realtimeStarted)
-            throw new TimeoutException($"Codex realtime {RealtimeVersion} did not emit thread/realtime/started within 12 seconds.");
+            throw new TimeoutException($"Codex realtime {RealtimeVersion} existingCall did not emit thread/realtime/started within 12 seconds.");
 
         await realtimeSdpApplied.Task.WaitAsync(TimeSpan.FromSeconds(12), cancellationToken);
     }
@@ -223,7 +237,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
 
     async Task ReadAccountAsync(CancellationToken cancellationToken)
     {
-        var result = await RequestAsync("account/read", new { refreshToken = false }, cancellationToken);
+        var result = await RequestAsync("account/read", new { refreshToken = true }, cancellationToken);
         AuthMode = result.TryGetProperty("authMode", out var auth) ? auth.GetString() ?? "unknown" : "unknown";
         PlanType = result.TryGetProperty("planType", out var plan) ? plan.GetString() ?? "unknown" : "unknown";
 
@@ -332,6 +346,8 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
                 break;
 
             case "thread/realtime/sdp":
+                // Kept for compatibility with stock Codex WebRTC-created calls. The direct-call
+                // path normally applies its SDP before attaching as existingCall.
                 try
                 {
                     var sdp = parameters.ValueKind == JsonValueKind.Object
@@ -342,7 +358,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
                         throw new InvalidOperationException("Codex realtime SDP notification did not contain an answer.");
                     await oauthWebRtcPeer.ApplyAnswerAsync(sdp);
                     realtimeSdpApplied?.TrySetResult(true);
-                    Console.WriteLine("Codex Chromium WebRTC SDP answer applied");
+                    Console.WriteLine("Codex Chromium WebRTC SDP answer applied · source=app-server");
                 }
                 catch (Exception ex)
                 {
