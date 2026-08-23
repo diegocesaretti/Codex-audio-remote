@@ -12,6 +12,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     readonly CodexOAuthWebRtcPeer oauthWebRtcPeer = new();
     readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> pending = new();
     readonly SemaphoreSlim sendGate = new(1, 1);
+    readonly SemaphoreSlim initializeGate = new(1, 1);
     readonly CancellationTokenSource lifetime = new();
 
     ClientWebSocket? socket;
@@ -21,6 +22,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     string threadId = "";
     int inputSampleRate = 16000;
     bool realtimeStarted;
+    bool initialized;
     TaskCompletionSource<bool>? realtimeSdpApplied;
     bool disposed;
 
@@ -45,11 +47,14 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         ThrowIfDisposed();
         LastError = "";
         await EnsureConnectedAsync(cancellationToken);
-        await InitializeAsync(cancellationToken);
+        await InitializeOnceAsync(cancellationToken);
         await ReadAccountAsync(cancellationToken);
 
         if (!string.Equals(AuthMode, "chatgpt", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Codex App Server is not logged in with ChatGPT OAuth. Run 'codex login' first.");
+
+        if (realtimeStarted)
+            throw new InvalidOperationException("Codex realtime is already active.");
 
         realtimeStarted = false;
         realtimeSdpApplied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -64,6 +69,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         if (string.IsNullOrWhiteSpace(threadId))
             throw new InvalidOperationException("thread/start did not return a thread id.");
 
+        Console.WriteLine("Codex patched OAuth WebRTC: creating V3 session");
         await RequestAsync("thread/realtime/start", new
         {
             threadId,
@@ -77,7 +83,6 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
             }
         }, cancellationToken);
 
-        // The request only means startup was accepted. The notification marks the live session.
         var startedAt = Environment.TickCount64;
         while (!realtimeStarted && Environment.TickCount64 - startedAt < 12000)
         {
@@ -152,7 +157,8 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
             await ws.ConnectAsync(new Uri(AppServerUrl), cancellationToken);
             socket?.Dispose();
             socket = ws;
-            receiveTask = Task.Run(() => ReceiveLoopAsync(lifetime.Token));
+            initialized = false;
+            receiveTask = Task.Run(() => ReceiveLoopAsync(ws, lifetime.Token));
             return true;
         }
         catch
@@ -195,14 +201,23 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         });
     }
 
-    async Task InitializeAsync(CancellationToken cancellationToken)
+    async Task InitializeOnceAsync(CancellationToken cancellationToken)
     {
-        await RequestAsync("initialize", new
+        if (initialized) return;
+        await initializeGate.WaitAsync(cancellationToken);
+        try
         {
-            clientInfo = new { name = "codex-audio-remote", title = "Codex Audio Remote", version = "0.2.0" },
-            capabilities = new { experimentalApi = true }
-        }, cancellationToken);
-        await SendNotificationAsync("initialized", new { }, cancellationToken);
+            if (initialized) return;
+            await RequestAsync("initialize", new
+            {
+                clientInfo = new { name = "codex-audio-remote", title = "Codex Audio Remote", version = "0.2.0" },
+                capabilities = new { experimentalApi = true }
+            }, cancellationToken);
+            await SendNotificationAsync("initialized", new { }, cancellationToken);
+            initialized = true;
+            Console.WriteLine("Codex app-server initialized · patched OAuth build");
+        }
+        finally { initializeGate.Release(); }
     }
 
     async Task ReadAccountAsync(CancellationToken cancellationToken)
@@ -245,24 +260,31 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     async Task SendJsonAsync(object payload, CancellationToken cancellationToken)
     {
         var ws = socket ?? throw new InvalidOperationException("App Server socket is not connected.");
+        if (ws.State != WebSocketState.Open)
+            throw new InvalidOperationException("App Server socket is not open.");
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
         await sendGate.WaitAsync(cancellationToken);
-        try { await ws.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken); }
+        try
+        {
+            if (ws.State != WebSocketState.Open)
+                throw new InvalidOperationException("App Server socket closed before send.");
+            await ws.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken);
+        }
         finally { sendGate.Release(); }
     }
 
-    async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken cancellationToken)
     {
         var buffer = new byte[256 * 1024];
         try
         {
-            while (!cancellationToken.IsCancellationRequested && socket?.State == WebSocketState.Open)
+            while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
             {
                 using var stream = new MemoryStream();
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await socket.ReceiveAsync(buffer, cancellationToken);
+                    result = await ws.ReceiveAsync(buffer, cancellationToken);
                     if (result.MessageType == WebSocketMessageType.Close) return;
                     stream.Write(buffer, 0, result.Count);
                 } while (!result.EndOfMessage);
@@ -275,8 +297,13 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            LastError = "Codex app-server transport error: " + ex.Message;
-            Console.WriteLine(LastError);
+            if (ReferenceEquals(socket, ws))
+            {
+                initialized = false;
+                realtimeStarted = false;
+                LastError = "Codex app-server transport error: " + ex.Message;
+                Console.WriteLine(LastError);
+            }
         }
     }
 
@@ -411,6 +438,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         appServerProcess?.Dispose();
         lifetime.Dispose();
         sendGate.Dispose();
+        initializeGate.Dispose();
     }
 
     public ValueTask DisposeAsync()
