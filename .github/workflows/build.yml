@@ -103,6 +103,8 @@ jobs:
           gradle-version: '8.9'
       - name: Wire Android PAUSED lifecycle and audio cues
         run: python3 scripts/prepare-android-audio-cues.py
+      - name: Make end phrases pause listening
+        run: python3 scripts/fix-android-end-phrases-pause.py
       - name: Verify Android PAUSED lifecycle and audio cues
         run: |
           grep -q 'AudioCuePlayer.Cue.WAKE' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
@@ -112,6 +114,8 @@ jobs:
           grep -q 'isWakeState(serverState)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'En espera · decí Hola Sol' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'suggestedSuppressionMs' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'sendPauseEvent("phrase")' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'event\\\":\\\"pause' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
           grep -q 'ACTION_OPEN_DOCUMENT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
           grep -q 'cue_listen_end_uri' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
