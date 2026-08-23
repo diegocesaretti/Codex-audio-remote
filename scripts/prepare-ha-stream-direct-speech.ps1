@@ -303,7 +303,8 @@ $testReplacement = @'
         }
     }
 
-    static async Task PumpTestToneAsync'@
+    static async Task PumpTestToneAsync
+'@
 $updated = [regex]::Replace($mirror, $testPattern, $testReplacement, 1)
 if ($updated -eq $mirror) { throw 'HA mirror test method regex did not match.' }
 $mirror = $updated
