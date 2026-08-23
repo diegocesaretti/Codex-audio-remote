@@ -51,7 +51,7 @@ jobs:
         shell: pwsh
         run: ./scripts/fix-ha-speak-race-and-mirror-persistence.ps1
 
-      - name: Make HA mirror live-toggleable
+      - name: Make HA mirror live-toggleable and low latency
         shell: pwsh
         run: ./scripts/fix-ha-live-mirror-runtime.ps1
 
@@ -103,7 +103,8 @@ jobs:
           if ($haUi -notmatch 'Probar stream LIVE') { throw 'Home Assistant stream diagnostic UI missing' }
           if ($haUi -notmatch 'PostLocalSpeechTestAsync') { throw 'Home Assistant local /api/speak test missing' }
           if ($haUi -notmatch 'HA mirror preference saved') { throw 'Immediate HA mirror persistence missing' }
-          if ($haClient -notmatch 'media_content_type = "audio/mp3"') { throw 'Cast audio/mp3 media type missing' }
+          if ($haClient -notmatch 'media_content_type = "audio/wav"') { throw 'Cast audio/wav media type missing' }
+          if ($haApi -notmatch 'realtime-mirror\.wav') { throw 'Cast WAV endpoint missing' }
           if ($haApi -notmatch 'HEAD') { throw 'Cast HEAD probe support missing' }
           if ($haApi -notmatch 'IgnoreWriteExceptions = true') { throw 'Cast disconnect tolerance missing' }
           if ($haApi -notmatch 'IsLoopback') { throw 'localhost API test exemption missing' }
@@ -115,8 +116,11 @@ jobs:
           if ($mirror -notmatch 'DisarmHomeAssistantMirrorForCurrentSession') { throw 'HA live mirror disarm missing' }
           if ($mirror -notmatch 'lazy runtime refresh') { throw 'HA live mirror lazy refresh missing' }
           if ($mirror -notmatch 'Realtime HA mirror config') { throw 'HA mirror config diagnostic missing' }
+          if ($mirror -notmatch '96kHz stereo PCM16') { throw 'HA low-latency WAV encoder missing' }
+          if ($mirror -notmatch 'HasAudiblePcm16k') { throw 'HA assistant voice gate missing' }
+          if ($mirror -notmatch 'realtime-mirror\.wav') { throw 'HA WAV stream URL missing' }
           if ($mirrorSettings -notmatch 'HomeAssistantMirrorEnabledChanged') { throw 'HA mirror change event missing' }
-          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + readiness wait + PAUSED + persistent/live HA mirror + resilient mirrors.'
+          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + PAUSED + persistent/live low-latency HA WAV mirror.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
