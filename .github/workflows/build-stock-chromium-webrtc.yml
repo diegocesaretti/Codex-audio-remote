@@ -25,42 +25,38 @@ jobs:
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
 
-      - name: Publish official Codex compatibility launcher
-        shell: pwsh
-        run: |
-          dotnet publish windows/CodexCompatibilityLauncher/CodexCompatibilityLauncher.csproj -c Release -r win-x64 --self-contained false -o dist/codex-shim
-          Copy-Item -Path dist/codex-shim/* -Destination dist/windows -Force
-          Remove-Item dist/codex-shim -Recurse -Force
-
       - name: Add experiment notes
         shell: pwsh
         run: |
           @'
-          OFFICIAL CODEX + CHROMIUM WEBRTC COMPATIBILITY EXPERIMENT
+          STOCK CODEX + CHROMIUM WEBRTC + EXISTING CALL EXPERIMENT
 
-          This package includes a small codex.exe launcher, NOT a forked Codex build.
-          The launcher locates your installed official Codex executable, copies it to
-          a local compatibility cache, and changes only the equal-length realtime
-          alpha marker quicksilver=v1 -> quicksilver=v2 in that temporary copy.
-          Your installed Codex executable and OAuth credentials are not modified.
+          This package intentionally does NOT contain codex.exe.
+          It uses the official Codex CLI from PATH and the existing ChatGPT OAuth login.
+
+          Flow:
+            Chromium creates SDP offer
+            Companion creates realtime/calls directly with OAuth and no session.model
+            Chromium applies the SDP answer
+            Stock Codex attaches with transport existingCall + callId
 
           Before testing:
             codex login
 
-          Chromium/WebView2 creates the RTCPeerConnection. Android PCM still uses
-          app-server appendAudio/outputAudio sideband notifications.
+          OAuth tokens are read from the local Codex auth.json only after Codex refreshes them.
+          They are never logged or stored by Codex Audio Remote.
           '@ | Set-Content -Encoding UTF8 dist/windows/STOCK-CODEX-CHROMIUM-WEBRTC.txt
 
       - name: Verify package
         shell: pwsh
         run: |
           if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
-          if (-not (Test-Path dist/windows/codex.exe)) { throw 'Codex compatibility launcher missing' }
+          if (Test-Path dist/windows/codex.exe) { throw 'Stock Codex existingCall experiment must not bundle codex.exe' }
           Get-ChildItem dist/windows | Select-Object Name, Length | Format-Table
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexAudioRemote-Windows-StockCodex-ChromiumWebRTC
+          name: CodexAudioRemote-Windows-StockCodex-ExistingCall
           path: dist/windows
           if-no-files-found: error
