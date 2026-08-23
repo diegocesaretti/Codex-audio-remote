@@ -4,19 +4,23 @@ using System.Text;
 using System.Text.Json;
 
 /// <summary>
-/// Experimental protocol-v2 server that keeps the Android satellite unchanged while replacing
-/// the virtual-cable/Codex Desktop path with Codex app-server thread/realtime V3.
+/// Protocol-v2 Android satellite server backed by the patched Codex OAuth/WebRTC path.
 /// </summary>
 internal sealed class RealtimeSessionServer : IDisposable
 {
+    const long WakeRetryCooldownMs = 3500;
+
     readonly Options options;
     readonly HttpListener listener = new();
     readonly object sync = new();
     readonly CodexRealtimeBridge bridge;
+    readonly SemaphoreSlim sendGate = new(1, 1);
+    readonly SemaphoreSlim activationGate = new(1, 1);
 
     WebSocket? client;
     long clientGeneration;
     long revision;
+    long wakeSuppressedUntil;
     string state = "idle";
     string stateReason = "startup";
     string sessionId = "";
@@ -34,8 +38,8 @@ internal sealed class RealtimeSessionServer : IDisposable
     public async Task RunAsync()
     {
         listener.Start();
-        Console.WriteLine($"Codex Audio Remote · EXPERIMENTAL Realtime V3 · ws://0.0.0.0:{options.Port}/ws/");
-        Console.WriteLine("Backend: codex app-server + ChatGPT OAuth · no virtual audio cable.");
+        Console.WriteLine($"Codex Audio Remote · MODDED-OAUTH-V3-LIFECYCLE2 · ws://0.0.0.0:{options.Port}/ws/");
+        Console.WriteLine("Backend: patched Codex app-server + ChatGPT OAuth + WebRTC V3.");
         Console.WriteLine("Working directory: " + TrayController.RealtimeWorkingDirectory);
 
         while (!disposed)
@@ -76,7 +80,7 @@ internal sealed class RealtimeSessionServer : IDisposable
 
         Console.WriteLine($"Realtime Android client connected · generation={generation} · {context.Request.RemoteEndPoint}");
 
-        await SendJsonAsync(socket, new { type = "hello", protocol = 2, server = "CodexAudioRemote", voiceBackend = "realtime-v3" });
+        await SendJsonAsync(socket, new { type = "hello", protocol = 2, server = "CodexAudioRemote", voiceBackend = "modded-oauth-v3" });
         await SendStateAsync(socket);
 
         if (old is not null && !ReferenceEquals(old, socket))
@@ -188,46 +192,74 @@ internal sealed class RealtimeSessionServer : IDisposable
 
     async Task BeginSessionAsync()
     {
-        CancellationToken token;
-        string id;
-        lock (sync)
-        {
-            if (state != "idle") return;
-            sessionCts?.Cancel();
-            sessionCts?.Dispose();
-            sessionCts = new CancellationTokenSource();
-            token = sessionCts.Token;
-            sessionId = Guid.NewGuid().ToString("N");
-            id = sessionId;
-        }
-
-        await SetStateAsync("activating", "realtime_start");
-        Console.WriteLine("Session " + id + ": starting Codex Realtime V3");
-
+        await activationGate.WaitAsync();
         try
         {
-            await bridge.StartAsync(TrayController.RealtimeWorkingDirectory, token);
-            if (token.IsCancellationRequested || CurrentSessionId() != id) return;
-            await SetStateAsync("listening", "realtime_ready");
-            await SendJsonToCurrentAsync(new
+            CancellationToken token;
+            string id;
+            lock (sync)
             {
-                type = "realtime_status",
-                backend = "codex-app-server-v3",
-                authMode = bridge.AuthMode,
-                planType = bridge.PlanType,
-                inputSampleRate,
-                outputSampleRate = 16000,
-                sessionId = id
-            });
-            Console.WriteLine($"Session {id}: LISTENING · OAuth={bridge.AuthMode} · plan={bridge.PlanType}");
+                if (state != "idle")
+                {
+                    Console.WriteLine($"Realtime wake ignored · state={state} · session={sessionId}");
+                    return;
+                }
+
+                var now = Environment.TickCount64;
+                if (now < wakeSuppressedUntil)
+                {
+                    Console.WriteLine($"Realtime wake ignored · retry cooldown={wakeSuppressedUntil - now}ms");
+                    return;
+                }
+
+                sessionCts?.Cancel();
+                sessionCts?.Dispose();
+                sessionCts = new CancellationTokenSource();
+                token = sessionCts.Token;
+                sessionId = Guid.NewGuid().ToString("N");
+                id = sessionId;
+
+                // Claim activation before any await so simultaneous wake events cannot all see idle.
+                state = "activating";
+                stateReason = "realtime_start";
+                revision++;
+            }
+
+            await SendStateToCurrentAsync();
+            Console.WriteLine("Session " + id + ": starting Codex Realtime V3");
+
+            try
+            {
+                await bridge.StartAsync(TrayController.RealtimeWorkingDirectory, token);
+                if (token.IsCancellationRequested || !IsCurrentSession(id)) return;
+                lock (sync) wakeSuppressedUntil = 0;
+                await SetStateAsync("listening", "realtime_ready");
+                await SendJsonToCurrentAsync(new
+                {
+                    type = "realtime_status",
+                    backend = "patched-codex-oauth-v3",
+                    authMode = bridge.AuthMode,
+                    planType = bridge.PlanType,
+                    inputSampleRate,
+                    outputSampleRate = 16000,
+                    sessionId = id
+                });
+                Console.WriteLine($"Session {id}: LISTENING · OAuth={bridge.AuthMode} · plan={bridge.PlanType}");
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Realtime activation failed: " + ex);
+                await SendJsonToCurrentAsync(new { type = "realtime_error", message = ex.Message, sessionId = id });
+                if (IsCurrentSession(id))
+                {
+                    lock (sync) wakeSuppressedUntil = Environment.TickCount64 + WakeRetryCooldownMs;
+                    await SetStateAsync("idle", "realtime_start_failed", clearSession: true);
+                    Console.WriteLine($"Realtime wake retry suppressed for {WakeRetryCooldownMs}ms after activation failure");
+                }
+            }
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Realtime activation failed: " + ex);
-            await SendJsonToCurrentAsync(new { type = "realtime_error", message = ex.Message, sessionId = id });
-            await SetStateAsync("idle", "realtime_start_failed", clearSession: true);
-        }
+        finally { activationGate.Release(); }
     }
 
     public async Task EndSessionAsync(string reason)
@@ -240,13 +272,17 @@ internal sealed class RealtimeSessionServer : IDisposable
             endingId = sessionId;
             cancellation = sessionCts;
             sessionCts = null;
+            state = "ending";
+            stateReason = reason;
+            revision++;
         }
         cancellation?.Cancel();
         cancellation?.Dispose();
-        await SetStateAsync("ending", reason);
+        await SendStateToCurrentAsync();
         try { await bridge.StopAsync(); }
         catch (Exception ex) { Console.WriteLine("Realtime stop warning: " + ex.Message); }
-        await SetStateAsync("idle", reason, clearSession: true);
+        if (IsCurrentSession(endingId))
+            await SetStateAsync("idle", reason, clearSession: true);
         Console.WriteLine("Session " + endingId + ": ended · " + reason);
     }
 
@@ -311,7 +347,7 @@ internal sealed class RealtimeSessionServer : IDisposable
             sessionId = snapshotSession,
             revision = snapshotRevision,
             reason = snapshotReason,
-            voiceBackend = "realtime-v3"
+            voiceBackend = "modded-oauth-v3"
         });
     }
 
@@ -321,8 +357,6 @@ internal sealed class RealtimeSessionServer : IDisposable
         lock (sync) socket = client;
         if (socket is not null) await SendJsonAsync(socket, payload);
     }
-
-    readonly SemaphoreSlim sendGate = new(1, 1);
 
     async Task SendJsonAsync(WebSocket socket, object payload)
     {
@@ -356,6 +390,11 @@ internal sealed class RealtimeSessionServer : IDisposable
         lock (sync) return ReferenceEquals(client, socket) && clientGeneration == generation;
     }
 
+    bool IsCurrentSession(string id)
+    {
+        lock (sync) return !string.IsNullOrEmpty(id) && sessionId == id;
+    }
+
     string CurrentState() { lock (sync) return state; }
     string CurrentSessionId() { lock (sync) return sessionId; }
 
@@ -380,5 +419,6 @@ internal sealed class RealtimeSessionServer : IDisposable
         }
         bridge.Dispose();
         sendGate.Dispose();
+        activationGate.Dispose();
     }
 }
