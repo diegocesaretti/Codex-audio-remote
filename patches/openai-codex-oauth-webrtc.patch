@@ -71,20 +71,19 @@ index b43e02d9..af73a751 100644
          }
          // TODO(aibrahim): Align the SIWC route with the API multipart shape and remove this branch.
          if self.uses_backend_request_shape() {
-+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
-+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
-++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
-+@@ -142,8 +142,12 @@ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<
-+             session.model = config.model;
-+             to_value(session)
-+         }
-+-        RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(
-+-            config.model,
-++        RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(
-++            // AVAS/ChatGPT assigns the Frameless model server-side. Never serialize model
-++            // for V3 here; this is the common boundary used by realtime call creation and
-++            // prevents session.model from being reintroduced after core preparation.
-++            None,
-+             config.instructions,
-+             config.initial_items,
-+             config.voice,
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+@@ -142,8 +142,12 @@ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<
+             session.model = config.model;
+             to_value(session)
+         }
+         RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(
+-            config.model,
++            // AVAS/ChatGPT assigns the Frameless model server-side. Never serialize model
++            // for V3 here; this is the common boundary used by realtime call creation and
++            // prevents session.model from being reintroduced after core preparation.
++            None,
+             config.instructions,
+             config.initial_items,
+             config.voice,
