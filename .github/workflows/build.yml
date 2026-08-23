@@ -109,7 +109,9 @@ jobs:
         run: python3 scripts/prepare-android-wake-preroll.py
       - name: Keep randomized wake greetings out of preroll
         run: python3 scripts/fix-android-preroll-wake-greeting-suppression.py
-      - name: Verify Android PAUSED lifecycle, preroll and randomized wake greetings
+      - name: Reset capture boundary at uplink
+        run: python3 scripts/fix-android-uplink-listen-boundary.py
+      - name: Verify Android PAUSED lifecycle, preroll and immediate uplink capture
         run: |
           grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'AudioCuePlayer.Cue.LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
@@ -122,7 +124,9 @@ jobs:
           grep -q 'Conversation mic v2 EARLY START' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'Activation pre-roll flush' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'playWakeRandom(this)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          grep -q 'activationPreRollMuteUntilMs' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'UPLINK_CAPTURE_GUARD_MS = 180L' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Uplink boundary reset' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'buffer restarted' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'cue_wake_uri_2' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
           grep -q 'cue_wake_uri_3' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
           grep -q 'EXTRA_WAKE_SLOT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
