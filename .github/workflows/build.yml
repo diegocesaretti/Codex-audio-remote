@@ -105,9 +105,11 @@ jobs:
         run: python3 scripts/prepare-android-audio-cues.py
       - name: Make end phrases pause listening
         run: python3 scripts/fix-android-end-phrases-pause.py
-      - name: Wire fullscreen wake GIF overlay
-        run: python3 scripts/prepare-android-wake-gif-overlay.py
-      - name: Verify Android PAUSED lifecycle, cues and wake GIF overlay
+      - name: Capture wake follow-up audio during activation
+        run: python3 scripts/prepare-android-wake-preroll.py
+      - name: Keep randomized wake greetings out of preroll
+        run: python3 scripts/fix-android-preroll-wake-greeting-suppression.py
+      - name: Verify Android PAUSED lifecycle, preroll and randomized wake greetings
         run: |
           grep -q 'AudioCuePlayer.Cue.WAKE' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
@@ -115,20 +117,20 @@ jobs:
           grep -q 'AudioCuePlayer.Cue.END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'isWakeState(serverState)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'En espera · decí Hola Sol' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          grep -q 'suggestedSuppressionMs' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'sendPauseEvent("phrase")' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'event\\\":\\\"pause' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          grep -q 'wakeGifOverlay.showWake' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          grep -q 'wakeGifOverlay.onServerState' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          grep -q 'FADE_MS = 240L' android/app/src/main/java/com/bwa3d/codexremote/WakeGifOverlayController.java
-          grep -q 'Movie.decodeStream' android/app/src/main/java/com/bwa3d/codexremote/WakeGifOverlayController.java
-          grep -q 'ACTION_OPEN_DOCUMENT' android/app/src/main/java/com/bwa3d/codexremote/WakeGifPickerActivity.java
-          grep -q 'wake_gif_bg_color' android/app/src/main/java/com/bwa3d/codexremote/WakeGifPrefs.java
-          grep -q 'WakeGifSettingsView' android/app/src/main/res/layout/activity_main.xml
-          grep -q 'WakeGifPickerActivity' android/app/src/main/AndroidManifest.xml
-          grep -q 'LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
+          grep -q 'ACTIVATION_PREROLL_MS = 3000L' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Conversation mic v2 EARLY START' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Activation pre-roll flush' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'playWakeRandom(this)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'activationPreRollMuteUntilMs' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'cue_wake_uri_2' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
+          grep -q 'cue_wake_uri_3' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
+          grep -q 'EXTRA_WAKE_SLOT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
+          grep -q 'Saludo wake 3' android/app/src/main/java/com/bwa3d/codexremote/AudioCueSettingsView.java
           grep -q 'ACTION_OPEN_DOCUMENT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
-          grep -q 'cue_listen_end_uri' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
+          if grep -q 'Wake GIF fullscreen' android/app/src/main/res/layout/activity_main.xml; then echo 'Discarded GIF UI still present'; exit 1; fi
+          if grep -q 'WakeGifPickerActivity' android/app/src/main/AndroidManifest.xml; then echo 'Discarded GIF activity still present'; exit 1; fi
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
