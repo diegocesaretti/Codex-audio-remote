@@ -2,13 +2,18 @@ package com.bwa3d.codexremote;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.media.MediaMetadataRetriever;
+import android.media.MediaPlayer;
+import android.net.Uri;
+import android.provider.OpenableColumns;
 
-/** Lightweight local chimes for wake/session lifecycle feedback. */
+/** Local lifecycle sounds. Each cue can use its built-in chime or a persisted user audio URI. */
 public final class AudioCuePlayer {
-    public enum Cue { WAKE, UPLINK, END }
+    public enum Cue { WAKE, UPLINK, LISTEN_END, END }
 
     private static final int SAMPLE_RATE = 44100;
     private static final String PREFS = "settings";
@@ -23,19 +28,124 @@ public final class AudioCuePlayer {
         int volume = Math.max(0, Math.min(100, prefs.getInt("cue_volume", 45)));
         if (volume <= 0) return;
 
-        new Thread(() -> playBlocking(cue, volume), "AudioCue-" + cue.name()).start();
+        String customUri = prefs.getString(uriPrefKey(cue), "");
+        if (customUri != null && !customUri.trim().isEmpty()) {
+            playCustom(app, cue, Uri.parse(customUri), volume);
+            return;
+        }
+
+        new Thread(() -> playBuiltInBlocking(cue, volume), "AudioCue-" + cue.name()).start();
+    }
+
+    /** How long mic uplink should be locally suppressed so a cue is not fed back into Realtime. */
+    public static int suggestedSuppressionMs(Context context, Cue cue) {
+        if (context == null || cue == null) return 220;
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        String customUri = prefs.getString(uriPrefKey(cue), "");
+        if (customUri == null || customUri.trim().isEmpty()) return builtInDurationMs(cue) + 100;
+
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(context, Uri.parse(customUri));
+            String duration = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+            int ms = duration == null ? 220 : Integer.parseInt(duration);
+            return Math.max(180, Math.min(3000, ms + 90));
+        } catch (Exception ignored) {
+            return 350;
+        } finally {
+            try { retriever.release(); } catch (Exception ignored) { }
+        }
+    }
+
+    public static String uriPrefKey(Cue cue) {
+        switch (cue) {
+            case WAKE: return "cue_wake_uri";
+            case UPLINK: return "cue_uplink_uri";
+            case LISTEN_END: return "cue_listen_end_uri";
+            case END:
+            default: return "cue_end_uri";
+        }
+    }
+
+    public static void setCustomUri(Context context, Cue cue, Uri uri) {
+        if (context == null || cue == null || uri == null) return;
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(uriPrefKey(cue), uri.toString()).apply();
+    }
+
+    public static void clearCustomUri(Context context, Cue cue) {
+        if (context == null || cue == null) return;
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().remove(uriPrefKey(cue)).apply();
+    }
+
+    public static String describeSelection(Context context, Cue cue) {
+        if (context == null || cue == null) return "Chime interno";
+        String value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(uriPrefKey(cue), "");
+        if (value == null || value.trim().isEmpty()) return "Chime interno";
+        Uri uri = Uri.parse(value);
+        Cursor cursor = null;
+        try {
+            cursor = context.getContentResolver().query(uri,
+                    new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    String name = cursor.getString(index);
+                    if (name != null && !name.trim().isEmpty()) return name;
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (cursor != null) try { cursor.close(); } catch (Exception ignored) { }
+        }
+        String last = uri.getLastPathSegment();
+        return last == null || last.trim().isEmpty() ? "Audio personalizado" : last;
     }
 
     private static boolean isEnabled(SharedPreferences prefs, Cue cue) {
         switch (cue) {
             case WAKE: return prefs.getBoolean("cue_wake_enabled", true);
             case UPLINK: return prefs.getBoolean("cue_uplink_enabled", true);
+            case LISTEN_END: return prefs.getBoolean("cue_listen_end_enabled", true);
             case END: return prefs.getBoolean("cue_end_enabled", true);
             default: return true;
         }
     }
 
-    private static void playBlocking(Cue cue, int volumePct) {
+    private static void playCustom(Context context, Cue cue, Uri uri, int volumePct) {
+        new Thread(() -> {
+            MediaPlayer player = null;
+            try {
+                player = new MediaPlayer();
+                player.setAudioStreamType(AudioManager.STREAM_MUSIC);
+                player.setDataSource(context, uri);
+                final MediaPlayer releasePlayer = player;
+                player.setOnCompletionListener(mp -> {
+                    try { mp.release(); } catch (Exception ignored) { }
+                });
+                player.setOnErrorListener((mp, what, extra) -> {
+                    AndroidDebugLog.log("Custom cue playback error · " + cue + " · what=" + what + " extra=" + extra);
+                    try { mp.release(); } catch (Exception ignored) { }
+                    return true;
+                });
+                player.prepare();
+                float volume = Math.max(0f, Math.min(1f, volumePct / 100f));
+                player.setVolume(volume, volume);
+                player.start();
+                AndroidDebugLog.log("Audio cue custom · " + cue + " · " + uri);
+                // Ownership transfers to completion/error listener once started.
+                player = null;
+            } catch (Exception e) {
+                AndroidDebugLog.log("Custom audio cue unavailable · " + cue + " · " + e.getMessage() + " · using built-in");
+                if (player != null) try { player.release(); } catch (Exception ignored) { }
+                playBuiltInBlocking(cue, volumePct);
+            }
+        }, "AudioCueCustom-" + cue.name()).start();
+    }
+
+    private static void playBuiltInBlocking(Cue cue, int volumePct) {
         AudioTrack track = null;
         try {
             short[] pcm;
@@ -47,6 +157,10 @@ public final class AudioCuePlayer {
                 case UPLINK:
                     pcm = sequence(volumePct,
                             note(1046.5, 38), silence(12), note(1396.9, 58));
+                    break;
+                case LISTEN_END:
+                    pcm = sequence(volumePct,
+                            note(932.3, 42), silence(12), note(698.5, 58));
                     break;
                 case END:
                 default:
@@ -75,6 +189,16 @@ public final class AudioCuePlayer {
                 try { track.stop(); } catch (Exception ignored) { }
                 try { track.release(); } catch (Exception ignored) { }
             }
+        }
+    }
+
+    private static int builtInDurationMs(Cue cue) {
+        switch (cue) {
+            case WAKE: return 122;
+            case UPLINK: return 108;
+            case LISTEN_END: return 112;
+            case END:
+            default: return 148;
         }
     }
 
