@@ -3,6 +3,8 @@ name: build-official-codex-realtime
 on:
   push:
     branches: [ fix/official-codex-realtime ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
