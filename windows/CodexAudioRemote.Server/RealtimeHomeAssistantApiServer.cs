@@ -6,6 +6,7 @@ internal sealed record RealtimeSpeechRequestResult(bool Accepted, string Status,
 /// <summary>
 /// Home Assistant adapter for the official Realtime backend. It never owns conversation state;
 /// it delegates speech requests to RealtimeSessionServer, which remains the single authority.
+/// The same listener also serves the short-lived authenticated live MP3 mirror consumed by HA/Cast.
 /// </summary>
 internal sealed class RealtimeHomeAssistantApiServer : IDisposable
 {
@@ -31,9 +32,10 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
         }
         listener.Start();
         loopTask = Task.Run(() => LoopAsync(cts.Token));
-        Console.WriteLine($"Home Assistant Realtime speech API · http://0.0.0.0:{AppSettings.HomeAssistantApiPort}/api/");
+        Console.WriteLine($"Home Assistant Realtime API · http://0.0.0.0:{AppSettings.HomeAssistantApiPort}/api/");
         Console.WriteLine("Home Assistant base URL: " + AppSettings.HomeAssistantBaseUrl);
         Console.WriteLine("Speech endpoints: POST /api/speak · POST /api/tts");
+        Console.WriteLine("Mirror endpoint: GET /api/realtime-mirror.mp3?token=<ephemeral>");
     }
 
     async Task LoopAsync(CancellationToken token)
@@ -57,6 +59,15 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
         try
         {
             var path = context.Request.Url?.AbsolutePath ?? "";
+
+            if (string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(path, "/api/realtime-mirror.mp3", StringComparison.OrdinalIgnoreCase))
+            {
+                if (await RealtimeSecondaryAudioMirror.TryServeHomeAssistantStreamAsync(context, token)) return;
+                await WriteJson(context.Response, 404, new { ok = false, error = "mirror_stream_not_found" });
+                return;
+            }
+
             if (string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(path, "/api/health", StringComparison.OrdinalIgnoreCase))
             {
@@ -67,7 +78,14 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
                     backend = "realtime-v3",
                     service = "home_assistant_speech",
                     voice = AppSettings.RealtimeVoice,
-                    model = AppSettings.DefaultRealtimeModel
+                    model = AppSettings.DefaultRealtimeModel,
+                    mirrors = new
+                    {
+                        android = "always",
+                        windows = RealtimeMirrorSettings.WindowsMirrorEnabled,
+                        homeAssistant = RealtimeMirrorSettings.HomeAssistantMirrorEnabled,
+                        mediaPlayer = RealtimeMirrorSettings.HomeAssistantMediaPlayerEntity
+                    }
                 });
                 return;
             }
