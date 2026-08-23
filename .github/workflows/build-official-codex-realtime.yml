@@ -43,6 +43,10 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-realtime-lifecycle-mirrors.ps1
 
+      - name: Fix direct V3 speech and HA Cast stream
+        shell: pwsh
+        run: ./scripts/prepare-ha-stream-direct-speech.ps1
+
       - name: Verify official-flow source transform
         shell: pwsh
         run: |
@@ -64,7 +68,8 @@ jobs:
           if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'manual realtime/calls still present' }
           if ($bridge -notmatch 'includeStartupContext = false') { throw 'official startup context setting missing' }
           if ($bridge -match 'thread/realtime/appendAudio') { throw 'legacy sideband audio append still present' }
-          if ($bridge -notmatch 'thread/realtime/appendSpeech') { throw 'realtime appendSpeech missing' }
+          if ($bridge -match 'thread/realtime/appendSpeech') { throw 'older app-server appendSpeech route still present' }
+          if ($bridge -notmatch 'PushSpeakableTextAsync') { throw 'direct V3 speakable bridge route missing' }
           if ($bridge -notmatch 'oauthWebRtcPeer\.PushPcmAsync') { throw 'WebRTC media uplink missing' }
           if ($bridge -notmatch 'oauthWebRtcPeer\.AudioReceived') { throw 'WebRTC media downlink callback missing' }
           if ($bridge -notmatch 'SetInputPausedAsync') { throw 'Realtime pause/resume bridge missing' }
@@ -72,6 +77,8 @@ jobs:
           if ($peer -notmatch 'MediaStreamTrackProcessor') { throw 'WebRTC audio track processor missing' }
           if ($peer -notmatch 'input_audio\.resume') { throw 'V3 input_audio.resume missing' }
           if ($peer -notmatch 'input_audio\.pause') { throw 'V3 input_audio.pause missing' }
+          if ($peer -notmatch 'session\.context\.append') { throw 'Frameless session.context.append missing' }
+          if ($peer -notmatch "channel: 'speakable'") { throw 'Frameless speakable channel missing' }
           if ($peer -notmatch 'rtp-stats') { throw 'RTP diagnostics missing' }
           if ($server -notmatch 'SpeakExternalAsync') { throw 'authoritative external speech method missing' }
           if ($server -notmatch 'AppSettings\.WakeRetryCooldownMs') { throw 'settings-backed wake cooldown missing' }
@@ -84,13 +91,15 @@ jobs:
           if ($ui -notmatch 'RealtimeLifecycleSettingsForm') { throw 'lifecycle settings UI missing' }
           if ($haUi -notmatch 'Probar stream LIVE') { throw 'Home Assistant stream diagnostic UI missing' }
           if ($haUi -notmatch 'PostLocalSpeechTestAsync') { throw 'Home Assistant local /api/speak test missing' }
-          if ($haClient -notmatch 'media_content_type = "music"') { throw 'HA play_media logical media type fix missing' }
+          if ($haClient -notmatch 'media_content_type = "audio/mp3"') { throw 'Cast audio/mp3 media type missing' }
           if ($haApi -notmatch 'HEAD') { throw 'Cast HEAD probe support missing' }
+          if ($haApi -notmatch 'IgnoreWriteExceptions = true') { throw 'Cast disconnect tolerance missing' }
           if ($haApi -notmatch 'IsLoopback') { throw 'localhost API test exemption missing' }
           if ($mirror -notmatch 'Android remains the primary output') { throw 'Android-primary mirror invariant missing' }
           if ($mirror -notmatch 'ResolveLanIPv4ForHomeAssistantAsync') { throw 'HA route-aware LAN IP selection missing' }
-          if ($mirror -notmatch 'TestHomeAssistantMirrorAsync') { throw 'real LIVE mirror test missing' }
-          Write-Host 'Official flow verified: V3 + Sol + appendSpeech + PAUSED + unified HA diagnostics + hardened mirrors.'
+          if ($mirror -notmatch 'WaitForGetAsync') { throw 'HA receiver GET verification missing' }
+          if ($mirror -notmatch 'BytesServed') { throw 'HA stream byte diagnostics missing' }
+          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + PAUSED + unified HA diagnostics + resilient mirrors.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
