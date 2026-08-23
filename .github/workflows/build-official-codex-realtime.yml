@@ -27,6 +27,10 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-webrtc-media-audio.ps1
 
+      - name: Instrument WebRTC audio flow
+        shell: pwsh
+        run: ./scripts/instrument-webrtc-audio.ps1
+
       - name: Verify official-flow source transform
         shell: pwsh
         run: |
@@ -43,7 +47,9 @@ jobs:
           if ($bridge -notmatch 'oauthWebRtcPeer\.AudioReceived') { throw 'WebRTC media downlink callback missing' }
           if ($peer -notmatch 'MediaStreamTrackGenerator') { throw 'WebRTC audio track generator missing' }
           if ($peer -notmatch 'MediaStreamTrackProcessor') { throw 'WebRTC audio track processor missing' }
-          Write-Host 'Official flow verified: app-server owns realtime/calls and WebRTC owns V3 audio.'
+          if ($peer -notmatch 'input_audio\.resume') { throw 'V3 input_audio.resume missing' }
+          if ($peer -notmatch 'rtp-stats') { throw 'RTP diagnostics missing' }
+          Write-Host 'Official flow verified: app-server owns realtime/calls; WebRTC owns V3 audio with diagnostics.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
