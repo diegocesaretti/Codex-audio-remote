@@ -98,7 +98,7 @@ $bridge2 = [regex]::Replace($bridge, $pattern, "`r`n" + $replacement.TrimEnd(), 
 if ($bridge2 -eq $bridge) { throw 'Could not replace generated appendSpeech route.' }
 Set-Content -LiteralPath $bridgePath -Value $bridge2 -Encoding utf8 -NoNewline
 
-# Cast wants an audio media type; the HTTP response itself remains audio/mpeg.
+# Cast-specific media type; the HTTP response itself remains audio/mpeg.
 $haClient = Get-Content -LiteralPath $haClientPath -Raw
 $haClient = $haClient.Replace('media_content_type = "music",', 'media_content_type = "audio/mp3",')
 $haClient = $haClient.Replace('type=music · stream=', 'type=audio/mp3 · stream=')
@@ -115,7 +115,7 @@ Set-Content -LiteralPath $haApiPath -Value $haApi -Encoding utf8 -NoNewline
 
 $mirror = Get-Content -LiteralPath $mirrorPath -Raw
 
-# Per-stream diagnostics.
+# Per-stream diagnostics used by the Settings test.
 if (-not $mirror.Contains('public long BytesServed =>')) {
     $needle = '        public string Token { get; } = Guid.NewGuid().ToString("N");'
     if (-not $mirror.Contains($needle)) { throw 'LiveMp3Stream token marker missing.' }
@@ -142,45 +142,84 @@ if (-not $mirror.Contains('public long BytesServed =>')) {
     $mirror = $mirror.Replace($needle, $insert + "`r`n" + $needle)
 }
 
-# HEAD probe accounting.
-$mirror = [regex]::Replace(
-    $mirror,
-    '(if \(string\.Equals\(method, "HEAD", StringComparison\.OrdinalIgnoreCase\)\)\s*\{)(\s*try \{ response\.Close\(\); \} catch \{ \})',
-    '$1' + "`r`n            stream.NoteHead();" + '$2',
-    1)
+# Replace the entire HTTP serving method. This deliberately avoids regex over generated C# so the
+# transform is stable on both CRLF and LF worktrees.
+$serveStartMarker = '    public static async Task<bool> TryServeHomeAssistantStreamAsync(HttpListenerContext context, CancellationToken token)'
+$serveEndMarker = '    /// <summary>'
+$serveStart = $mirror.IndexOf($serveStartMarker, [StringComparison]::Ordinal)
+$serveEnd = if ($serveStart -ge 0) { $mirror.IndexOf($serveEndMarker, $serveStart, [StringComparison]::Ordinal) } else { -1 }
+if ($serveStart -lt 0 -or $serveEnd -lt 0 -or $serveEnd -le $serveStart) { throw 'HA stream serving method markers missing.' }
+$serveMethod = @'
+    public static async Task<bool> TryServeHomeAssistantStreamAsync(HttpListenerContext context, CancellationToken token)
+    {
+        var supplied = context.Request.QueryString["token"] ?? "";
+        if (string.IsNullOrWhiteSpace(supplied) || !LiveStreams.TryGetValue(supplied, out var stream)) return false;
 
-# GET accounting.
-$guard = '(if \(!string\.Equals\(method, "GET", StringComparison\.OrdinalIgnoreCase\)\)\s*\{.*?return true;\s*\})\s*(try)'
-$mirror2 = [regex]::Replace($mirror, $guard, '$1' + "`r`n`r`n        stream.NoteGet();`r`n        " + '$2', 1, [Text.RegularExpressions.RegexOptions]::Singleline)
-if ($mirror2 -eq $mirror -and -not $mirror.Contains('stream.NoteGet();')) { throw 'Could not add HA GET accounting.' }
-$mirror = $mirror2
+        var response = context.Response;
+        response.StatusCode = 200;
+        response.ContentType = "audio/mpeg";
+        response.SendChunked = true;
+        response.KeepAlive = false;
+        response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
+        response.Headers["Access-Control-Allow-Origin"] = "*";
+        response.Headers["X-Content-Type-Options"] = "nosniff";
+        response.Headers["Accept-Ranges"] = "none";
 
-# Count bytes actually delivered to the receiver.
-if (-not $mirror.Contains('stream.NoteBytes(chunk.Length);')) {
-    $needle = '                await response.OutputStream.WriteAsync(chunk, token);'
-    if (-not $mirror.Contains($needle)) { throw 'HA stream write marker missing.' }
-    $mirror = $mirror.Replace($needle, $needle + "`r`n                stream.NoteBytes(chunk.Length);")
-}
+        var method = context.Request.HttpMethod;
+        var ua = context.Request.UserAgent ?? "unknown";
+        Console.WriteLine($"Realtime HA mirror HTTP {method} · remote={context.Request.RemoteEndPoint} · ua={ua}");
 
-# Record receiver-close reason without treating it as producer failure.
-$oldCatch = '        catch (Exception ex) { Console.WriteLine("Realtime HA mirror HTTP ended: " + ex.Message); }'
-if ($mirror.Contains($oldCatch)) {
-    $newCatch = @'
+        if (string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase))
+        {
+            stream.NoteHead();
+            try { response.Close(); } catch { }
+            return true;
+        }
+
+        if (!string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase))
+        {
+            response.StatusCode = 405;
+            try { response.Close(); } catch { }
+            return true;
+        }
+
+        stream.NoteGet();
+        try
+        {
+            await foreach (var chunk in stream.Subscribe(token))
+            {
+                if (chunk.Length == 0) continue;
+                await response.OutputStream.WriteAsync(chunk, token);
+                stream.NoteBytes(chunk.Length);
+                await response.OutputStream.FlushAsync(token);
+            }
+        }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
+            // Cast can intentionally close/re-open a LIVE stream while probing or replacing media.
+            // Record the reason for diagnostics but do not fail the producer because of it.
             stream.NoteDisconnect(ex.Message);
             Console.WriteLine("Realtime HA mirror HTTP client disconnected: " + ex.Message);
         }
-'@
-    $mirror = $mirror.Replace($oldCatch, $newCatch.TrimEnd())
-}
+        finally
+        {
+            try { response.OutputStream.Close(); } catch { }
+            try { response.Close(); } catch { }
+        }
+        return true;
+    }
 
-# Replace TestHomeAssistantMirrorAsync using stable textual markers (CRLF/LF agnostic).
-$startMarker = '    public static async Task<string> TestHomeAssistantMirrorAsync(CancellationToken cancellationToken = default)'
-$endMarker = '    static async Task PumpTestToneAsync'
-$start = $mirror.IndexOf($startMarker, [StringComparison]::Ordinal)
-$end = if ($start -ge 0) { $mirror.IndexOf($endMarker, $start, [StringComparison]::Ordinal) } else { -1 }
-if ($start -lt 0 -or $end -lt 0 -or $end -le $start) { throw 'HA mirror test method markers missing.' }
+'@
+$mirror = $mirror.Substring(0, $serveStart) + $serveMethod + $mirror.Substring($serveEnd)
+
+# Replace TestHomeAssistantMirrorAsync using stable textual markers. Success requires the receiver
+# to perform GET and actually receive MP3 bytes; an early receiver close is only diagnostic.
+$testStartMarker = '    public static async Task<string> TestHomeAssistantMirrorAsync(CancellationToken cancellationToken = default)'
+$testEndMarker = '    static async Task PumpTestToneAsync'
+$testStart = $mirror.IndexOf($testStartMarker, [StringComparison]::Ordinal)
+$testEnd = if ($testStart -ge 0) { $mirror.IndexOf($testEndMarker, $testStart, [StringComparison]::Ordinal) } else { -1 }
+if ($testStart -lt 0 -or $testEnd -lt 0 -or $testEnd -le $testStart) { throw 'HA mirror test method markers missing.' }
 $testMethod = @'
     public static async Task<string> TestHomeAssistantMirrorAsync(CancellationToken cancellationToken = default)
     {
@@ -230,7 +269,7 @@ $testMethod = @'
     }
 
 '@
-$mirror = $mirror.Substring(0, $start) + $testMethod + $mirror.Substring($end)
+$mirror = $mirror.Substring(0, $testStart) + $testMethod + $mirror.Substring($testEnd)
 Set-Content -LiteralPath $mirrorPath -Value $mirror -Encoding utf8 -NoNewline
 
 # Validation.
@@ -245,6 +284,8 @@ if ($bridgeCheck -match 'thread/realtime/appendSpeech') { throw 'Legacy app-serv
 if ($bridgeCheck -notmatch 'PushSpeakableTextAsync') { throw 'Bridge direct speakable call missing.' }
 if ($mirrorCheck -notmatch 'BytesServed') { throw 'HA stream byte diagnostics missing.' }
 if ($mirrorCheck -notmatch 'WaitForGetAsync') { throw 'HA GET verification missing.' }
+if ($mirrorCheck -notmatch 'stream\.NoteGet\(\)') { throw 'HA GET accounting missing.' }
+if ($mirrorCheck -notmatch 'stream\.NoteBytes') { throw 'HA byte accounting missing.' }
 if ($clientCheck -notmatch 'media_content_type = "audio/mp3"') { throw 'Cast media_content_type audio/mp3 missing.' }
 if ($apiCheck -notmatch 'IgnoreWriteExceptions = true') { throw 'HttpListener disconnect tolerance missing.' }
 Write-Host 'Prepared direct V3 speakable text + resilient HA/Cast live stream diagnostics.'
