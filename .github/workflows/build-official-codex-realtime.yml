@@ -1,0 +1,51 @@
+name: build-official-codex-realtime
+
+on:
+  push:
+    branches: [ fix/official-codex-realtime ]
+  workflow_dispatch:
+
+jobs:
+  windows-official-realtime:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Apply captured official Codex realtime flow
+        shell: pwsh
+        run: ./scripts/prepare-official-realtime.ps1
+
+      - name: Verify official-flow source transform
+        shell: pwsh
+        run: |
+          $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
+          if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'v3 missing' }
+          if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'gpt-live-1-codex missing' }
+          if ($bridge -notmatch 'type = "webrtc"') { throw 'webrtc transport missing' }
+          if ($bridge -match 'type = "existingCall"') { throw 'existingCall still present' }
+          if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'manual realtime/calls still present' }
+          if ($bridge -notmatch 'includeStartupContext = false') { throw 'official startup context setting missing' }
+          Write-Host 'Official flow verified: app-server owns realtime/calls.'
+
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
+
+      - name: Verify stock Codex package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/official/CodexAudioRemote.Server.exe)) { throw 'CodexAudioRemote.Server.exe missing' }
+          if (Test-Path dist/official/codex.exe) { throw 'This package must not bundle a modified codex.exe' }
+          Get-Item dist/official/CodexAudioRemote.Server.exe | Format-Table Name, Length
+
+      - name: Upload official Codex realtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-OfficialCodex-Realtime
+          path: dist/official
+          if-no-files-found: error
