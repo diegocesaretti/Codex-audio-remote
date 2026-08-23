@@ -101,6 +101,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Wire Android session audio cues
+        run: python3 scripts/prepare-android-audio-cues.py
+      - name: Verify Android session audio cues
+        run: |
+          grep -q 'AudioCuePlayer.Cue.WAKE' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'AudioCuePlayer.Cue.END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'uplinkCueMuteUntilMs' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
