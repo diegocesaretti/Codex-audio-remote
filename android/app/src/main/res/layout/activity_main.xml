@@ -62,15 +62,22 @@
         <EditText android:id="@+id/manualChunkMs" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Paquete manual (ms)" android:inputType="number" android:text="45" />
         <Button android:id="@+id/audioTestButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Test mic local · grabar 5 s y escuchar" />
 
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Fin de conversación" android:textStyle="bold" />
-        <EditText android:id="@+id/timeoutSeconds" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Timeout en segundos (0 = sin límite)" android:inputType="number" android:text="300" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Fin / reanudación de conversación" android:textStyle="bold" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="En Realtime, Windows controla dos tiempos separados: fin de escucha (cierra sólo el mic) y fin de conversación. Mientras está en espera, decir la wake word reabre el mic en la misma conversación." />
+        <EditText android:id="@+id/timeoutSeconds" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Timeout legacy" android:inputType="number" android:text="300" android:visibility="gone" />
         <com.bwa3d.codexremote.PersistentEndPhrasesEditText
             android:id="@+id/endPhrases"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Frases de finalización separadas por coma"
+            android:hint="Frases que cierran el micrófono y dejan la conversación en espera, separadas por coma"
             android:maxLines="3" />
         <com.bwa3d.codexremote.EndSensitivityControl android:layout_width="match_parent" android:layout_height="wrap_content" />
+
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Sonidos de estado" android:textStyle="bold" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Wake puede usar hasta 3 saludos locales aleatorios; uplink, fin de escucha y fin de conversación mantienen su sonido configurable." />
+        <com.bwa3d.codexremote.AudioCueSettingsView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
 
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Overlay" android:textStyle="bold" />
         <com.bwa3d.codexremote.PreferenceCheckBox

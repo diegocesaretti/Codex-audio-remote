@@ -19,11 +19,73 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+      - name: Verify stock Codex package
+        if: github.ref == 'refs/heads/experimental/stock-codex-chromium-webrtc' || github.head_ref == 'experimental/stock-codex-chromium-webrtc'
+        shell: pwsh
+        run: |
+          if (Test-Path dist/windows/codex.exe) { throw 'ExistingCall experiment must use stock Codex from PATH and must not bundle codex.exe' }
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexAudioRemote-Windows-x64-v2
           path: dist/windows
+
+  oauth-realtime-windows:
+    if: github.ref == 'refs/heads/fix/oauth-webrtc' || github.head_ref == 'fix/oauth-webrtc'
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Codex Audio Remote
+        uses: actions/checkout@v4
+
+      - name: Checkout OpenAI Codex
+        uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: 343074d4207d572809bd8cea15f4be1d09d98e0b
+          path: upstream-codex
+
+      - name: Apply ChatGPT OAuth WebRTC compatibility patch
+        shell: pwsh
+        run: git -C upstream-codex apply "$env:GITHUB_WORKSPACE\patches\openai-codex-oauth-webrtc.patch"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: upstream-codex/codex-rs
+
+      - name: Build patched Codex CLI
+        working-directory: upstream-codex/codex-rs
+        run: cargo build --release -p codex-cli --bin codex
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+
+      - name: Bundle patched Codex CLI
+        shell: pwsh
+        run: Copy-Item -LiteralPath upstream-codex/codex-rs/target/release/codex.exe -Destination dist/windows/codex.exe
+
+      - name: Verify OAuth realtime bundle
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'CodexAudioRemote.Server.exe missing' }
+          if (-not (Test-Path dist/windows/codex.exe)) { throw 'patched codex.exe missing' }
+          Get-Item dist/windows/CodexAudioRemote.Server.exe, dist/windows/codex.exe | Format-Table Name, Length
+
+      - name: Upload Windows OAuth Realtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-OAuthRealtime
+          path: dist/windows
+          if-no-files-found: error
 
   android:
     runs-on: ubuntu-latest
@@ -39,6 +101,38 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Wire Android PAUSED lifecycle and audio cues
+        run: python3 scripts/prepare-android-audio-cues.py
+      - name: Make end phrases pause listening
+        run: python3 scripts/fix-android-end-phrases-pause.py
+      - name: Capture wake follow-up audio during activation
+        run: python3 scripts/prepare-android-wake-preroll.py
+      - name: Keep randomized wake greetings out of preroll
+        run: python3 scripts/fix-android-preroll-wake-greeting-suppression.py
+      - name: Reset capture boundary at uplink
+        run: python3 scripts/fix-android-uplink-listen-boundary.py
+      - name: Verify Android PAUSED lifecycle, preroll and immediate uplink capture
+        run: |
+          grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'AudioCuePlayer.Cue.LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'AudioCuePlayer.Cue.END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'isWakeState(serverState)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'En espera · decí Hola Sol' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'sendPauseEvent("phrase")' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'private void sendPauseEvent' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'ACTIVATION_PREROLL_MS = 3000L' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Conversation mic v2 EARLY START' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Activation pre-roll flush' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'playWakeRandom(this)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'UPLINK_CAPTURE_GUARD_MS = 180L' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Uplink boundary reset' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'buffer restarted' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'cue_wake_uri_2' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
+          grep -q 'cue_wake_uri_3' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
+          grep -q 'EXTRA_WAKE_SLOT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
+          grep -q 'Saludo wake 3' android/app/src/main/java/com/bwa3d/codexremote/AudioCueSettingsView.java
+          grep -q 'ACTION_OPEN_DOCUMENT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
+          if grep -R -q 'WakeGif' android/app/src/main; then echo 'Discarded GIF code still present'; exit 1; fi
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets

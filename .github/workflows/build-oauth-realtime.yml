@@ -1,0 +1,63 @@
+name: Build OAuth Realtime Windows
+
+on:
+  push:
+    branches:
+      - fix/oauth-webrtc
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Codex Audio Remote
+        uses: actions/checkout@v4
+
+      - name: Checkout OpenAI Codex
+        uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: 343074d4207d572809bd8cea15f4be1d09d98e0b
+          path: upstream-codex
+
+      - name: Apply ChatGPT OAuth WebRTC compatibility patch
+        shell: pwsh
+        run: git -C upstream-codex apply "$env:GITHUB_WORKSPACE\patches\openai-codex-oauth-webrtc.patch"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: upstream-codex/codex-rs
+
+      - name: Build patched Codex CLI
+        working-directory: upstream-codex/codex-rs
+        run: cargo build --release -p codex-cli --bin codex
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+
+      - name: Bundle patched Codex CLI
+        shell: pwsh
+        run: Copy-Item -LiteralPath upstream-codex/codex-rs/target/release/codex.exe -Destination dist/windows/codex.exe
+
+      - name: Upload Windows OAuth Realtime build
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-OAuthRealtime
+          path: dist/windows
+          if-no-files-found: error
+
+# build trigger: oauth-webrtc verification 2026-08-22T17:29-03:00
