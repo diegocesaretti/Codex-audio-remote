@@ -19,3 +19,7 @@ $check = Get-Content -LiteralPath $bridgePath -Raw
 if ($check -notmatch 'RealtimeVoice => AppSettings\.RealtimeVoice') { throw 'Settings-backed Realtime voice missing.' }
 if ($check -notmatch 'explicitPath = AppSettings\.CodexExecutableOverride') { throw 'Settings-backed Codex executable override missing.' }
 Write-Host 'Applied persisted runtime settings to official Realtime bridge.'
+
+# Keep the Codex conversation thread durable across separate Realtime/WebRTC sessions.
+# This transform also adds the user-selectable continuity policy and manual new-chat reset UI.
+& (Join-Path $PSScriptRoot 'prepare-persistent-realtime-thread.ps1')
