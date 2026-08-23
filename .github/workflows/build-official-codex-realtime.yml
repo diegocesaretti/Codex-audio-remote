@@ -45,7 +45,7 @@ jobs:
 
       - name: Fix direct V3 speech and HA Cast stream
         shell: pwsh
-        run: ./scripts/prepare-ha-stream-direct-speech.ps1
+        run: ./scripts/prepare-ha-stream-direct-speech-v2.ps1
 
       - name: Verify official-flow source transform
         shell: pwsh
