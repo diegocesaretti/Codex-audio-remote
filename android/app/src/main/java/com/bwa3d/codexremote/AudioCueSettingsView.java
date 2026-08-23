@@ -18,6 +18,7 @@ public class AudioCueSettingsView extends LinearLayout {
     private final SharedPreferences prefs;
     private final TextView volumeLabel;
     private final EnumMap<AudioCuePlayer.Cue, TextView> selectionLabels = new EnumMap<>(AudioCuePlayer.Cue.class);
+    private final TextView[] wakeSelectionLabels = new TextView[3];
 
     public AudioCueSettingsView(Context context) { this(context, null); }
 
@@ -26,8 +27,13 @@ public class AudioCueSettingsView extends LinearLayout {
         setOrientation(VERTICAL);
         prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE);
 
-        addView(check("Sonido al detectar wake word", "cue_wake_enabled", true));
-        addCueRow("Wake", AudioCuePlayer.Cue.WAKE);
+        addView(check("Sonido / saludo al detectar wake word", "cue_wake_enabled", true));
+        TextView wakeHelp = new TextView(context);
+        wakeHelp.setText("Podés cargar hasta 3 saludos. Si hay más de uno configurado, se elige uno al azar en cada wake. Si no hay ninguno, se usa el chime interno.");
+        addView(wakeHelp, matchWrap());
+        addWakeRow("Saludo wake 1", 1);
+        addWakeRow("Saludo wake 2", 2);
+        addWakeRow("Saludo wake 3", 3);
 
         addView(check("Sonido cuando el uplink está listo", "cue_uplink_enabled", true));
         addCueRow("Uplink listo", AudioCuePlayer.Cue.UPLINK);
@@ -59,6 +65,44 @@ public class AudioCueSettingsView extends LinearLayout {
         TextView help = new TextView(context);
         help.setText("Podés usar MP3, WAV, OGG, M4A u otro audio que Android pueda reproducir. El permiso al archivo elegido queda guardado sin dar acceso general al almacenamiento.");
         addView(help, matchWrap());
+    }
+
+    private void addWakeRow(String label, int slot) {
+        TextView selected = new TextView(getContext());
+        selected.setText(label + ": " + AudioCuePlayer.describeWakeSelection(getContext(), slot));
+        wakeSelectionLabels[slot - 1] = selected;
+        addView(selected, matchWrap());
+
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(HORIZONTAL);
+
+        Button choose = new Button(getContext());
+        choose.setText("Elegir");
+        choose.setAllCaps(false);
+        choose.setOnClickListener(v -> {
+            Intent intent = new Intent(getContext(), AudioCuePickerActivity.class);
+            intent.putExtra(AudioCuePickerActivity.EXTRA_CUE, AudioCuePlayer.Cue.WAKE.name());
+            intent.putExtra(AudioCuePickerActivity.EXTRA_WAKE_SLOT, slot);
+            getContext().startActivity(intent);
+        });
+
+        Button clear = new Button(getContext());
+        clear.setText(slot == 1 ? "Interno" : "Quitar");
+        clear.setAllCaps(false);
+        clear.setOnClickListener(v -> {
+            AudioCuePlayer.clearCustomWakeUri(getContext(), slot);
+            refreshWakeSelection(slot, label);
+        });
+
+        Button test = new Button(getContext());
+        test.setText("Probar");
+        test.setAllCaps(false);
+        test.setOnClickListener(v -> AudioCuePlayer.playWakeSlot(getContext(), slot));
+
+        row.addView(choose, weighted());
+        row.addView(clear, weighted());
+        row.addView(test, weighted());
+        addView(row, matchWrap());
     }
 
     private void addCueRow(String label, AudioCuePlayer.Cue cue) {
@@ -104,10 +148,17 @@ public class AudioCueSettingsView extends LinearLayout {
     }
 
     private void refreshAllSelections() {
-        refreshSelection(AudioCuePlayer.Cue.WAKE, "Wake");
+        refreshWakeSelection(1, "Saludo wake 1");
+        refreshWakeSelection(2, "Saludo wake 2");
+        refreshWakeSelection(3, "Saludo wake 3");
         refreshSelection(AudioCuePlayer.Cue.UPLINK, "Uplink listo");
         refreshSelection(AudioCuePlayer.Cue.LISTEN_END, "Fin escucha");
         refreshSelection(AudioCuePlayer.Cue.END, "Fin conversación");
+    }
+
+    private void refreshWakeSelection(int slot, String label) {
+        TextView view = wakeSelectionLabels[slot - 1];
+        if (view != null) view.setText(label + ": " + AudioCuePlayer.describeWakeSelection(getContext(), slot));
     }
 
     private void refreshSelection(AudioCuePlayer.Cue cue, String label) {
