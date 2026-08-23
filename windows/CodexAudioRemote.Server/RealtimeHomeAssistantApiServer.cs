@@ -35,7 +35,7 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
         Console.WriteLine($"Home Assistant Realtime API · http://0.0.0.0:{AppSettings.HomeAssistantApiPort}/api/");
         Console.WriteLine("Home Assistant base URL: " + AppSettings.HomeAssistantBaseUrl);
         Console.WriteLine("Speech endpoints: POST /api/speak · POST /api/tts");
-        Console.WriteLine("Mirror endpoint: GET /api/realtime-mirror.mp3?token=<ephemeral>");
+        Console.WriteLine("Mirror endpoint: GET/HEAD /api/realtime-mirror.mp3?token=<ephemeral>");
     }
 
     async Task LoopAsync(CancellationToken token)
@@ -59,8 +59,10 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
         try
         {
             var path = context.Request.Url?.AbsolutePath ?? "";
+            var method = context.Request.HttpMethod;
 
-            if (string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase) &&
+            if ((string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase)) &&
                 string.Equals(path, "/api/realtime-mirror.mp3", StringComparison.OrdinalIgnoreCase))
             {
                 if (await RealtimeSecondaryAudioMirror.TryServeHomeAssistantStreamAsync(context, token)) return;
@@ -68,7 +70,7 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
                 return;
             }
 
-            if (string.Equals(context.Request.HttpMethod, "GET", StringComparison.OrdinalIgnoreCase) &&
+            if (string.Equals(method, "GET", StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(path, "/api/health", StringComparison.OrdinalIgnoreCase))
             {
                 await WriteJson(context.Response, 200, new
@@ -92,7 +94,7 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
 
             var isSpeak = string.Equals(path, "/api/speak", StringComparison.OrdinalIgnoreCase) ||
                           string.Equals(path, "/api/tts", StringComparison.OrdinalIgnoreCase);
-            if (!string.Equals(context.Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase) || !isSpeak)
+            if (!string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase) || !isSpeak)
             {
                 await WriteJson(context.Response, 404, new
                 {
@@ -103,8 +105,12 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
                 return;
             }
 
+            // Loopback is always allowed so the Settings page can exercise the real REST endpoint.
+            // Remote requests can still be restricted to the configured Home Assistant host/IP.
+            var remoteAddress = context.Request.RemoteEndPoint?.Address;
             if (AppSettings.HomeAssistantRequireSourceMatch &&
-                !await IsConfiguredHomeAssistantAsync(context.Request.RemoteEndPoint?.Address))
+                !IsLoopback(remoteAddress) &&
+                !await IsConfiguredHomeAssistantAsync(remoteAddress))
             {
                 await WriteJson(context.Response, 403, new { ok = false, error = "source_not_home_assistant" });
                 return;
@@ -127,7 +133,7 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
             }
 
             Console.WriteLine($"HA Realtime speech request · chars={text.Length} · remote={context.Request.RemoteEndPoint}");
-            var result = await speak(text, "home_assistant", token);
+            var result = await speak(text, IsLoopback(remoteAddress) ? "settings_test" : "home_assistant", token);
             if (!result.Accepted)
             {
                 await WriteJson(context.Response, result.Status == "busy" ? 409 : 503,
@@ -155,6 +161,9 @@ internal sealed class RealtimeHomeAssistantApiServer : IDisposable
             try { await WriteJson(context.Response, 500, new { ok = false, error = "server_error", detail = ex.Message }); } catch { }
         }
     }
+
+    static bool IsLoopback(IPAddress? address)
+        => address is not null && (IPAddress.IsLoopback(address) || IPAddress.IsLoopback(address.MapToIPv4()));
 
     static async Task<bool> IsConfiguredHomeAssistantAsync(IPAddress? remote)
     {
