@@ -47,6 +47,10 @@ jobs:
         shell: pwsh
         run: ./scripts/prepare-ha-stream-direct-speech-v2.ps1
 
+      - name: Harden HA speak readiness and mirror persistence
+        shell: pwsh
+        run: ./scripts/fix-ha-speak-race-and-mirror-persistence.ps1
+
       - name: Verify official-flow source transform
         shell: pwsh
         run: |
@@ -79,6 +83,8 @@ jobs:
           if ($peer -notmatch 'input_audio\.pause') { throw 'V3 input_audio.pause missing' }
           if ($peer -notmatch 'session\.context\.append') { throw 'Frameless session.context.append missing' }
           if ($peer -notmatch "channel: 'speakable'") { throw 'Frameless speakable channel missing' }
+          if ($peer -notmatch 'speakableSessionStarted') { throw 'Speak readiness state missing' }
+          if ($peer -notmatch 'readyDeadline') { throw 'Speak readiness wait missing' }
           if ($peer -notmatch 'rtp-stats') { throw 'RTP diagnostics missing' }
           if ($server -notmatch 'SpeakExternalAsync') { throw 'authoritative external speech method missing' }
           if ($server -notmatch 'AppSettings\.WakeRetryCooldownMs') { throw 'settings-backed wake cooldown missing' }
@@ -91,6 +97,7 @@ jobs:
           if ($ui -notmatch 'RealtimeLifecycleSettingsForm') { throw 'lifecycle settings UI missing' }
           if ($haUi -notmatch 'Probar stream LIVE') { throw 'Home Assistant stream diagnostic UI missing' }
           if ($haUi -notmatch 'PostLocalSpeechTestAsync') { throw 'Home Assistant local /api/speak test missing' }
+          if ($haUi -notmatch 'HA mirror preference saved') { throw 'Immediate HA mirror persistence missing' }
           if ($haClient -notmatch 'media_content_type = "audio/mp3"') { throw 'Cast audio/mp3 media type missing' }
           if ($haApi -notmatch 'HEAD') { throw 'Cast HEAD probe support missing' }
           if ($haApi -notmatch 'IgnoreWriteExceptions = true') { throw 'Cast disconnect tolerance missing' }
@@ -99,7 +106,7 @@ jobs:
           if ($mirror -notmatch 'ResolveLanIPv4ForHomeAssistantAsync') { throw 'HA route-aware LAN IP selection missing' }
           if ($mirror -notmatch 'WaitForGetAsync') { throw 'HA receiver GET verification missing' }
           if ($mirror -notmatch 'BytesServed') { throw 'HA stream byte diagnostics missing' }
-          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + PAUSED + unified HA diagnostics + resilient mirrors.'
+          Write-Host 'Official flow verified: V3 + Sol + direct speakable text + readiness wait + PAUSED + persistent HA mirror + resilient mirrors.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official
