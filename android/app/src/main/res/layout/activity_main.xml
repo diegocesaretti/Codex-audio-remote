@@ -44,12 +44,6 @@
         <SeekBar android:id="@+id/sensitivitySeek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" android:progress="60" />
         <com.bwa3d.codexremote.WakeScreenCheckBox android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Encender pantalla al detectar wake word" />
 
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Wake GIF fullscreen" android:textStyle="bold" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Opcional: al detectar la wake word muestra un GIF local sobre toda la pantalla, con fondo configurable y transición suave." />
-        <com.bwa3d.codexremote.WakeGifSettingsView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Micrófono de conversación" android:textStyle="bold" />
         <TextView android:id="@+id/qualityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Calidad: 80% · Alta · 48 kHz" />
         <SeekBar android:id="@+id/qualitySeek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" android:progress="80" />
@@ -80,7 +74,7 @@
         <com.bwa3d.codexremote.EndSensitivityControl android:layout_width="match_parent" android:layout_height="wrap_content" />
 
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Sonidos de estado" android:textStyle="bold" />
-        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Cuatro sonidos locales: wake, uplink listo, fin de escucha y fin de conversación. Cada uno puede usar el chime interno o un audio descargado." />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Wake puede usar hasta 3 saludos locales aleatorios; uplink, fin de escucha y fin de conversación mantienen su sonido configurable." />
         <com.bwa3d.codexremote.AudioCueSettingsView
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
