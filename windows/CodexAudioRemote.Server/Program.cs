@@ -5,6 +5,23 @@ if (options.ListDevices)
     return;
 }
 
+if (TrayController.VoiceBackend == TrayController.RealtimeV3Backend)
+{
+    using var realtimeServer = new RealtimeSessionServer(options);
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        realtimeServer.Dispose();
+        Environment.Exit(0);
+    };
+    AppDomain.CurrentDomain.ProcessExit += (_, _) => realtimeServer.Dispose();
+
+    Console.WriteLine("Codex Audio Remote · experimental Realtime V3 backend");
+    Console.WriteLine("Auth: existing Codex ChatGPT OAuth login");
+    await realtimeServer.RunAsync();
+    return;
+}
+
 var switcher = new AudioDeviceSwitcher(options.VirtualMicName);
 await switcher.TryRecoverAsync();
 
