@@ -23,20 +23,21 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
     Task? windowsTask;
     Task? haTask;
     LiveMp3Stream? liveStream;
-    string sessionId = "";
     bool disposed;
 
     public async Task StartAsync(string newSessionId, CancellationToken cancellationToken = default)
     {
         await StopAsync();
         if (disposed) return;
-        sessionId = newSessionId ?? "";
-        cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        var mirrorCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts = mirrorCts;
 
         if (RealtimeMirrorSettings.WindowsMirrorEnabled && !string.IsNullOrWhiteSpace(DownlinkDeviceSettings.SelectedDeviceId))
         {
             windowsPcm = CreatePcmQueue();
-            windowsTask = Task.Run(() => RunWindowsMirrorAsync(windowsPcm.Reader, cts.Token), cts.Token);
+            var reader = windowsPcm.Reader;
+            windowsTask = Task.Run(() => RunWindowsMirrorAsync(reader, mirrorCts.Token), mirrorCts.Token);
         }
 
         if (RealtimeMirrorSettings.HomeAssistantMirrorEnabled &&
@@ -46,25 +47,28 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
             haPcm = CreatePcmQueue();
             liveStream = new LiveMp3Stream();
             LiveStreams[liveStream.Token] = liveStream;
-            haTask = Task.Run(() => RunHomeAssistantEncoderAsync(haPcm.Reader, liveStream, cts.Token), cts.Token);
+            var reader = haPcm.Reader;
+            var stream = liveStream;
+            haTask = Task.Run(() => RunHomeAssistantEncoderAsync(reader, stream, mirrorCts.Token), mirrorCts.Token);
 
             var ip = ResolveLanIPv4();
-            var streamUrl = $"http://{ip}:{AppSettings.HomeAssistantApiPort}/api/realtime-mirror.mp3?token={Uri.EscapeDataString(liveStream.Token)}";
+            var streamUrl = $"http://{ip}:{AppSettings.HomeAssistantApiPort}/api/realtime-mirror.mp3?token={Uri.EscapeDataString(stream.Token)}";
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await HomeAssistantMediaClient.StartLiveStreamAsync(streamUrl, cts.Token);
+                    await HomeAssistantMediaClient.StartLiveStreamAsync(streamUrl, mirrorCts.Token);
                     Console.WriteLine($"Realtime HA mirror started · {RealtimeMirrorSettings.HomeAssistantMediaPlayerEntity} · {streamUrl}");
                 }
+                catch (OperationCanceledException) { }
                 catch (Exception ex)
                 {
                     Console.WriteLine("Realtime HA mirror start failed: " + ex.Message);
                 }
-            }, cts.Token);
+            }, mirrorCts.Token);
         }
 
-        Console.WriteLine($"Realtime secondary mirrors · Android=always · Windows/BT={windowsPcm is not null} · HomeAssistant={haPcm is not null}");
+        Console.WriteLine($"Realtime secondary mirrors · Android=always · Windows/BT={windowsPcm is not null} · HomeAssistant={haPcm is not null} · session={newSessionId}");
     }
 
     public void PushPcm16k(byte[] pcm)
@@ -81,8 +85,8 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
         CancellationTokenSource? cancellation;
         Channel<byte[]>? win;
         Channel<byte[]>? ha;
-        Task? winTask;
-        Task? haTask;
+        Task? winWorker;
+        Task? haWorker;
         LiveMp3Stream? stream;
 
         lock (sync)
@@ -93,29 +97,20 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
             windowsPcm = null;
             ha = haPcm;
             haPcm = null;
-            winTask = windowsTask;
+            winWorker = windowsTask;
             windowsTask = null;
-            haTask = haTask;
-            this.haTask = null;
+            haWorker = haTask;
+            haTask = null;
             stream = liveStream;
             liveStream = null;
-            sessionId = "";
         }
 
         try { win?.Writer.TryComplete(); } catch { }
         try { ha?.Writer.TryComplete(); } catch { }
         try { cancellation?.CancelAfter(800); } catch { }
 
-        try
-        {
-            if (winTask is not null) await winTask.WaitAsync(TimeSpan.FromMilliseconds(1000));
-        }
-        catch { }
-        try
-        {
-            if (haTask is not null) await haTask.WaitAsync(TimeSpan.FromMilliseconds(1200));
-        }
-        catch { }
+        try { if (winWorker is not null) await winWorker.WaitAsync(TimeSpan.FromMilliseconds(1000)); } catch { }
+        try { if (haWorker is not null) await haWorker.WaitAsync(TimeSpan.FromMilliseconds(1200)); } catch { }
 
         if (stream is not null)
         {
@@ -162,25 +157,17 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
                 DiscardOnBufferOverflow = true,
                 ReadFully = true
             };
-            resampler = new MediaFoundationResampler(provider, device.AudioClient.MixFormat)
-            {
-                ResamplerQuality = 60
-            };
+            resampler = new MediaFoundationResampler(provider, device.AudioClient.MixFormat) { ResamplerQuality = 60 };
             output = new WasapiOut(device, AudioClientShareMode.Shared, true, 90);
             output.Init(resampler);
             output.Play();
             Console.WriteLine($"Realtime Windows/BT mirror active · {device.FriendlyName}");
 
             await foreach (var pcm in reader.ReadAllAsync(token))
-            {
                 if (pcm.Length > 0) provider.AddSamples(pcm, 0, pcm.Length);
-            }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Realtime Windows/BT mirror failed: " + ex.Message);
-        }
+        catch (Exception ex) { Console.WriteLine("Realtime Windows/BT mirror failed: " + ex.Message); }
         finally
         {
             try { output?.Stop(); } catch { }
@@ -197,28 +184,18 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
             using var sink = new BroadcastWriteStream(stream);
             using var encoder = new LameMP3FileWriter(sink, new WaveFormat(16000, 16, 1), 64);
             await foreach (var pcm in reader.ReadAllAsync(token))
-            {
-                if (pcm.Length == 0) continue;
-                encoder.Write(pcm, 0, pcm.Length);
-            }
+                if (pcm.Length > 0) encoder.Write(pcm, 0, pcm.Length);
             encoder.Flush();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Realtime HA MP3 encoder failed: " + ex.Message);
-        }
-        finally
-        {
-            stream.Complete();
-        }
+        catch (Exception ex) { Console.WriteLine("Realtime HA MP3 encoder failed: " + ex.Message); }
+        finally { stream.Complete(); }
     }
 
     public static async Task<bool> TryServeHomeAssistantStreamAsync(HttpListenerContext context, CancellationToken token)
     {
         var supplied = context.Request.QueryString["token"] ?? "";
-        if (string.IsNullOrWhiteSpace(supplied) || !LiveStreams.TryGetValue(supplied, out var stream))
-            return false;
+        if (string.IsNullOrWhiteSpace(supplied) || !LiveStreams.TryGetValue(supplied, out var stream)) return false;
 
         var response = context.Response;
         response.StatusCode = 200;
@@ -228,8 +205,8 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
         response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
         response.Headers["Access-Control-Allow-Origin"] = "*";
         response.Headers["X-Content-Type-Options"] = "nosniff";
-
         Console.WriteLine($"Realtime HA mirror client connected · {context.Request.RemoteEndPoint}");
+
         try
         {
             await foreach (var chunk in stream.Subscribe(token))
@@ -240,10 +217,7 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
             }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            Console.WriteLine("Realtime HA mirror HTTP ended: " + ex.Message);
-        }
+        catch (Exception ex) { Console.WriteLine("Realtime HA mirror HTTP ended: " + ex.Message); }
         finally
         {
             try { response.OutputStream.Close(); } catch { }
@@ -273,16 +247,14 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
     static bool IsPrivateIPv4(IPAddress address)
     {
         var b = address.GetAddressBytes();
-        return b[0] == 10 ||
-               (b[0] == 192 && b[1] == 168) ||
-               (b[0] == 172 && b[1] >= 16 && b[1] <= 31);
+        return b[0] == 10 || (b[0] == 192 && b[1] == 168) || (b[0] == 172 && b[1] >= 16 && b[1] <= 31);
     }
 
     public void Dispose()
     {
         if (disposed) return;
-        disposed = true;
         StopAsync().GetAwaiter().GetResult();
+        disposed = true;
     }
 
     sealed class LiveMp3Stream
@@ -292,7 +264,6 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
         readonly Queue<byte[]> prebuffer = new();
         int prebufferBytes;
         bool completed;
-
         public string Token { get; } = Guid.NewGuid().ToString("N");
 
         public void Publish(byte[] bytes)
@@ -306,8 +277,7 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
                 {
                     prebuffer.Enqueue(copy);
                     prebufferBytes += copy.Length;
-                    while (prebufferBytes > 128 * 1024 && prebuffer.TryDequeue(out var old))
-                        prebufferBytes -= old.Length;
+                    while (prebufferBytes > 128 * 1024 && prebuffer.TryDequeue(out var old)) prebufferBytes -= old.Length;
                     return;
                 }
                 foreach (var sub in subscribers.ToArray()) sub.Writer.TryWrite(copy);
@@ -328,14 +298,8 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
                 subscribers.Add(channel);
                 if (completed) channel.Writer.TryComplete();
             }
-            try
-            {
-                await foreach (var chunk in channel.Reader.ReadAllAsync(token)) yield return chunk;
-            }
-            finally
-            {
-                lock (gate) subscribers.Remove(channel);
-            }
+            try { await foreach (var chunk in channel.Reader.ReadAllAsync(token)) yield return chunk; }
+            finally { lock (gate) subscribers.Remove(channel); }
         }
 
         public void Complete()
@@ -370,10 +334,6 @@ internal sealed class RealtimeSecondaryAudioMirror : IDisposable
             Buffer.BlockCopy(buffer, offset, copy, 0, count);
             target.Publish(copy);
         }
-        protected override void Dispose(bool disposing)
-        {
-            disposed = true;
-            base.Dispose(disposing);
-        }
+        protected override void Dispose(bool disposing) { disposed = true; base.Dispose(disposing); }
     }
 }
