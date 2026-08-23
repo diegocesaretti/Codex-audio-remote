@@ -105,7 +105,9 @@ jobs:
         run: python3 scripts/prepare-android-audio-cues.py
       - name: Make end phrases pause listening
         run: python3 scripts/fix-android-end-phrases-pause.py
-      - name: Verify Android PAUSED lifecycle and audio cues
+      - name: Wire fullscreen wake GIF overlay
+        run: python3 scripts/prepare-android-wake-gif-overlay.py
+      - name: Verify Android PAUSED lifecycle, cues and wake GIF overlay
         run: |
           grep -q 'AudioCuePlayer.Cue.WAKE' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
@@ -116,6 +118,14 @@ jobs:
           grep -q 'suggestedSuppressionMs' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'sendPauseEvent("phrase")' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'event\\\":\\\"pause' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'wakeGifOverlay.showWake' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'wakeGifOverlay.onServerState' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'FADE_MS = 240L' android/app/src/main/java/com/bwa3d/codexremote/WakeGifOverlayController.java
+          grep -q 'Movie.decodeStream' android/app/src/main/java/com/bwa3d/codexremote/WakeGifOverlayController.java
+          grep -q 'ACTION_OPEN_DOCUMENT' android/app/src/main/java/com/bwa3d/codexremote/WakeGifPickerActivity.java
+          grep -q 'wake_gif_bg_color' android/app/src/main/java/com/bwa3d/codexremote/WakeGifPrefs.java
+          grep -q 'WakeGifSettingsView' android/app/src/main/res/layout/activity_main.xml
+          grep -q 'WakeGifPickerActivity' android/app/src/main/AndroidManifest.xml
           grep -q 'LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
           grep -q 'ACTION_OPEN_DOCUMENT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
           grep -q 'cue_listen_end_uri' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
