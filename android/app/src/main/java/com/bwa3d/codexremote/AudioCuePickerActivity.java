@@ -9,8 +9,10 @@ import android.widget.Toast;
 /** Tiny transparent helper that lets each lifecycle cue keep access to a downloaded audio file. */
 public class AudioCuePickerActivity extends Activity {
     public static final String EXTRA_CUE = "cue";
+    public static final String EXTRA_WAKE_SLOT = "wake_slot";
     private static final int REQUEST_AUDIO = 7001;
     private AudioCuePlayer.Cue cue = AudioCuePlayer.Cue.WAKE;
+    private int wakeSlot = 1;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -18,6 +20,7 @@ public class AudioCuePickerActivity extends Activity {
         if (name != null) {
             try { cue = AudioCuePlayer.Cue.valueOf(name); } catch (Exception ignored) { }
         }
+        if (getIntent() != null) wakeSlot = Math.max(1, Math.min(3, getIntent().getIntExtra(EXTRA_WAKE_SLOT, 1)));
 
         Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         pick.addCategory(Intent.CATEGORY_OPENABLE);
@@ -43,8 +46,13 @@ public class AudioCuePickerActivity extends Activity {
                 } catch (Exception e) {
                     AndroidDebugLog.log("Cue URI persist warning · " + e.getMessage());
                 }
-                AudioCuePlayer.setCustomUri(this, cue, uri);
-                Toast.makeText(this, "Sonido seleccionado: " + AudioCuePlayer.describeSelection(this, cue), Toast.LENGTH_SHORT).show();
+                if (cue == AudioCuePlayer.Cue.WAKE) {
+                    AudioCuePlayer.setCustomWakeUri(this, wakeSlot, uri);
+                    Toast.makeText(this, "Saludo wake " + wakeSlot + ": " + AudioCuePlayer.describeWakeSelection(this, wakeSlot), Toast.LENGTH_SHORT).show();
+                } else {
+                    AudioCuePlayer.setCustomUri(this, cue, uri);
+                    Toast.makeText(this, "Sonido seleccionado: " + AudioCuePlayer.describeSelection(this, cue), Toast.LENGTH_SHORT).show();
+                }
             }
         }
         finish();
