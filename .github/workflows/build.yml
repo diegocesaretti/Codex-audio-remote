@@ -40,9 +40,47 @@ jobs:
           ref: 343074d4207d572809bd8cea15f4be1d09d98e0b
           path: upstream-codex
 
-      - name: Apply ChatGPT OAuth WebRTC compatibility patch
+      - name: Apply ChatGPT OAuth WebRTC compatibility edits
         shell: pwsh
-        run: git -C upstream-codex apply "$env:GITHUB_WORKSPACE\patches\openai-codex-oauth-webrtc.patch"
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $callPath = 'upstream-codex/codex-rs/codex-api/src/endpoint/realtime_call.rs'
+          $call = (Get-Content -LiteralPath $callPath -Raw).Replace("`r`n", "`n")
+          $callNeedle = '            session.remove("id");'
+          if (-not $call.Contains($callNeedle)) {
+            throw 'Could not locate realtime_call.rs session.id removal point'
+          }
+          $callReplacement = @'
+            session.remove("id");
+            let removed_model = session.remove("model").is_some();
+            tracing::info!(
+                removed_model,
+                "Codex Audio Remote OAuth patch: sanitized realtime call session"
+            );
+'@
+          $call = $call.Replace($callNeedle, $callReplacement.TrimEnd())
+          [System.IO.File]::WriteAllText((Resolve-Path $callPath), $call, [System.Text.UTF8Encoding]::new($false))
+
+          $commonPath = 'upstream-codex/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs'
+          $common = (Get-Content -LiteralPath $commonPath -Raw).Replace("`r`n", "`n")
+          $commonNeedle = "        RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(`n            config.model,"
+          if (-not $common.Contains($commonNeedle)) {
+            throw 'Could not locate Frameless session.model serialization point'
+          }
+          $commonReplacement = "        RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(`n            None,"
+          $common = $common.Replace($commonNeedle, $commonReplacement)
+          [System.IO.File]::WriteAllText((Resolve-Path $commonPath), $common, [System.Text.UTF8Encoding]::new($false))
+
+          if ((Get-Content -LiteralPath $callPath -Raw) -notmatch 'removed_model = session\.remove\("model"\)') {
+            throw 'realtime_call.rs model sanitizer verification failed'
+          }
+          if ((Get-Content -LiteralPath $commonPath -Raw) -match 'FramelessBidi => Ok\(frameless_session_json\(\s*config\.model') {
+            throw 'methods_common.rs still serializes config.model for Frameless V3'
+          }
+
+          git -C upstream-codex diff --check
+          git -C upstream-codex diff -- codex-rs/codex-api/src/endpoint/realtime_call.rs codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
