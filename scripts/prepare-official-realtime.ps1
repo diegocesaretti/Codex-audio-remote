@@ -7,6 +7,7 @@ $oldVersion = '    const string RealtimeVersion = "v1";'
 $newVersion = @'
     const string RealtimeVersion = "v3";
     const string RealtimeModel = "gpt-live-1-codex";
+    const string RealtimeVoice = "sol";
 '@.TrimEnd()
 if (-not $source.Contains($oldVersion)) { throw 'Expected v1 realtime version marker was not found.' }
 $source = $source.Replace($oldVersion, $newVersion)
@@ -25,7 +26,7 @@ if ($start -lt 0 -or $end -lt 0 -or $end -le $start) {
 }
 
 $newHandshake = @'
-        Console.WriteLine($"Starting official Codex WebRTC session · version={RealtimeVersion} · model={RealtimeModel}");
+        Console.WriteLine($"Starting official Codex WebRTC session · version={RealtimeVersion} · model={RealtimeModel} · voice={RealtimeVoice}");
 
         // Follow the captured working Codex Desktop flow. Codex app-server owns the
         // authenticated ChatGPT /backend-api/codex/realtime/calls request, OAuth/cookies,
@@ -34,6 +35,7 @@ $newHandshake = @'
         {
             threadId,
             model = RealtimeModel,
+            voice = RealtimeVoice,
             outputModality = "audio",
             version = RealtimeVersion,
             clientManagedHandoffs = false,
@@ -171,9 +173,10 @@ $source = $source.Substring(0, $processIndex) + $resolver + $source.Substring($p
 if ($source.Contains('directRealtimeCall.CreateAsync')) { throw 'Direct realtime/calls creation is still present.' }
 if ($source.Contains('type = "existingCall"')) { throw 'existingCall transport is still present.' }
 if (-not $source.Contains('model = RealtimeModel')) { throw 'Official gpt-live model was not inserted.' }
+if (-not $source.Contains('voice = RealtimeVoice')) { throw 'Sol realtime voice was not inserted.' }
 if (-not $source.Contains('type = "webrtc"')) { throw 'Official WebRTC transport was not inserted.' }
 if (-not $source.Contains('includeStartupContext = false')) { throw 'Captured startup-context setting was not inserted.' }
 if (-not $source.Contains('ResolveCodexExecutable(bundledCodex)')) { throw 'Codex executable resolver was not inserted.' }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
-Write-Host 'Prepared official Codex realtime flow: v3 + gpt-live-1-codex + app-server-owned WebRTC call creation + Windows Codex auto-discovery.'
+Write-Host 'Prepared official Codex realtime flow: v3 + gpt-live-1-codex + voice=sol + app-server-owned WebRTC call creation + Windows Codex auto-discovery.'
