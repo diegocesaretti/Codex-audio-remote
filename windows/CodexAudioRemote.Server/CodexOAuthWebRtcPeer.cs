@@ -35,6 +35,7 @@ internal sealed class CodexOAuthWebRtcPeer : IDisposable
   let uplinkTimestampUs = 0;
   let uplinkChain = Promise.resolve();
   let downlinkGeneration = 0;
+  let downlinkSink = null;
 
   function post(obj) {
     window.chrome.webview.postMessage(JSON.stringify(obj));
@@ -78,6 +79,14 @@ internal sealed class CodexOAuthWebRtcPeer : IDisposable
 
   async function resetMedia() {
     downlinkGeneration++;
+    try {
+      if (downlinkSink) {
+        downlinkSink.pause();
+        downlinkSink.srcObject = null;
+        downlinkSink.remove();
+      }
+    } catch (_) {}
+    downlinkSink = null;
     try { if (uplinkWriter) await uplinkWriter.close(); } catch (_) {}
     try { if (uplinkTrack) uplinkTrack.stop(); } catch (_) {}
     uplinkWriter = null;
@@ -126,6 +135,24 @@ internal sealed class CodexOAuthWebRtcPeer : IDisposable
     try {
       if (typeof MediaStreamTrackProcessor !== 'function')
         throw new Error('MediaStreamTrackProcessor is unavailable in this WebView2 runtime.');
+
+      // Prime the remote track with a muted autoplay sink. Chromium/WebView2 may keep a
+      // remote audio track dormant when it has no consumer; the hidden muted element makes
+      // the receiver actively render while MediaStreamTrackProcessor extracts PCM for Android.
+      const sink = document.createElement('audio');
+      sink.autoplay = true;
+      sink.muted = true;
+      sink.playsInline = true;
+      sink.style.display = 'none';
+      sink.srcObject = new MediaStream([track]);
+      document.body.appendChild(sink);
+      downlinkSink = sink;
+      try {
+        await sink.play();
+        event('remote-audio-sink', 'playing-muted');
+      } catch (e) {
+        event('remote-audio-sink-error', e && e.stack ? e.stack : e);
+      }
 
       const processor = new MediaStreamTrackProcessor({ track });
       const reader = processor.readable.getReader();
