@@ -53,9 +53,14 @@ final class VoskWakeGate {
 
     synchronized void observeAudio(int rms, long nowMs) {
         if (rms < 0) return;
-        double ceiling = Math.max(180.0, noiseFloor * 1.75);
-        if (rms <= ceiling) noiseFloor = (noiseFloor * 0.985) + (rms * 0.015);
-        noiseFloor = Math.max(35.0, Math.min(2200.0, noiseFloor));
+
+        // Asymmetric adaptive floor: follows quieter conditions quickly, rises slowly when the
+        // room stays noisy, and clamps each upward step so one speech burst cannot poison it.
+        double upwardClamp = Math.max(noiseFloor + 120.0, noiseFloor * 2.5);
+        double observed = Math.min(rms, upwardClamp);
+        double alpha = observed < noiseFloor ? 0.06 : 0.012;
+        noiseFloor = (noiseFloor * (1.0 - alpha)) + (observed * alpha);
+        noiseFloor = Math.max(35.0, Math.min(3500.0, noiseFloor));
 
         if (rms >= peakRms || nowMs - peakRmsMs > AUDIO_WINDOW_MS) {
             peakRms = rms;
