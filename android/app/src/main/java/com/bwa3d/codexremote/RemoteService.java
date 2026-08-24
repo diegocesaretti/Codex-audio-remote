@@ -25,6 +25,8 @@ import org.vosk.Recognizer;
 import org.vosk.android.RecognitionListener;
 import org.vosk.android.SpeechService;
 
+import ai.picovoice.porcupine.Porcupine;
+
 import java.io.File;
 import java.text.Normalizer;
 import java.util.ArrayList;
@@ -103,6 +105,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private int lastWakeRms;
     private final VoskWakeGate wakeGate = new VoskWakeGate();
     private String lastWakeLogged = "";
+    private long porcupineRetryAfterMs;
 
     private Thread micThread;
     private AudioRecord micRecord;
@@ -118,6 +121,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private final BroadcastReceiver wakeWordReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             AndroidDebugLog.log("Wake word changed -> " + wakeWord());
+            porcupineRetryAfterMs = 0L;
             wakeGate.reset();
             stopWakeCapture("wake_word_changed");
             handler.postDelayed(RemoteService.this::reconcileAudioPolicy, 180);
@@ -443,8 +447,21 @@ public class RemoteService extends Service implements RecognitionListener {
     }
 
     private void startWakeCaptureIfReady() {
-        if (!connected || !"idle".equals(serverState) || voskModel == null || destroyed) return;
+        if (!connected || !"idle".equals(serverState) || destroyed) return;
         if (wakeRunning.get() || speechService != null || isThreadAlive(wakeThread) || isThreadAlive(micThread)) return;
+
+        boolean porcupineSelected = PorcupineWakeSupport.isSelected(this);
+        boolean porcupineReady = porcupineSelected
+                && PorcupineWakeSupport.isConfigured(this)
+                && System.currentTimeMillis() >= porcupineRetryAfterMs;
+        if (porcupineReady) {
+            startPorcupineWakeCapture();
+            return;
+        }
+
+        // Safe fallback: if Porcupine is selected but has no valid key/model (or recently failed),
+        // keep the satellite usable with Vosk until Porcupine is prepared again.
+        if (voskModel == null) return;
 
         if (Build.VERSION.SDK_INT > 23) {
             try {
@@ -520,6 +537,93 @@ public class RemoteService extends Service implements RecognitionListener {
                 }
             }
         }, "WakeV2");
+        wakeThread.setPriority(Thread.NORM_PRIORITY + 1);
+        wakeThread.start();
+        broadcastStatus();
+    }
+
+    private void startPorcupineWakeCapture() {
+        if (!wakeRunning.compareAndSet(false, true)) return;
+        lastWakeAudioMs = System.currentTimeMillis();
+        wakeThread = new Thread(new Runnable() {
+            @Override public void run() {
+                AudioRecord record = null;
+                Porcupine porcupine = null;
+                try {
+                    porcupine = PorcupineWakeSupport.build(RemoteService.this);
+                    porcupineRetryAfterMs = 0L;
+                    int sampleRate = porcupine.getSampleRate();
+                    int frameLength = porcupine.getFrameLength();
+                    int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                    int frameBytes = frameLength * 2;
+                    int bufferBytes = Math.max(min > 0 ? min * 2 : frameBytes * 4, frameBytes * 4);
+                    int[] sources = new int[] {
+                            MediaRecorder.AudioSource.DEFAULT,
+                            MediaRecorder.AudioSource.MIC,
+                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            MediaRecorder.AudioSource.CAMCORDER
+                    };
+                    int source = -1;
+                    for (int candidate : sources) {
+                        record = createCapture(sampleRate, bufferBytes, candidate);
+                        if (record != null) { source = candidate; break; }
+                    }
+                    if (record == null) throw new IllegalStateException("No AudioRecord for Porcupine wake");
+
+                    wakeRecord = record;
+                    short[] frame = new short[frameLength];
+                    int filled = 0;
+                    record.startRecording();
+                    AndroidDebugLog.log("Porcupine ARMED · v=" + porcupine.getVersion()
+                            + " · source=" + source + " · rate=" + sampleRate
+                            + " · frame=" + frameLength + " · sensitivity="
+                            + String.format(Locale.US, "%.2f", PorcupineWakeSupport.sensitivity(RemoteService.this))
+                            + " · word=" + wakeWord());
+
+                    while (wakeRunning.get() && connected && "idle".equals(serverState) && !destroyed) {
+                        int read = record.read(frame, filled, frame.length - filled);
+                        if (read <= 0) continue;
+
+                        lastWakeAudioMs = System.currentTimeMillis();
+                        long sumSquares = 0L;
+                        for (int i = filled; i < filled + read; i++) {
+                            long sample = frame[i];
+                            sumSquares += sample * sample;
+                        }
+                        lastWakeRms = read > 0 ? (int)Math.sqrt(sumSquares / (double)read) : 0;
+                        filled += read;
+                        if (filled < frame.length) continue;
+
+                        int keywordIndex = porcupine.process(frame);
+                        filled = 0;
+                        if (keywordIndex >= 0) {
+                            AndroidDebugLog.log("Porcupine WAKE CONFIRMED · index=" + keywordIndex
+                                    + " · rms=" + lastWakeRms);
+                            handler.post(new Runnable() {
+                                @Override public void run() { sendWakeEvent("porcupine"); }
+                            });
+                            break;
+                        }
+                    }
+                } catch (Exception e) {
+                    porcupineRetryAfterMs = System.currentTimeMillis() + 30000L;
+                    if (wakeRunning.get()) AndroidDebugLog.log("Porcupine wake error -> Vosk fallback for 30s: " + e);
+                } finally {
+                    if (record != null) {
+                        try { record.stop(); } catch (Exception ignored) { }
+                        try { record.release(); } catch (Exception ignored) { }
+                    }
+                    if (porcupine != null) try { porcupine.delete(); } catch (Exception ignored) { }
+                    wakeRecord = null;
+                    wakeRunning.set(false);
+                    wakeThread = null;
+                    AndroidDebugLog.log("Porcupine RELEASED");
+                    handler.postDelayed(new Runnable() {
+                        @Override public void run() { reconcileAudioPolicy(); broadcastStatus(); }
+                    }, 120L);
+                }
+            }
+        }, "PorcupineWake");
         wakeThread.setPriority(Thread.NORM_PRIORITY + 1);
         wakeThread.start();
         broadcastStatus();
