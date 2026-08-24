@@ -1,0 +1,263 @@
+name: vosk-wake-hardening
+
+on:
+  push:
+    branches: [ improve/vosk-wake-hardening ]
+    paths: [ '.github/workflows/vosk-hardening.yml' ]
+
+permissions:
+  contents: write
+
+jobs:
+  harden-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: improve/vosk-wake-hardening
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Apply Vosk wake hardening
+        shell: python
+        run: |
+          from pathlib import Path
+
+          service_path = Path('android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java')
+          src = service_path.read_text(encoding='utf-8')
+
+          old = '''    private long lastWakeMs;\n    private String wakeFirstWord = "";\n    private long wakeFirstWordMs;\n    private String lastWakeLogged = "";'''
+          new = '''    private final VoskWakeGate wakeGate = new VoskWakeGate();\n    private String lastWakeLogged = "";'''
+          assert old in src, 'wake state block not found'
+          src = src.replace(old, new, 1)
+
+          old = '''            AndroidDebugLog.log("Wake word changed -> " + wakeWord());\n            stopWakeCapture("wake_word_changed");'''
+          new = '''            AndroidDebugLog.log("Wake word changed -> " + wakeWord());\n            wakeGate.reset();\n            stopWakeCapture("wake_word_changed");'''
+          assert old in src, 'wake word receiver block not found'
+          src = src.replace(old, new, 1)
+
+          old = '''                        lastWakeAudioMs = System.currentTimeMillis();\n                        lastWakeRms = pcmRms(buffer, read);\n                        boolean complete = recognizer.acceptWaveForm(buffer, read);\n                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult());'''
+          new = '''                        lastWakeAudioMs = System.currentTimeMillis();\n                        lastWakeRms = pcmRms(buffer, read);\n                        wakeGate.observeAudio(lastWakeRms, lastWakeAudioMs);\n                        boolean complete = recognizer.acceptWaveForm(buffer, read);\n                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult(), complete);'''
+          assert old in src, 'API23 wake loop block not found'
+          src = src.replace(old, new, 1)
+
+          start = src.index('    private void checkWake(String json) {')
+          end = src.index('    private void sendWakeEvent(String source) {', start)
+          replacement = '''    private void checkWake(String json, boolean isFinal) {\n        try {\n            JSONObject o = new JSONObject(json);\n            String text = normalize(o.optString("text", o.optString("partial", "")));\n            if (text.isEmpty()) {\n                if (isFinal) wakeGate.noteFinalSilence();\n                return;\n            }\n            if (!text.equals(lastWakeLogged)) {\n                lastWakeLogged = text;\n                AndroidDebugLog.log("Wake v2 heard: " + text + (isFinal ? " · final" : " · partial"));\n            }\n\n            int sensitivity = Math.max(0, Math.min(100, prefs().getInt("sensitivity", 60)));\n            VoskWakeGate.Decision decision = wakeGate.evaluate(\n                    text, wakeWord(), sensitivity, isFinal, wakeResultConfidence(o), wakeResultDurationMs(o),\n                    Build.VERSION.SDK_INT <= 23);\n            if (decision.accepted) {\n                AndroidDebugLog.log("Wake v2 CONFIRMED · " + decision.reason);\n                handler.post(new Runnable() { @Override public void run() { sendWakeEvent("voice"); } });\n            } else if (decision.loggable) {\n                AndroidDebugLog.log("Wake v2 rejected · " + decision.reason);\n            }\n        } catch (Exception e) { AndroidDebugLog.log("Wake v2 parse error: " + e); }\n    }\n\n    private static double wakeResultConfidence(JSONObject o) {\n        JSONArray words = o.optJSONArray("result");\n        if (words == null || words.length() == 0) return -1.0;\n        double sum = 0.0;\n        int count = 0;\n        for (int i = 0; i < words.length(); i++) {\n            JSONObject w = words.optJSONObject(i);\n            if (w != null && w.has("conf")) {\n                sum += w.optDouble("conf", 0.0);\n                count++;\n            }\n        }\n        return count == 0 ? -1.0 : sum / count;\n    }\n\n    private static long wakeResultDurationMs(JSONObject o) {\n        JSONArray words = o.optJSONArray("result");\n        if (words == null || words.length() == 0) return -1L;\n        JSONObject first = words.optJSONObject(0);\n        JSONObject last = words.optJSONObject(words.length() - 1);\n        if (first == null || last == null || !first.has("start") || !last.has("end")) return -1L;\n        double seconds = last.optDouble("end", 0.0) - first.optDouble("start", 0.0);\n        return seconds <= 0 ? -1L : Math.round(seconds * 1000.0);\n    }\n\n'''
+          src = src[:start] + replacement + src[end:]
+
+          old = '''        List<String> variants = new ArrayList<>();\n        variants.add(word);\n        String[] parts = word.split(" ");\n        if (parts.length == 2) { variants.add(parts[0]); variants.add(parts[1]); }\n        variants.add("[unk]");'''
+          new = '''        List<String> variants = new ArrayList<>();\n        // Keep the grammar deliberately narrow. Individual target words are not alternatives:\n        // allowing them makes a constrained recognizer much more likely to hallucinate a wake.\n        variants.add(word);\n        variants.add("[unk]");'''
+          assert old in src, 'wake grammar variants block not found'
+          src = src.replace(old, new, 1)
+
+          old = '''    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }\n    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }\n    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }'''
+          new = '''    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, false); }\n    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }\n    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }'''
+          assert old in src, 'SpeechService callbacks block not found'
+          src = src.replace(old, new, 1)
+
+          # wakeMatches/levenshtein are intentionally left in place for binary/source compatibility,\n          # but the wake decision no longer uses fuzzy character distance.\n          service_path.write_text(src, encoding='utf-8')
+
+          gate = r'''package com.bwa3d.codexremote;
+
+import java.util.Locale;
+
+/**
+ * Conservative decision layer in front of Vosk wake recognition.
+ *
+ * Vosk is an ASR, not a dedicated keyword spotter. A narrow grammar can therefore return the
+ * configured phrase for vaguely similar audio. This gate requires several independent pieces of
+ * evidence before RemoteService emits a wake event: exact token progression, temporal stability,
+ * plausible speech duration and (on the direct API23 AudioRecord path) real acoustic energy over
+ * an adaptive noise floor.
+ */
+final class VoskWakeGate {
+    static final class Decision {
+        final boolean accepted;
+        final boolean loggable;
+        final String reason;
+
+        Decision(boolean accepted, boolean loggable, String reason) {
+            this.accepted = accepted;
+            this.loggable = loggable;
+            this.reason = reason;
+        }
+
+        static Decision accept(String reason) { return new Decision(true, true, reason); }
+        static Decision reject(String reason, boolean loggable) { return new Decision(false, loggable, reason); }
+    }
+
+    private static final long CANDIDATE_TIMEOUT_MS = 2400L;
+    private static final long AUDIO_WINDOW_MS = 1800L;
+    private static final long COOLDOWN_MS = 3500L;
+    private static final long MIN_WAKE_DURATION_MS = 260L;
+    private static final long MAX_WAKE_DURATION_MS = 2300L;
+
+    private String candidateText = "";
+    private int stableHits;
+    private long candidateSinceMs;
+    private long lastCandidateMs;
+    private long lastAcceptedMs;
+
+    private double noiseFloor = 90.0;
+    private int peakRms;
+    private long peakRmsMs;
+
+    synchronized void reset() {
+        candidateText = "";
+        stableHits = 0;
+        candidateSinceMs = 0L;
+        lastCandidateMs = 0L;
+        peakRms = 0;
+        peakRmsMs = 0L;
+    }
+
+    synchronized void noteFinalSilence() {
+        clearCandidate();
+    }
+
+    synchronized void observeAudio(int rms, long nowMs) {
+        if (rms < 0) return;
+
+        // Learn the ambient floor slowly, but never let a loud speech burst instantly raise it.
+        double ceiling = Math.max(180.0, noiseFloor * 1.75);
+        if (rms <= ceiling) noiseFloor = (noiseFloor * 0.985) + (rms * 0.015);
+        noiseFloor = Math.max(35.0, Math.min(2200.0, noiseFloor));
+
+        if (rms >= peakRms || nowMs - peakRmsMs > AUDIO_WINDOW_MS) {
+            peakRms = rms;
+            peakRmsMs = nowMs;
+        }
+    }
+
+    synchronized Decision evaluate(String text, String target, int sensitivity, boolean isFinal,
+                                   double confidence, long resultDurationMs, boolean requireAudioEvidence) {
+        long now = System.currentTimeMillis();
+        text = clean(text);
+        target = clean(target);
+        if (text.isEmpty() || target.isEmpty()) return Decision.reject("empty", false);
+
+        if (now - lastAcceptedMs < COOLDOWN_MS) return Decision.reject("cooldown", false);
+
+        if (lastCandidateMs > 0 && now - lastCandidateMs > CANDIDATE_TIMEOUT_MS) clearCandidate();
+
+        String[] targetParts = target.split(" ");
+        boolean exact = text.equals(target);
+        boolean validPrefix = isWholeWordPrefix(text, target);
+
+        // Do not accept extra words, substring matches, reversed words, or the second half alone.
+        if (!exact && !validPrefix) {
+            boolean related = sharesWakeToken(text, targetParts);
+            clearCandidate();
+            return Decision.reject("lexical mismatch: " + text, related);
+        }
+
+        if (!text.equals(candidateText)) {
+            if (validPrefix || exact) {
+                candidateText = text;
+                stableHits = 1;
+                if (candidateSinceMs == 0L) candidateSinceMs = now;
+            }
+        } else {
+            stableHits++;
+        }
+        lastCandidateMs = now;
+
+        if (!exact) return Decision.reject("prefix " + text + " · hits=" + stableHits, false);
+
+        long observedDuration = candidateSinceMs > 0 ? now - candidateSinceMs : -1L;
+        long duration = resultDurationMs > 0 ? resultDurationMs : observedDuration;
+        if (duration > 0 && duration < MIN_WAKE_DURATION_MS)
+            return Decision.reject("too short " + duration + "ms", true);
+        if (duration > MAX_WAKE_DURATION_MS)
+            return Decision.reject("too long " + duration + "ms", true);
+
+        if (requireAudioEvidence) {
+            long peakAge = peakRmsMs <= 0 ? Long.MAX_VALUE : now - peakRmsMs;
+            double factor = 2.35 - (Math.max(0, Math.min(100, sensitivity)) * 0.0075); // 2.35 -> 1.60
+            int requiredPeak = (int)Math.max(120.0, noiseFloor * factor);
+            if (peakAge > AUDIO_WINDOW_MS || peakRms < requiredPeak) {
+                return Decision.reject("weak audio rms=" + peakRms + " need=" + requiredPeak + " floor=" + (int)noiseFloor, true);
+            }
+        }
+
+        // A final exact phrase is strongest. Constrained-grammar confidence is useful only as an
+        // extra guard; it is never sufficient by itself.
+        if (isFinal) {
+            double minConfidence = 0.91 - (Math.max(0, Math.min(100, sensitivity)) * 0.0026); // .91 -> .65
+            if (confidence >= 0.0 && confidence < minConfidence)
+                return Decision.reject(String.format(Locale.US, "low confidence %.2f < %.2f", confidence, minConfidence), true);
+            if (targetParts.length == 1 && stableHits < 2 && resultDurationMs <= 0)
+                return Decision.reject("single-word final lacks stability", true);
+            return accept(now, "final exact · hits=" + stableHits + confidenceSuffix(confidence));
+        }
+
+        // Partial hypotheses are intentionally harder to accept. This keeps latency low when Vosk
+        // never emits a timely final result but avoids a single transient partial firing the wake.
+        int requiredHits = targetParts.length >= 2 ? 2 : 3;
+        long minObserved = targetParts.length >= 2 ? 300L : 420L;
+        if (stableHits < requiredHits || observedDuration < minObserved)
+            return Decision.reject("partial exact · hits=" + stableHits + " · " + observedDuration + "ms", false);
+
+        return accept(now, "stable partial exact · hits=" + stableHits + " · " + observedDuration + "ms");
+    }
+
+    private Decision accept(long now, String reason) {
+        lastAcceptedMs = now;
+        clearCandidate();
+        return Decision.accept(reason);
+    }
+
+    private void clearCandidate() {
+        candidateText = "";
+        stableHits = 0;
+        candidateSinceMs = 0L;
+        lastCandidateMs = 0L;
+    }
+
+    private static boolean isWholeWordPrefix(String text, String target) {
+        return target.startsWith(text + " ");
+    }
+
+    private static boolean sharesWakeToken(String text, String[] targetParts) {
+        String padded = " " + text + " ";
+        for (String part : targetParts) {
+            if (!part.isEmpty() && padded.contains(" " + part + " ")) return true;
+        }
+        return false;
+    }
+
+    private static String confidenceSuffix(double confidence) {
+        return confidence < 0.0 ? "" : String.format(Locale.US, " · conf=%.2f", confidence);
+    }
+
+    private static String clean(String value) {
+        if (value == null) return "";
+        return value.trim().toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+    }
+}
+'''
+          Path('android/app/src/main/java/com/bwa3d/codexremote/VoskWakeGate.java').write_text(gate, encoding='utf-8')
+
+      - name: Install Android platform
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Bundle Vosk Spanish wake model
+        run: |
+          mkdir -p android/app/src/main/assets
+          curl -L --fail --retry 3 -o android/app/src/main/assets/vosk-es.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+      - name: Compile Android
+        run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Commit hardened wake detector
+        run: |
+          rm -f android/app/src/main/assets/vosk-es.zip
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java android/app/src/main/java/com/bwa3d/codexremote/VoskWakeGate.java
+          git commit -m 'Harden Vosk wake-word detection on Android 6'
+          git push origin HEAD:improve/vosk-wake-hardening
