@@ -257,7 +257,6 @@ public class RemoteService extends Service implements RecognitionListener {
                     AndroidDebugLog.log("WS v2 OPEN · g=" + generation);
                     sendText("{\"type\":\"hello\",\"protocol\":2,\"name\":\"Android satellite\"}");
                     sendText("{\"type\":\"sync\"}");
-                    // Wait for the authoritative state snapshot before opening any microphone.
                     broadcastStatus();
                 }
 
@@ -368,7 +367,6 @@ public class RemoteService extends Service implements RecognitionListener {
         broadcastStatus();
     }
 
-    /** The only place that decides which local audio resources may exist. */
     private synchronized void reconcileAudioPolicy() {
         if (destroyed) return;
 
@@ -415,7 +413,6 @@ public class RemoteService extends Service implements RecognitionListener {
             return;
         }
 
-        // ENDING
         stopWakeCapture("policy_ending");
         stopConversationMic("policy_ending");
         stopSpeaker();
@@ -452,6 +449,7 @@ public class RemoteService extends Service implements RecognitionListener {
         if (Build.VERSION.SDK_INT > 23) {
             try {
                 Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                recognizer.setWords(true);
                 speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE);
                 wakeRunning.set(true);
                 lastWakeAudioMs = System.currentTimeMillis();
@@ -490,6 +488,7 @@ public class RemoteService extends Service implements RecognitionListener {
 
                     wakeRecord = record;
                     recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                    recognizer.setWords(true);
                     byte[] buffer = new byte[4096];
                     record.startRecording();
                     AndroidDebugLog.log("Wake v2 ARMED · source=" + source + " · word=" + wakeWord());
@@ -525,6 +524,7 @@ public class RemoteService extends Service implements RecognitionListener {
     }
 
     private synchronized void stopWakeCapture(String reason) {
+        wakeGate.reset();
         if (Build.VERSION.SDK_INT > 23) {
             SpeechService service = speechService;
             speechService = null;
@@ -602,8 +602,6 @@ public class RemoteService extends Service implements RecognitionListener {
         wakeScreenIfEnabled();
         boolean sent = sendText("{\"type\":\"event\",\"event\":\"wake\",\"source\":\"" + jsonEscape(source) + "\"}");
         AndroidDebugLog.log("Wake v2 event sent=" + sent);
-        // Do not mutate local session state. The wake microphone remains governed by IDLE until
-        // Windows acknowledges with an ACTIVATING state snapshot.
     }
 
     private void sendEndEvent(String reason) {
@@ -612,7 +610,6 @@ public class RemoteService extends Service implements RecognitionListener {
         String payload = "{\"type\":\"event\",\"event\":\"end\",\"reason\":\"" + jsonEscape(reason) + "\",\"sessionId\":\"" + jsonEscape(sessionId) + "\"}";
         boolean sent = sendText(payload);
         AndroidDebugLog.log("End v2 event · reason=" + reason + " · sent=" + sent);
-        // Again, wait for authoritative ENDING/IDLE before changing audio policy.
     }
 
     private void startConversationMicIfReady() {
@@ -867,8 +864,6 @@ public class RemoteService extends Service implements RecognitionListener {
     private String wakeGrammar() {
         String word = wakeWord();
         List<String> variants = new ArrayList<>();
-        // Individual target words are not grammar alternatives. This prevents constrained-ASR
-        // hallucinations while partial prefixes of the complete phrase still remain observable.
         variants.add(word);
         variants.add("[unk]");
         StringBuilder b = new StringBuilder("[");
@@ -877,14 +872,6 @@ public class RemoteService extends Service implements RecognitionListener {
             b.append('"').append(variants.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
         }
         return b.append(']').toString();
-    }
-
-    private static boolean wakeMatches(String text, int sensitivity, String target) {
-        if (text.equals(target) || text.contains(target)) return true;
-        int distance = levenshtein(text, target);
-        if (sensitivity >= 80) return distance <= Math.max(2, target.length() / 5);
-        if (sensitivity >= 45) return distance <= Math.max(1, target.length() / 8);
-        return false;
     }
 
     private List<String> endPhrases() {
@@ -970,19 +957,6 @@ public class RemoteService extends Service implements RecognitionListener {
                 .trim()
                 .replaceAll("\\s+", " ");
         return s;
-    }
-
-    private static int levenshtein(String a, String b) {
-        int[] prev = new int[b.length() + 1];
-        for (int j = 0; j <= b.length(); j++) prev[j] = j;
-        for (int i = 1; i <= a.length(); i++) {
-            int[] cur = new int[b.length() + 1];
-            cur[0] = i;
-            for (int j = 1; j <= b.length(); j++)
-                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
-            prev = cur;
-        }
-        return prev[b.length()];
     }
 
     private static String jsonEscape(String value) {
