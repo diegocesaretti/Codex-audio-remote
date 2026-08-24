@@ -38,8 +38,18 @@ final class PorcupineWakeSupport {
         return new File(context.getFilesDir(), KEYWORD_FILE);
     }
 
+    static String currentPhrase(Context context) {
+        return normalize(prefs(context).getString("wake_word", "hola sol"));
+    }
+
     static boolean isConfigured(Context context) {
-        return !accessKey(context).isEmpty() && keywordFile(context).isFile() && keywordFile(context).length() > 0;
+        String trained = normalize(trainedPhrase(context));
+        String current = currentPhrase(context);
+        return !accessKey(context).isEmpty()
+                && keywordFile(context).isFile()
+                && keywordFile(context).length() > 0
+                && !trained.isEmpty()
+                && trained.equals(current);
     }
 
     static float sensitivity(Context context) {
@@ -81,7 +91,8 @@ final class PorcupineWakeSupport {
     }
 
     static String trainedPhrase(Context context) {
-        return prefs(context).getString("porcupine_trained_phrase", "");
+        String value = prefs(context).getString("porcupine_trained_phrase", "");
+        return value == null ? "" : value;
     }
 
     static String normalize(String value) {
