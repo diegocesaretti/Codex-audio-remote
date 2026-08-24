@@ -42,4 +42,5 @@ dependencies {
     implementation('com.alphacephei:vosk-android:0.3.75@aar') {
         exclude group: 'net.java.dev.jna', module: 'jna'
     }
+    implementation 'ai.picovoice:porcupine-android:4.0.2'
 }
