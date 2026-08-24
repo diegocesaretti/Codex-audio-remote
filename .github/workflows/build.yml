@@ -5,9 +5,6 @@ on:
     branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
   pull_request:
 
-permissions:
-  contents: write
-
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -32,8 +29,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -44,22 +39,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Use free Vosk recognition on Android 6
-        if: github.ref == 'refs/heads/fix/vosk-wake-hardening'
-        shell: python
-        run: |
-          from pathlib import Path
-          p = Path('android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java')
-          s = p.read_text(encoding='utf-8')
-          if 'recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE);' in s:
-              print('Android 6 free Vosk mode already applied')
-          else:
-              old = '''                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());\n                    recognizer.setWords(true);'''
-              new = '''                    // Android 6: free recognition avoids constrained-grammar hallucinations.\n                    // VoskWakeGate performs exact/progression/final validation afterwards.\n                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE);\n                    recognizer.setWords(true);'''
-              if old not in s:
-                  raise SystemExit('Expected Android 6 recognizer block not found')
-              s = s.replace(old, new, 1)
-              p.write_text(s, encoding='utf-8')
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
@@ -67,19 +46,6 @@ jobs:
           ls -lh android/app/src/main/assets/vosk-es.zip
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
-      - name: Commit Android 6 free Vosk source
-        if: github.ref == 'refs/heads/fix/vosk-wake-hardening'
-        run: |
-          rm -f android/app/src/main/assets/vosk-es.zip
-          if git diff --quiet -- android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java; then
-            echo 'No source change to commit'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          git commit -m 'Use free Vosk recognition for Android 6 wake'
-          git push origin HEAD:fix/vosk-wake-hardening
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
