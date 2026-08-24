@@ -487,7 +487,9 @@ public class RemoteService extends Service implements RecognitionListener {
                     if (record == null) throw new IllegalStateException("No AudioRecord for wake");
 
                     wakeRecord = record;
-                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                    // Android 6: free recognition avoids constrained-grammar hallucinations.
+                    // VoskWakeGate performs exact/progression/final validation afterwards.
+                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE);
                     recognizer.setWords(true);
                     byte[] buffer = new byte[4096];
                     record.startRecording();
