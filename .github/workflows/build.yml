@@ -5,6 +5,9 @@ on:
     branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
   pull_request:
 
+permissions:
+  contents: write
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -29,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -39,6 +44,53 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+
+      - name: Apply Vosk wake hardening on experiment branch
+        if: github.ref == 'refs/heads/fix/vosk-wake-hardening'
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java')
+          src = p.read_text(encoding='utf-8')
+          if 'private final VoskWakeGate wakeGate = new VoskWakeGate();' in src:
+              print('Vosk wake hardening already applied')
+              raise SystemExit(0)
+
+          replacements = [
+              (
+                  '''    private long lastWakeMs;\n    private String wakeFirstWord = "";\n    private long wakeFirstWordMs;\n    private String lastWakeLogged = "";''',
+                  '''    private final VoskWakeGate wakeGate = new VoskWakeGate();\n    private String lastWakeLogged = "";'''
+              ),
+              (
+                  '''            AndroidDebugLog.log("Wake word changed -> " + wakeWord());\n            stopWakeCapture("wake_word_changed");''',
+                  '''            AndroidDebugLog.log("Wake word changed -> " + wakeWord());\n            wakeGate.reset();\n            stopWakeCapture("wake_word_changed");'''
+              ),
+              (
+                  '''                        lastWakeAudioMs = System.currentTimeMillis();\n                        lastWakeRms = pcmRms(buffer, read);\n                        boolean complete = recognizer.acceptWaveForm(buffer, read);\n                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult());''',
+                  '''                        lastWakeAudioMs = System.currentTimeMillis();\n                        lastWakeRms = pcmRms(buffer, read);\n                        wakeGate.observeAudio(lastWakeRms, lastWakeAudioMs);\n                        boolean complete = recognizer.acceptWaveForm(buffer, read);\n                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult(), complete);'''
+              ),
+              (
+                  '''        List<String> variants = new ArrayList<>();\n        variants.add(word);\n        String[] parts = word.split(" ");\n        if (parts.length == 2) { variants.add(parts[0]); variants.add(parts[1]); }\n        variants.add("[unk]");''',
+                  '''        List<String> variants = new ArrayList<>();\n        // Individual target words are not grammar alternatives. This prevents constrained-ASR\n        // hallucinations while partial prefixes of the complete phrase still remain observable.\n        variants.add(word);\n        variants.add("[unk]");'''
+              ),
+              (
+                  '''    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }\n    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }\n    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }''',
+                  '''    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, false); }\n    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }\n    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }'''
+              )
+          ]
+
+          for old, new in replacements:
+              if old not in src:
+                  raise SystemExit('Expected source block not found; refusing partial patch')
+              src = src.replace(old, new, 1)
+
+          start = src.index('    private void checkWake(String json) {')
+          end = src.index('    private void sendWakeEvent(String source) {', start)
+          replacement = '''    private void checkWake(String json, boolean isFinal) {\n        try {\n            JSONObject o = new JSONObject(json);\n            String text = normalize(o.optString("text", o.optString("partial", "")));\n            if (text.isEmpty()) {\n                if (isFinal) wakeGate.noteFinalSilence();\n                return;\n            }\n            if (!text.equals(lastWakeLogged)) {\n                lastWakeLogged = text;\n                AndroidDebugLog.log("Wake v2 heard: " + text + (isFinal ? " · final" : " · partial"));\n            }\n\n            int sensitivity = Math.max(0, Math.min(100, prefs().getInt("sensitivity", 60)));\n            VoskWakeGate.Decision decision = wakeGate.evaluate(\n                    text, wakeWord(), sensitivity, isFinal, wakeResultConfidence(o), wakeResultDurationMs(o),\n                    Build.VERSION.SDK_INT <= 23);\n            if (decision.accepted) {\n                AndroidDebugLog.log("Wake v2 CONFIRMED · " + decision.reason);\n                handler.post(new Runnable() { @Override public void run() { sendWakeEvent("voice"); } });\n            } else if (decision.loggable) {\n                AndroidDebugLog.log("Wake v2 rejected · " + decision.reason);\n            }\n        } catch (Exception e) { AndroidDebugLog.log("Wake v2 parse error: " + e); }\n    }\n\n    private static double wakeResultConfidence(JSONObject o) {\n        JSONArray words = o.optJSONArray("result");\n        if (words == null || words.length() == 0) return -1.0;\n        double sum = 0.0;\n        int count = 0;\n        for (int i = 0; i < words.length(); i++) {\n            JSONObject w = words.optJSONObject(i);\n            if (w != null && w.has("conf")) {\n                sum += w.optDouble("conf", 0.0);\n                count++;\n            }\n        }\n        return count == 0 ? -1.0 : sum / count;\n    }\n\n    private static long wakeResultDurationMs(JSONObject o) {\n        JSONArray words = o.optJSONArray("result");\n        if (words == null || words.length() == 0) return -1L;\n        JSONObject first = words.optJSONObject(0);\n        JSONObject last = words.optJSONObject(words.length() - 1);\n        if (first == null || last == null || !first.has("start") || !last.has("end")) return -1L;\n        double seconds = last.optDouble("end", 0.0) - first.optDouble("start", 0.0);\n        return seconds <= 0 ? -1L : Math.round(seconds * 1000.0);\n    }\n\n'''
+          src = src[:start] + replacement + src[end:]
+          p.write_text(src, encoding='utf-8')
+
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
@@ -46,6 +98,19 @@ jobs:
           ls -lh android/app/src/main/assets/vosk-es.zip
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
+      - name: Commit verified Vosk hardening
+        if: github.ref == 'refs/heads/fix/vosk-wake-hardening'
+        run: |
+          rm -f android/app/src/main/assets/vosk-es.zip
+          if git diff --quiet -- android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java; then
+            echo 'No source patch to commit'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          git commit -m 'Harden Vosk wake-word detection on Android 6'
+          git push origin HEAD:fix/vosk-wake-hardening
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
