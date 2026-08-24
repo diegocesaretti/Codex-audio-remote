@@ -31,6 +31,13 @@ final class VoskWakeGate {
     private static final long MIN_WAKE_DURATION_MS = 260L;
     private static final long MAX_WAKE_DURATION_MS = 2300L;
 
+    // Android 6 devices often expose a much quieter PCM level than modern phones. Keep the
+    // absolute floor intentionally low and let the adaptive noise-relative threshold do most of
+    // the filtering. Lexical, duration and stability gates remain independent protections.
+    private static final int MIN_REQUIRED_PEAK_RMS = 70;
+    private static final double LOW_SENSITIVITY_NOISE_FACTOR = 1.95;
+    private static final double HIGH_SENSITIVITY_NOISE_FACTOR = 1.35;
+
     private String candidateText = "";
     private int stableHits;
     private long candidateSinceMs;
@@ -60,7 +67,7 @@ final class VoskWakeGate {
         double observed = Math.min(rms, upwardClamp);
         double alpha = observed < noiseFloor ? 0.06 : 0.012;
         noiseFloor = (noiseFloor * (1.0 - alpha)) + (observed * alpha);
-        noiseFloor = Math.max(35.0, Math.min(3500.0, noiseFloor));
+        noiseFloor = Math.max(25.0, Math.min(3500.0, noiseFloor));
 
         if (rms >= peakRms || nowMs - peakRmsMs > AUDIO_WINDOW_MS) {
             peakRms = rms;
@@ -107,10 +114,14 @@ final class VoskWakeGate {
 
         if (requireAudioEvidence) {
             long peakAge = peakRmsMs <= 0 ? Long.MAX_VALUE : now - peakRmsMs;
-            double factor = 2.35 - (Math.max(0, Math.min(100, sensitivity)) * 0.0075);
-            int requiredPeak = (int)Math.max(120.0, noiseFloor * factor);
+            int clampedSensitivity = Math.max(0, Math.min(100, sensitivity));
+            double t = clampedSensitivity / 100.0;
+            double factor = LOW_SENSITIVITY_NOISE_FACTOR
+                    + ((HIGH_SENSITIVITY_NOISE_FACTOR - LOW_SENSITIVITY_NOISE_FACTOR) * t);
+            int requiredPeak = (int)Math.max(MIN_REQUIRED_PEAK_RMS, noiseFloor * factor);
             if (peakAge > AUDIO_WINDOW_MS || peakRms < requiredPeak) {
-                return Decision.reject("weak audio rms=" + peakRms + " need=" + requiredPeak + " floor=" + (int)noiseFloor, true);
+                return Decision.reject("weak audio rms=" + peakRms + " need=" + requiredPeak
+                        + " floor=" + (int)noiseFloor + " factor=" + String.format(Locale.US, "%.2f", factor), true);
             }
         }
 
