@@ -5,21 +5,30 @@ on:
     branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
   pull_request:
 
-permissions:
-  contents: write
-
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-x64-v2
+          path: dist/windows
+
   android:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: fix/vosk-wake-hardening
-          fetch-depth: 0
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -30,62 +39,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Wire Porcupine into RemoteService
-        shell: python
-        run: |
-          from pathlib import Path
-          p = Path('android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java')
-          s = p.read_text(encoding='utf-8')
-
-          if 'import ai.picovoice.porcupine.Porcupine;' not in s:
-              needle = 'import org.vosk.android.SpeechService;\n\n'
-              if needle not in s: raise SystemExit('SpeechService import anchor missing')
-              s = s.replace(needle, needle + 'import ai.picovoice.porcupine.Porcupine;\n\n', 1)
-
-          if 'private long porcupineRetryAfterMs;' not in s:
-              needle = '    private String lastWakeLogged = "";\n'
-              if needle not in s: raise SystemExit('wake field anchor missing')
-              s = s.replace(needle, needle + '    private long porcupineRetryAfterMs;\n', 1)
-
-          old = '''            AndroidDebugLog.log("Wake word changed -> " + wakeWord());\n            wakeGate.reset();'''
-          new = '''            AndroidDebugLog.log("Wake word changed -> " + wakeWord());\n            porcupineRetryAfterMs = 0L;\n            wakeGate.reset();'''
-          if old in s:
-              s = s.replace(old, new, 1)
-
-          old = '''    private void startWakeCaptureIfReady() {\n        if (!connected || !"idle".equals(serverState) || voskModel == null || destroyed) return;\n        if (wakeRunning.get() || speechService != null || isThreadAlive(wakeThread) || isThreadAlive(micThread)) return;\n\n        if (Build.VERSION.SDK_INT > 23) {'''
-          new = '''    private void startWakeCaptureIfReady() {\n        if (!connected || !"idle".equals(serverState) || destroyed) return;\n        if (wakeRunning.get() || speechService != null || isThreadAlive(wakeThread) || isThreadAlive(micThread)) return;\n\n        boolean porcupineSelected = PorcupineWakeSupport.isSelected(this);\n        boolean porcupineReady = porcupineSelected\n                && PorcupineWakeSupport.isConfigured(this)\n                && System.currentTimeMillis() >= porcupineRetryAfterMs;\n        if (porcupineReady) {\n            startPorcupineWakeCapture();\n            return;\n        }\n\n        // Safe fallback: if Porcupine is selected but has no valid key/model (or recently failed),\n        // keep the satellite usable with Vosk until Porcupine is prepared again.\n        if (voskModel == null) return;\n\n        if (Build.VERSION.SDK_INT > 23) {'''
-          if old not in s and 'boolean porcupineReady = porcupineSelected' not in s:
-              raise SystemExit('startWakeCaptureIfReady anchor missing')
-          if old in s:
-              s = s.replace(old, new, 1)
-
-          if 'private void startPorcupineWakeCapture()' not in s:
-              anchor = '    private synchronized void stopWakeCapture(String reason) {\n'
-              if anchor not in s: raise SystemExit('stopWakeCapture anchor missing')
-              method = '''    private void startPorcupineWakeCapture() {\n        if (!wakeRunning.compareAndSet(false, true)) return;\n        lastWakeAudioMs = System.currentTimeMillis();\n        wakeThread = new Thread(new Runnable() {\n            @Override public void run() {\n                AudioRecord record = null;\n                Porcupine porcupine = null;\n                try {\n                    porcupine = PorcupineWakeSupport.build(RemoteService.this);\n                    porcupineRetryAfterMs = 0L;\n                    int sampleRate = porcupine.getSampleRate();\n                    int frameLength = porcupine.getFrameLength();\n                    int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);\n                    int frameBytes = frameLength * 2;\n                    int bufferBytes = Math.max(min > 0 ? min * 2 : frameBytes * 4, frameBytes * 4);\n                    int[] sources = new int[] {\n                            MediaRecorder.AudioSource.DEFAULT,\n                            MediaRecorder.AudioSource.MIC,\n                            MediaRecorder.AudioSource.VOICE_RECOGNITION,\n                            MediaRecorder.AudioSource.CAMCORDER\n                    };\n                    int source = -1;\n                    for (int candidate : sources) {\n                        record = createCapture(sampleRate, bufferBytes, candidate);\n                        if (record != null) { source = candidate; break; }\n                    }\n                    if (record == null) throw new IllegalStateException("No AudioRecord for Porcupine wake");\n\n                    wakeRecord = record;\n                    short[] frame = new short[frameLength];\n                    int filled = 0;\n                    record.startRecording();\n                    AndroidDebugLog.log("Porcupine ARMED · v=" + porcupine.getVersion()\n                            + " · source=" + source + " · rate=" + sampleRate\n                            + " · frame=" + frameLength + " · sensitivity="\n                            + String.format(Locale.US, "%.2f", PorcupineWakeSupport.sensitivity(RemoteService.this))\n                            + " · word=" + wakeWord());\n\n                    while (wakeRunning.get() && connected && "idle".equals(serverState) && !destroyed) {\n                        int read = record.read(frame, filled, frame.length - filled);\n                        if (read <= 0) continue;\n\n                        lastWakeAudioMs = System.currentTimeMillis();\n                        long sumSquares = 0L;\n                        for (int i = filled; i < filled + read; i++) {\n                            long sample = frame[i];\n                            sumSquares += sample * sample;\n                        }\n                        lastWakeRms = read > 0 ? (int)Math.sqrt(sumSquares / (double)read) : 0;\n                        filled += read;\n                        if (filled < frame.length) continue;\n\n                        int keywordIndex = porcupine.process(frame);\n                        filled = 0;\n                        if (keywordIndex >= 0) {\n                            AndroidDebugLog.log("Porcupine WAKE CONFIRMED · index=" + keywordIndex\n                                    + " · rms=" + lastWakeRms);\n                            handler.post(new Runnable() {\n                                @Override public void run() { sendWakeEvent("porcupine"); }\n                            });\n                            break;\n                        }\n                    }\n                } catch (Exception e) {\n                    porcupineRetryAfterMs = System.currentTimeMillis() + 30000L;\n                    if (wakeRunning.get()) AndroidDebugLog.log("Porcupine wake error -> Vosk fallback for 30s: " + e);\n                } finally {\n                    if (record != null) {\n                        try { record.stop(); } catch (Exception ignored) { }\n                        try { record.release(); } catch (Exception ignored) { }\n                    }\n                    if (porcupine != null) try { porcupine.delete(); } catch (Exception ignored) { }\n                    wakeRecord = null;\n                    wakeRunning.set(false);\n                    wakeThread = null;\n                    AndroidDebugLog.log("Porcupine RELEASED");\n                    handler.postDelayed(new Runnable() {\n                        @Override public void run() { reconcileAudioPolicy(); broadcastStatus(); }\n                    }, 120L);\n                }\n            }\n        }, "PorcupineWake");\n        wakeThread.setPriority(Thread.NORM_PRIORITY + 1);\n        wakeThread.start();\n        broadcastStatus();\n    }\n\n'''
-              s = s.replace(anchor, method + anchor, 1)
-
-          p.write_text(s, encoding='utf-8')
-      - name: Bundle wake models
+      - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
           curl -L --fail --retry 3 -o android/app/src/main/assets/vosk-es.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+          ls -lh android/app/src/main/assets/vosk-es.zip
+      - name: Bundle Porcupine Spanish model
+        run: |
           curl -L --fail --retry 3 -o android/app/src/main/assets/porcupine_params_es.pv https://raw.githubusercontent.com/Picovoice/porcupine/master/lib/common/porcupine_params_es.pv
-          ls -lh android/app/src/main/assets/vosk-es.zip android/app/src/main/assets/porcupine_params_es.pv
+          ls -lh android/app/src/main/assets/porcupine_params_es.pv
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
-      - name: Commit Porcupine runtime wiring
-        run: |
-          rm -f android/app/src/main/assets/vosk-es.zip android/app/src/main/assets/porcupine_params_es.pv
-          if git diff --quiet -- android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java; then
-            echo 'No runtime source change to commit'
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          git commit -m 'Use Porcupine as primary Android wake engine'
-          git push origin HEAD:fix/vosk-wake-hardening
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
