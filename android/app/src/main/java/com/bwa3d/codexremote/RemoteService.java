@@ -101,9 +101,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private AudioRecord wakeRecord;
     private long lastWakeAudioMs;
     private int lastWakeRms;
-    private long lastWakeMs;
-    private String wakeFirstWord = "";
-    private long wakeFirstWordMs;
+    private final VoskWakeGate wakeGate = new VoskWakeGate();
     private String lastWakeLogged = "";
 
     private Thread micThread;
@@ -120,6 +118,7 @@ public class RemoteService extends Service implements RecognitionListener {
     private final BroadcastReceiver wakeWordReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             AndroidDebugLog.log("Wake word changed -> " + wakeWord());
+            wakeGate.reset();
             stopWakeCapture("wake_word_changed");
             handler.postDelayed(RemoteService.this::reconcileAudioPolicy, 180);
         }
@@ -500,8 +499,9 @@ public class RemoteService extends Service implements RecognitionListener {
                         if (read <= 0) continue;
                         lastWakeAudioMs = System.currentTimeMillis();
                         lastWakeRms = pcmRms(buffer, read);
+                        wakeGate.observeAudio(lastWakeRms, lastWakeAudioMs);
                         boolean complete = recognizer.acceptWaveForm(buffer, read);
-                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult());
+                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult(), complete);
                     }
                 } catch (Exception e) {
                     if (wakeRunning.get()) AndroidDebugLog.log("Wake v2 capture error: " + e);
@@ -543,35 +543,55 @@ public class RemoteService extends Service implements RecognitionListener {
         if (thread != null) thread.interrupt();
     }
 
-    private void checkWake(String json) {
+    private void checkWake(String json, boolean isFinal) {
         try {
             JSONObject o = new JSONObject(json);
             String text = normalize(o.optString("text", o.optString("partial", "")));
-            if (text.isEmpty()) return;
+            if (text.isEmpty()) {
+                if (isFinal) wakeGate.noteFinalSilence();
+                return;
+            }
             if (!text.equals(lastWakeLogged)) {
                 lastWakeLogged = text;
-                AndroidDebugLog.log("Wake v2 heard: " + text);
+                AndroidDebugLog.log("Wake v2 heard: " + text + (isFinal ? " · final" : " · partial"));
             }
 
-            int sensitivity = prefs().getInt("sensitivity", 60);
-            String target = wakeWord();
-            boolean match = wakeMatches(text, sensitivity, target);
-            long now = System.currentTimeMillis();
-            String[] parts = target.split(" ");
-            if (!match && parts.length == 2) {
-                if (text.equals(parts[0])) {
-                    wakeFirstWord = parts[0];
-                    wakeFirstWordMs = now;
-                } else if (text.equals(parts[1]) && wakeFirstWord.equals(parts[0]) && now - wakeFirstWordMs < 2200L) {
-                    match = true;
-                }
-            }
-
-            if (match && now - lastWakeMs > 2500L) {
-                lastWakeMs = now;
+            int sensitivity = Math.max(0, Math.min(100, prefs().getInt("sensitivity", 60)));
+            VoskWakeGate.Decision decision = wakeGate.evaluate(
+                    text, wakeWord(), sensitivity, isFinal, wakeResultConfidence(o), wakeResultDurationMs(o),
+                    Build.VERSION.SDK_INT <= 23);
+            if (decision.accepted) {
+                AndroidDebugLog.log("Wake v2 CONFIRMED · " + decision.reason);
                 handler.post(new Runnable() { @Override public void run() { sendWakeEvent("voice"); } });
+            } else if (decision.loggable) {
+                AndroidDebugLog.log("Wake v2 rejected · " + decision.reason);
             }
         } catch (Exception e) { AndroidDebugLog.log("Wake v2 parse error: " + e); }
+    }
+
+    private static double wakeResultConfidence(JSONObject o) {
+        JSONArray words = o.optJSONArray("result");
+        if (words == null || words.length() == 0) return -1.0;
+        double sum = 0.0;
+        int count = 0;
+        for (int i = 0; i < words.length(); i++) {
+            JSONObject w = words.optJSONObject(i);
+            if (w != null && w.has("conf")) {
+                sum += w.optDouble("conf", 0.0);
+                count++;
+            }
+        }
+        return count == 0 ? -1.0 : sum / count;
+    }
+
+    private static long wakeResultDurationMs(JSONObject o) {
+        JSONArray words = o.optJSONArray("result");
+        if (words == null || words.length() == 0) return -1L;
+        JSONObject first = words.optJSONObject(0);
+        JSONObject last = words.optJSONObject(words.length() - 1);
+        if (first == null || last == null || !first.has("start") || !last.has("end")) return -1L;
+        double seconds = last.optDouble("end", 0.0) - first.optDouble("start", 0.0);
+        return seconds <= 0 ? -1L : Math.round(seconds * 1000.0);
     }
 
     private void sendWakeEvent(String source) {
@@ -847,9 +867,9 @@ public class RemoteService extends Service implements RecognitionListener {
     private String wakeGrammar() {
         String word = wakeWord();
         List<String> variants = new ArrayList<>();
+        // Individual target words are not grammar alternatives. That reduces constrained-ASR
+        // hallucinations while Vosk can still expose them as partial prefixes of the full phrase.
         variants.add(word);
-        String[] parts = word.split(" ");
-        if (parts.length == 2) { variants.add(parts[0]); variants.add(parts[1]); }
         variants.add("[unk]");
         StringBuilder b = new StringBuilder("[");
         for (int i = 0; i < variants.size(); i++) {
@@ -1056,9 +1076,9 @@ public class RemoteService extends Service implements RecognitionListener {
         });
     }
 
-    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
-    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
-    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
+    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, false); }
+    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }
+    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }
     @Override public void onError(Exception exception) {
         AndroidDebugLog.log("Wake SpeechService callback error: " + exception);
         wakeRunning.set(false);
