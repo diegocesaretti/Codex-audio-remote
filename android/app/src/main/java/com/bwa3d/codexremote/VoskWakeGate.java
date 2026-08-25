@@ -50,8 +50,10 @@ final class VoskWakeGate {
         long now = System.currentTimeMillis();
         Config c = Config.load(sensitivity);
         text = clean(text); target = clean(target);
-        if (text.isEmpty() || target.isEmpty()) return Decision.reject("empty", false);
-        if (now - lastAcceptedMs < c.cooldownMs) return Decision.reject("cooldown", false);
+        if (text.isEmpty() || target.isEmpty())
+            return report(Decision.reject("empty", false), now, text, target, isFinal, confidence, resultDurationMs);
+        if (now - lastAcceptedMs < c.cooldownMs)
+            return report(Decision.reject("cooldown", false), now, text, target, isFinal, confidence, resultDurationMs);
         if (lastCandidateMs > 0 && now - lastCandidateMs > c.candidateTimeoutMs) clearCandidate();
 
         String[] targetParts = target.split(" ");
@@ -62,14 +64,16 @@ final class VoskWakeGate {
         if (!exact && !validPrefix) {
             boolean related = sharesWakeToken(text, targetParts);
             clearCandidate();
-            return Decision.reject("lexical mismatch: " + text, related);
+            return report(Decision.reject("lexical mismatch: " + text, related), now, text, target,
+                    isFinal, confidence, resultDurationMs);
         }
 
         if (validPrefix) {
             if (!prefixSeen) { prefixSeen = true; prefixSeenMs = now; candidateSinceMs = now; }
             lastCandidateMs = now;
             if (!text.equals(candidateText)) { candidateText = text; stableHits = 1; } else stableHits++;
-            return Decision.reject("prefix " + text + " · hits=" + stableHits, false);
+            return report(Decision.reject("prefix " + text + " · hits=" + stableHits, false), now, text,
+                    target, isFinal, confidence, resultDurationMs);
         }
 
         if (!text.equals(candidateText)) {
@@ -80,36 +84,43 @@ final class VoskWakeGate {
 
         if (!isFinal) {
             exactPartialHits++;
-            if (c.requireFinal) return Decision.reject("exact partial evidence · hits=" + exactPartialHits, false);
+            if (c.requireFinal)
+                return report(Decision.reject("exact partial evidence · hits=" + exactPartialHits, false), now,
+                        text, target, false, confidence, resultDurationMs);
         }
 
         if (multiWord && c.requirePrefix) {
             if (!prefixSeen) {
                 clearCandidate();
-                return Decision.reject((isFinal ? "final" : "partial") + " exact without prefix progression", true);
+                return report(Decision.reject((isFinal ? "final" : "partial") + " exact without prefix progression", true),
+                        now, text, target, isFinal, confidence, resultDurationMs);
             }
             long age = now - prefixSeenMs;
             if (age < c.prefixMinMs || age > c.prefixMaxMs) {
                 clearCandidate();
-                return Decision.reject("implausible prefix timing " + age + "ms", true);
+                return report(Decision.reject("implausible prefix timing " + age + "ms", true), now, text,
+                        target, isFinal, confidence, resultDurationMs);
             }
         }
 
         int requiredPartials = c.advanced ? c.minExactPartials : (multiWord ? 0 : 3);
         if (exactPartialHits < requiredPartials) {
             if (isFinal) clearCandidate();
-            return Decision.reject("exact partials " + exactPartialHits + " < " + requiredPartials, true);
+            return report(Decision.reject("exact partials " + exactPartialHits + " < " + requiredPartials, true),
+                    now, text, target, isFinal, confidence, resultDurationMs);
         }
 
         long observedDuration = candidateSinceMs > 0 ? now - candidateSinceMs : -1L;
         long duration = resultDurationMs > 0 ? resultDurationMs : observedDuration;
         if (duration > 0 && duration < c.minDurationMs) {
             clearCandidate();
-            return Decision.reject("too short " + duration + "ms < " + c.minDurationMs + "ms", true);
+            return report(Decision.reject("too short " + duration + "ms < " + c.minDurationMs + "ms", true),
+                    now, text, target, isFinal, confidence, duration);
         }
         if (duration > c.maxDurationMs) {
             clearCandidate();
-            return Decision.reject("too long " + duration + "ms > " + c.maxDurationMs + "ms", true);
+            return report(Decision.reject("too long " + duration + "ms > " + c.maxDurationMs + "ms", true),
+                    now, text, target, isFinal, confidence, duration);
         }
 
         if (requireAudioEvidence && c.audioEvidence) {
@@ -118,21 +129,31 @@ final class VoskWakeGate {
             int requiredPeak = Math.max(c.minRms, adaptive);
             if (peakAge > c.audioWindowMs || peakRms < requiredPeak) {
                 clearCandidate();
-                return Decision.reject("weak audio rms=" + peakRms + " need=" + requiredPeak
-                        + " floor=" + (int)noiseFloor + " factor=" + String.format(Locale.US, "%.2f", c.noiseFactor), true);
+                return report(Decision.reject("weak audio rms=" + peakRms + " need=" + requiredPeak
+                        + " floor=" + (int)noiseFloor + " factor=" + String.format(Locale.US, "%.2f", c.noiseFactor), true),
+                        now, text, target, isFinal, confidence, duration);
             }
         }
 
         if (confidence >= 0.0 && confidence < c.minConfidence) {
             clearCandidate();
-            return Decision.reject(String.format(Locale.US, "low confidence %.2f < %.2f", confidence, c.minConfidence), true);
+            return report(Decision.reject(String.format(Locale.US, "low confidence %.2f < %.2f", confidence, c.minConfidence), true),
+                    now, text, target, isFinal, confidence, duration);
         }
 
-        return accept(now, (isFinal ? "final" : "partial") + " exact"
+        Decision decision = accept(now, (isFinal ? "final" : "partial") + " exact"
                 + (c.requirePrefix ? " + progression" : "")
                 + " · partials=" + exactPartialHits + " · rms=" + peakRms
                 + " · floor=" + (int)noiseFloor + confidenceSuffix(confidence)
                 + (c.advanced ? " · advanced" : ""));
+        return report(decision, now, text, target, isFinal, confidence, duration);
+    }
+
+    private Decision report(Decision decision, long now, String text, String target, boolean isFinal,
+                            double confidence, long durationMs) {
+        VoskDetectionBus.publish(new VoskDetectionBus.Event(now, text, target, isFinal, confidence,
+                durationMs, peakRms, (int)Math.round(noiseFloor), decision.accepted, decision.reason));
+        return decision;
     }
 
     private Decision accept(long now, String reason) { lastAcceptedMs = now; clearCandidate(); return Decision.accept(reason); }
