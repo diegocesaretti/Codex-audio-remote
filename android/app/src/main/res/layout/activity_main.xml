@@ -45,6 +45,9 @@
             android:layout_height="wrap_content" />
         <TextView android:id="@+id/sensitivityText" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Sensibilidad wake: 60%" />
         <SeekBar android:id="@+id/sensitivitySeek" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="100" android:progress="60" />
+        <com.bwa3d.codexremote.VoskWakeTuningView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
         <com.bwa3d.codexremote.WakeScreenCheckBox android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Encender pantalla al detectar wake word" />
 
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Micrófono de conversación" android:textStyle="bold" />
