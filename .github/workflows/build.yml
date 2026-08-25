@@ -44,10 +44,14 @@ jobs:
           mkdir -p android/app/src/main/assets
           curl -L --fail --retry 3 -o android/app/src/main/assets/vosk-es.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
           ls -lh android/app/src/main/assets/vosk-es.zip
+      - name: Bundle Porcupine Spanish model
+        run: |
+          curl -L --fail --retry 3 -o android/app/src/main/assets/porcupine_params_es.pv https://raw.githubusercontent.com/Picovoice/porcupine/master/lib/common/porcupine_params_es.pv
+          ls -lh android/app/src/main/assets/porcupine_params_es.pv
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexAudioRemote-Android-v2
+          name: CodexAudioRemote-Android-v2-porcupine
           path: android/app/build/outputs/apk/debug/app-debug.apk

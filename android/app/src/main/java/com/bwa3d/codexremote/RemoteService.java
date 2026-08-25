@@ -25,6 +25,8 @@ import org.vosk.Recognizer;
 import org.vosk.android.RecognitionListener;
 import org.vosk.android.SpeechService;
 
+import ai.picovoice.porcupine.Porcupine;
+
 import java.io.File;
 import java.text.Normalizer;
 import java.util.ArrayList;
@@ -101,10 +103,9 @@ public class RemoteService extends Service implements RecognitionListener {
     private AudioRecord wakeRecord;
     private long lastWakeAudioMs;
     private int lastWakeRms;
-    private long lastWakeMs;
-    private String wakeFirstWord = "";
-    private long wakeFirstWordMs;
+    private final VoskWakeGate wakeGate = new VoskWakeGate();
     private String lastWakeLogged = "";
+    private long porcupineRetryAfterMs;
 
     private Thread micThread;
     private AudioRecord micRecord;
@@ -120,6 +121,8 @@ public class RemoteService extends Service implements RecognitionListener {
     private final BroadcastReceiver wakeWordReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
             AndroidDebugLog.log("Wake word changed -> " + wakeWord());
+            porcupineRetryAfterMs = 0L;
+            wakeGate.reset();
             stopWakeCapture("wake_word_changed");
             handler.postDelayed(RemoteService.this::reconcileAudioPolicy, 180);
         }
@@ -258,7 +261,6 @@ public class RemoteService extends Service implements RecognitionListener {
                     AndroidDebugLog.log("WS v2 OPEN · g=" + generation);
                     sendText("{\"type\":\"hello\",\"protocol\":2,\"name\":\"Android satellite\"}");
                     sendText("{\"type\":\"sync\"}");
-                    // Wait for the authoritative state snapshot before opening any microphone.
                     broadcastStatus();
                 }
 
@@ -369,7 +371,6 @@ public class RemoteService extends Service implements RecognitionListener {
         broadcastStatus();
     }
 
-    /** The only place that decides which local audio resources may exist. */
     private synchronized void reconcileAudioPolicy() {
         if (destroyed) return;
 
@@ -416,7 +417,6 @@ public class RemoteService extends Service implements RecognitionListener {
             return;
         }
 
-        // ENDING
         stopWakeCapture("policy_ending");
         stopConversationMic("policy_ending");
         stopSpeaker();
@@ -447,12 +447,26 @@ public class RemoteService extends Service implements RecognitionListener {
     }
 
     private void startWakeCaptureIfReady() {
-        if (!connected || !"idle".equals(serverState) || voskModel == null || destroyed) return;
+        if (!connected || !"idle".equals(serverState) || destroyed) return;
         if (wakeRunning.get() || speechService != null || isThreadAlive(wakeThread) || isThreadAlive(micThread)) return;
+
+        boolean porcupineSelected = PorcupineWakeSupport.isSelected(this);
+        boolean porcupineReady = porcupineSelected
+                && PorcupineWakeSupport.isConfigured(this)
+                && System.currentTimeMillis() >= porcupineRetryAfterMs;
+        if (porcupineReady) {
+            startPorcupineWakeCapture();
+            return;
+        }
+
+        // Safe fallback: if Porcupine is selected but has no valid key/model (or recently failed),
+        // keep the satellite usable with Vosk until Porcupine is prepared again.
+        if (voskModel == null) return;
 
         if (Build.VERSION.SDK_INT > 23) {
             try {
                 Recognizer recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                recognizer.setWords(true);
                 speechService = new SpeechService(recognizer, WAKE_SAMPLE_RATE);
                 wakeRunning.set(true);
                 lastWakeAudioMs = System.currentTimeMillis();
@@ -490,7 +504,10 @@ public class RemoteService extends Service implements RecognitionListener {
                     if (record == null) throw new IllegalStateException("No AudioRecord for wake");
 
                     wakeRecord = record;
-                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE, wakeGrammar());
+                    // Android 6: free recognition avoids constrained-grammar hallucinations.
+                    // VoskWakeGate performs exact/progression/final validation afterwards.
+                    recognizer = new Recognizer(voskModel, WAKE_SAMPLE_RATE);
+                    recognizer.setWords(true);
                     byte[] buffer = new byte[4096];
                     record.startRecording();
                     AndroidDebugLog.log("Wake v2 ARMED · source=" + source + " · word=" + wakeWord());
@@ -500,8 +517,9 @@ public class RemoteService extends Service implements RecognitionListener {
                         if (read <= 0) continue;
                         lastWakeAudioMs = System.currentTimeMillis();
                         lastWakeRms = pcmRms(buffer, read);
+                        wakeGate.observeAudio(lastWakeRms, lastWakeAudioMs);
                         boolean complete = recognizer.acceptWaveForm(buffer, read);
-                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult());
+                        checkWake(complete ? recognizer.getResult() : recognizer.getPartialResult(), complete);
                     }
                 } catch (Exception e) {
                     if (wakeRunning.get()) AndroidDebugLog.log("Wake v2 capture error: " + e);
@@ -524,7 +542,95 @@ public class RemoteService extends Service implements RecognitionListener {
         broadcastStatus();
     }
 
+    private void startPorcupineWakeCapture() {
+        if (!wakeRunning.compareAndSet(false, true)) return;
+        lastWakeAudioMs = System.currentTimeMillis();
+        wakeThread = new Thread(new Runnable() {
+            @Override public void run() {
+                AudioRecord record = null;
+                Porcupine porcupine = null;
+                try {
+                    porcupine = PorcupineWakeSupport.build(RemoteService.this);
+                    porcupineRetryAfterMs = 0L;
+                    int sampleRate = porcupine.getSampleRate();
+                    int frameLength = porcupine.getFrameLength();
+                    int min = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                    int frameBytes = frameLength * 2;
+                    int bufferBytes = Math.max(min > 0 ? min * 2 : frameBytes * 4, frameBytes * 4);
+                    int[] sources = new int[] {
+                            MediaRecorder.AudioSource.DEFAULT,
+                            MediaRecorder.AudioSource.MIC,
+                            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                            MediaRecorder.AudioSource.CAMCORDER
+                    };
+                    int source = -1;
+                    for (int candidate : sources) {
+                        record = createCapture(sampleRate, bufferBytes, candidate);
+                        if (record != null) { source = candidate; break; }
+                    }
+                    if (record == null) throw new IllegalStateException("No AudioRecord for Porcupine wake");
+
+                    wakeRecord = record;
+                    short[] frame = new short[frameLength];
+                    int filled = 0;
+                    record.startRecording();
+                    AndroidDebugLog.log("Porcupine ARMED · v=" + porcupine.getVersion()
+                            + " · source=" + source + " · rate=" + sampleRate
+                            + " · frame=" + frameLength + " · sensitivity="
+                            + String.format(Locale.US, "%.2f", PorcupineWakeSupport.sensitivity(RemoteService.this))
+                            + " · word=" + wakeWord());
+
+                    while (wakeRunning.get() && connected && "idle".equals(serverState) && !destroyed) {
+                        int read = record.read(frame, filled, frame.length - filled);
+                        if (read <= 0) continue;
+
+                        lastWakeAudioMs = System.currentTimeMillis();
+                        long sumSquares = 0L;
+                        for (int i = filled; i < filled + read; i++) {
+                            long sample = frame[i];
+                            sumSquares += sample * sample;
+                        }
+                        lastWakeRms = read > 0 ? (int)Math.sqrt(sumSquares / (double)read) : 0;
+                        filled += read;
+                        if (filled < frame.length) continue;
+
+                        int keywordIndex = porcupine.process(frame);
+                        filled = 0;
+                        if (keywordIndex >= 0) {
+                            AndroidDebugLog.log("Porcupine WAKE CONFIRMED · index=" + keywordIndex
+                                    + " · rms=" + lastWakeRms);
+                            handler.post(new Runnable() {
+                                @Override public void run() { sendWakeEvent("porcupine"); }
+                            });
+                            break;
+                        }
+                    }
+                } catch (Exception e) {
+                    porcupineRetryAfterMs = System.currentTimeMillis() + 30000L;
+                    if (wakeRunning.get()) AndroidDebugLog.log("Porcupine wake error -> Vosk fallback for 30s: " + e);
+                } finally {
+                    if (record != null) {
+                        try { record.stop(); } catch (Exception ignored) { }
+                        try { record.release(); } catch (Exception ignored) { }
+                    }
+                    if (porcupine != null) try { porcupine.delete(); } catch (Exception ignored) { }
+                    wakeRecord = null;
+                    wakeRunning.set(false);
+                    wakeThread = null;
+                    AndroidDebugLog.log("Porcupine RELEASED");
+                    handler.postDelayed(new Runnable() {
+                        @Override public void run() { reconcileAudioPolicy(); broadcastStatus(); }
+                    }, 120L);
+                }
+            }
+        }, "PorcupineWake");
+        wakeThread.setPriority(Thread.NORM_PRIORITY + 1);
+        wakeThread.start();
+        broadcastStatus();
+    }
+
     private synchronized void stopWakeCapture(String reason) {
+        wakeGate.reset();
         if (Build.VERSION.SDK_INT > 23) {
             SpeechService service = speechService;
             speechService = null;
@@ -543,35 +649,55 @@ public class RemoteService extends Service implements RecognitionListener {
         if (thread != null) thread.interrupt();
     }
 
-    private void checkWake(String json) {
+    private void checkWake(String json, boolean isFinal) {
         try {
             JSONObject o = new JSONObject(json);
             String text = normalize(o.optString("text", o.optString("partial", "")));
-            if (text.isEmpty()) return;
+            if (text.isEmpty()) {
+                if (isFinal) wakeGate.noteFinalSilence();
+                return;
+            }
             if (!text.equals(lastWakeLogged)) {
                 lastWakeLogged = text;
-                AndroidDebugLog.log("Wake v2 heard: " + text);
+                AndroidDebugLog.log("Wake v2 heard: " + text + (isFinal ? " · final" : " · partial"));
             }
 
-            int sensitivity = prefs().getInt("sensitivity", 60);
-            String target = wakeWord();
-            boolean match = wakeMatches(text, sensitivity, target);
-            long now = System.currentTimeMillis();
-            String[] parts = target.split(" ");
-            if (!match && parts.length == 2) {
-                if (text.equals(parts[0])) {
-                    wakeFirstWord = parts[0];
-                    wakeFirstWordMs = now;
-                } else if (text.equals(parts[1]) && wakeFirstWord.equals(parts[0]) && now - wakeFirstWordMs < 2200L) {
-                    match = true;
-                }
-            }
-
-            if (match && now - lastWakeMs > 2500L) {
-                lastWakeMs = now;
+            int sensitivity = Math.max(0, Math.min(100, prefs().getInt("sensitivity", 60)));
+            VoskWakeGate.Decision decision = wakeGate.evaluate(
+                    text, wakeWord(), sensitivity, isFinal, wakeResultConfidence(o), wakeResultDurationMs(o),
+                    Build.VERSION.SDK_INT <= 23);
+            if (decision.accepted) {
+                AndroidDebugLog.log("Wake v2 CONFIRMED · " + decision.reason);
                 handler.post(new Runnable() { @Override public void run() { sendWakeEvent("voice"); } });
+            } else if (decision.loggable) {
+                AndroidDebugLog.log("Wake v2 rejected · " + decision.reason);
             }
         } catch (Exception e) { AndroidDebugLog.log("Wake v2 parse error: " + e); }
+    }
+
+    private static double wakeResultConfidence(JSONObject o) {
+        JSONArray words = o.optJSONArray("result");
+        if (words == null || words.length() == 0) return -1.0;
+        double sum = 0.0;
+        int count = 0;
+        for (int i = 0; i < words.length(); i++) {
+            JSONObject w = words.optJSONObject(i);
+            if (w != null && w.has("conf")) {
+                sum += w.optDouble("conf", 0.0);
+                count++;
+            }
+        }
+        return count == 0 ? -1.0 : sum / count;
+    }
+
+    private static long wakeResultDurationMs(JSONObject o) {
+        JSONArray words = o.optJSONArray("result");
+        if (words == null || words.length() == 0) return -1L;
+        JSONObject first = words.optJSONObject(0);
+        JSONObject last = words.optJSONObject(words.length() - 1);
+        if (first == null || last == null || !first.has("start") || !last.has("end")) return -1L;
+        double seconds = last.optDouble("end", 0.0) - first.optDouble("start", 0.0);
+        return seconds <= 0 ? -1L : Math.round(seconds * 1000.0);
     }
 
     private void sendWakeEvent(String source) {
@@ -582,8 +708,6 @@ public class RemoteService extends Service implements RecognitionListener {
         wakeScreenIfEnabled();
         boolean sent = sendText("{\"type\":\"event\",\"event\":\"wake\",\"source\":\"" + jsonEscape(source) + "\"}");
         AndroidDebugLog.log("Wake v2 event sent=" + sent);
-        // Do not mutate local session state. The wake microphone remains governed by IDLE until
-        // Windows acknowledges with an ACTIVATING state snapshot.
     }
 
     private void sendEndEvent(String reason) {
@@ -592,7 +716,6 @@ public class RemoteService extends Service implements RecognitionListener {
         String payload = "{\"type\":\"event\",\"event\":\"end\",\"reason\":\"" + jsonEscape(reason) + "\",\"sessionId\":\"" + jsonEscape(sessionId) + "\"}";
         boolean sent = sendText(payload);
         AndroidDebugLog.log("End v2 event · reason=" + reason + " · sent=" + sent);
-        // Again, wait for authoritative ENDING/IDLE before changing audio policy.
     }
 
     private void startConversationMicIfReady() {
@@ -848,8 +971,6 @@ public class RemoteService extends Service implements RecognitionListener {
         String word = wakeWord();
         List<String> variants = new ArrayList<>();
         variants.add(word);
-        String[] parts = word.split(" ");
-        if (parts.length == 2) { variants.add(parts[0]); variants.add(parts[1]); }
         variants.add("[unk]");
         StringBuilder b = new StringBuilder("[");
         for (int i = 0; i < variants.size(); i++) {
@@ -857,14 +978,6 @@ public class RemoteService extends Service implements RecognitionListener {
             b.append('"').append(variants.get(i).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
         }
         return b.append(']').toString();
-    }
-
-    private static boolean wakeMatches(String text, int sensitivity, String target) {
-        if (text.equals(target) || text.contains(target)) return true;
-        int distance = levenshtein(text, target);
-        if (sensitivity >= 80) return distance <= Math.max(2, target.length() / 5);
-        if (sensitivity >= 45) return distance <= Math.max(1, target.length() / 8);
-        return false;
     }
 
     private List<String> endPhrases() {
@@ -950,19 +1063,6 @@ public class RemoteService extends Service implements RecognitionListener {
                 .trim()
                 .replaceAll("\\s+", " ");
         return s;
-    }
-
-    private static int levenshtein(String a, String b) {
-        int[] prev = new int[b.length() + 1];
-        for (int j = 0; j <= b.length(); j++) prev[j] = j;
-        for (int i = 1; i <= a.length(); i++) {
-            int[] cur = new int[b.length() + 1];
-            cur[0] = i;
-            for (int j = 1; j <= b.length(); j++)
-                cur[j] = Math.min(Math.min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1));
-            prev = cur;
-        }
-        return prev[b.length()];
     }
 
     private static String jsonEscape(String value) {
@@ -1056,9 +1156,9 @@ public class RemoteService extends Service implements RecognitionListener {
         });
     }
 
-    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
-    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
-    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis); }
+    @Override public void onPartialResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, false); }
+    @Override public void onResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }
+    @Override public void onFinalResult(String hypothesis) { lastWakeAudioMs = System.currentTimeMillis(); checkWake(hypothesis, true); }
     @Override public void onError(Exception exception) {
         AndroidDebugLog.log("Wake SpeechService callback error: " + exception);
         wakeRunning.set(false);
