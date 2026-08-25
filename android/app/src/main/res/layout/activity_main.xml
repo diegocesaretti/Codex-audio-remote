@@ -48,6 +48,9 @@
         <com.bwa3d.codexremote.VoskWakeTuningView
             android:layout_width="match_parent"
             android:layout_height="wrap_content" />
+        <com.bwa3d.codexremote.VoskLiveDetectionsView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
         <com.bwa3d.codexremote.WakeScreenCheckBox android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Encender pantalla al detectar wake word" />
 
         <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="14dp" android:text="Micrófono de conversación" android:textStyle="bold" />
