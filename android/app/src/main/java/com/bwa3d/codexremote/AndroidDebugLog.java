@@ -13,12 +13,14 @@ public final class AndroidDebugLog {
     private static final Object LOCK = new Object();
     private static File logFile;
     private static boolean installed;
+    private static volatile Context appContext;
 
     private AndroidDebugLog() { }
 
     public static void install(Context context) {
+        if (context != null) appContext = context.getApplicationContext();
         synchronized (LOCK) {
-            if (logFile == null) {
+            if (logFile == null && context != null) {
                 File base = context.getExternalFilesDir(null);
                 if (base == null) base = context.getFilesDir();
                 File dir = new File(base, "logs");
@@ -36,6 +38,8 @@ public final class AndroidDebugLog {
             log("Logger installed");
         }
     }
+
+    static Context context() { return appContext; }
 
     public static void log(String message) {
         synchronized (LOCK) {
