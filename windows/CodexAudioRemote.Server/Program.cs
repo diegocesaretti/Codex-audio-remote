@@ -5,19 +5,28 @@ if (options.ListDevices)
     return;
 }
 
+using var homeAssistantCache = new HomeAssistantWebSocketCache();
+homeAssistantCache.Start();
+
 if (TrayController.VoiceBackend == TrayController.RealtimeV3Backend)
 {
     using var realtimeServer = new RealtimeSessionServer(options);
     Console.CancelKeyPress += (_, e) =>
     {
         e.Cancel = true;
+        homeAssistantCache.Dispose();
         realtimeServer.Dispose();
         Environment.Exit(0);
     };
-    AppDomain.CurrentDomain.ProcessExit += (_, _) => realtimeServer.Dispose();
+    AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+    {
+        homeAssistantCache.Dispose();
+        realtimeServer.Dispose();
+    };
 
-    Console.WriteLine("Codex Audio Remote · experimental Realtime V3 backend");
+    Console.WriteLine("Codex Audio Remote · experimental Realtime V3 + HA fast-path");
     Console.WriteLine("Auth: existing Codex ChatGPT OAuth login");
+    Console.WriteLine("HA context: persistent WebSocket cache -> realtime initialItems");
     await realtimeServer.RunAsync();
     return;
 }
@@ -31,12 +40,14 @@ using var homeAssistantApi = new HomeAssistantApiServer(server);
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
+    homeAssistantCache.Dispose();
     homeAssistantApi.Dispose();
     server.Dispose();
     Environment.Exit(0);
 };
 AppDomain.CurrentDomain.ProcessExit += (_, _) =>
 {
+    homeAssistantCache.Dispose();
     homeAssistantApi.Dispose();
     server.Dispose();
 };
