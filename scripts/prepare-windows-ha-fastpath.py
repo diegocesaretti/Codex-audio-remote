@@ -57,6 +57,79 @@ elif "Realtime thread/start ·" not in text:
     raise SystemExit("CodexRealtimeBridge thread/start anchor not found; refusing to patch an unexpected source version")
 
 # -----------------------------------------------------------------------------
+# Stock Codex WebRTC transport.
+#
+# Do NOT call chatgpt.com/backend-api/realtime/calls from the companion. That direct
+# compatibility path can be challenged by Cloudflare even with a valid Codex OAuth token.
+# The official app-server protocol accepts transport={type:'webrtc', sdp:<offer>} and
+# performs authenticated realtime call creation itself, then emits thread/realtime/sdp.
+# -----------------------------------------------------------------------------
+old_auth_comment = '''        // Ask Codex to refresh its own OAuth material first. We then reuse the refreshed local
+        // access token only for the one realtime/calls request that the current stock client cannot
+        // shape correctly for the backend.
+        await ReadAccountAsync(cancellationToken);
+'''
+new_auth_comment = '''        // Ask the official Codex app-server to refresh and own its OAuth material. The companion
+        // never POSTs directly to chatgpt.com; authenticated realtime call creation stays in Codex.
+        await ReadAccountAsync(cancellationToken);
+'''
+if old_auth_comment in text:
+    text = text.replace(old_auth_comment, new_auth_comment, 1)
+
+old_direct = '''        Console.WriteLine($"Starting direct OAuth WebRTC compatibility session · version={RealtimeVersion}");
+
+        // Create the media call ourselves with the backend-compatible AVAS session payload.
+        // This deliberately omits session.model. Then hand only the resulting call id to stock
+        // Codex, which officially supports attaching its sideband to an existing call.
+        var directCall = await directRealtimeCall.CreateAsync(offerSdp, cancellationToken);
+        await oauthWebRtcPeer.ApplyAnswerAsync(directCall.Sdp);
+        realtimeSdpApplied.TrySetResult(true);
+        Console.WriteLine("Codex Chromium WebRTC SDP answer applied · source=direct-call");
+
+        await RequestAsync("thread/realtime/start", new
+        {
+            threadId,
+            outputModality = "audio",
+            version = RealtimeVersion,
+            includeStartupContext = true,
+            transport = new
+            {
+                type = "existingCall",
+                callId = directCall.CallId
+            }
+        }, cancellationToken);
+'''
+
+new_direct = '''        Console.WriteLine($"Starting stock Codex WebRTC session · version={RealtimeVersion}");
+
+        // Official app-server owns authenticated call creation. We only supply the browser-generated
+        // offer SDP; Codex returns the answer through thread/realtime/sdp, handled below.
+        await RequestAsync("thread/realtime/start", new
+        {
+            threadId,
+            outputModality = "audio",
+            version = RealtimeVersion,
+            includeStartupContext = true,
+            transport = new
+            {
+                type = "webrtc",
+                sdp = offerSdp
+            }
+        }, cancellationToken);
+'''
+
+if old_direct in text:
+    text = text.replace(old_direct, new_direct, 1)
+elif "Starting stock Codex WebRTC session" not in text:
+    raise SystemExit("Direct realtime-call anchor not found; refusing to patch an unexpected source version")
+
+text = text.replace(
+    'throw new TimeoutException($"Codex realtime {RealtimeVersion} existingCall did not emit thread/realtime/started within 12 seconds.");',
+    'throw new TimeoutException($"Codex realtime {RealtimeVersion} WebRTC transport did not emit thread/realtime/started within 12 seconds.");',
+    1,
+)
+
+# -----------------------------------------------------------------------------
 # Official Codex locator.
 #
 # This intentionally mirrors the strategy that fixed the same Windows-launcher
@@ -280,4 +353,4 @@ elif "ResolveOfficialCodexCli()" not in text:
     raise SystemExit("CodexRealtimeBridge launcher anchor not found; refusing to patch an unexpected source version")
 
 path.write_text(text, encoding="utf-8")
-print("Prepared official Codex HA fast-path + Nexo-style Windows Codex discovery in", path)
+print("Prepared official Codex HA fast-path + stock WebRTC + Nexo-style Windows Codex discovery in", path)
