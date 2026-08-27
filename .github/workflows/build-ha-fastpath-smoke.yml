@@ -1,0 +1,26 @@
+name: HA Realtime FastPath Smoke
+
+on:
+  push:
+    branches:
+      - exp/ha-realtime-fastpath
+
+permissions:
+  contents: read
+
+jobs:
+  windows-companion:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Publish Windows companion only
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+      - name: Upload smoke companion
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-HA-Realtime-FastPath-Smoke
+          path: dist/windows
+          if-no-files-found: error
