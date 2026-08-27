@@ -1,0 +1,91 @@
+name: build-ha-context-working-v3
+
+on:
+  push:
+    branches: [ fix/ha-context-on-working-v3 ]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # IMPORTANT: these are the exact transforms from the previously working
+      # official V3 pipeline. HA context is applied only after all of them.
+      - name: Apply captured official Codex realtime flow
+        shell: pwsh
+        run: ./scripts/prepare-official-realtime.ps1
+
+      - name: Bind persisted runtime settings
+        shell: pwsh
+        run: ./scripts/apply-runtime-settings.ps1
+
+      - name: Route V3 audio through WebRTC media track
+        shell: pwsh
+        run: ./scripts/prepare-webrtc-media-audio.ps1
+
+      - name: Instrument WebRTC audio flow
+        shell: pwsh
+        run: ./scripts/instrument-webrtc-audio.ps1
+
+      - name: Wire Home Assistant speech into Realtime
+        shell: pwsh
+        run: ./scripts/prepare-realtime-ha-speech.ps1
+
+      - name: Add listening pause lifecycle and secondary mirrors
+        shell: pwsh
+        run: ./scripts/prepare-realtime-lifecycle-mirrors.ps1
+
+      - name: Fix direct V3 speech and HA Cast stream
+        shell: pwsh
+        run: ./scripts/prepare-ha-stream-direct-speech-v2.ps1
+
+      - name: Harden HA speak readiness and mirror persistence
+        shell: pwsh
+        run: ./scripts/fix-ha-speak-race-and-mirror-persistence.ps1
+
+      - name: Make HA mirror live-toggleable and low latency
+        shell: pwsh
+        run: ./scripts/fix-ha-live-mirror-runtime.ps1
+
+      - name: Layer HA state context onto working V3
+        shell: pwsh
+        run: ./scripts/apply-ha-context-to-working-v3.ps1
+
+      - name: Verify no realtime regression
+        shell: pwsh
+        run: |
+          $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
+          $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
+          if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
+          if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
+          if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
+          if ($bridge -match 'type = "existingCall"') { throw 'REGRESSION: existingCall reintroduced' }
+          if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'REGRESSION: direct ChatGPT realtime/calls reintroduced' }
+          if ($bridge -notmatch 'realtimeStartInstructions') { throw 'HA context was not attached to realtime V3' }
+          if ($bridge -notmatch 'threadParams\["ephemeral"\] = true') { throw 'ephemeral thread missing' }
+          if ($program -notmatch 'HomeAssistantWebSocketCache\.StartGlobal') { throw 'HA WebSocket cache startup missing' }
+          Write-Host 'Verified: original working V3 transport preserved; only HA context/ephemeral added.'
+
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official-ha-context
+
+      - name: Verify stock Codex package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/official-ha-context/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
+          if (Test-Path dist/official-ha-context/codex.exe) { throw 'Package must not bundle codex.exe' }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-WorkingV3-HAContext
+          path: dist/official-ha-context
+          if-no-files-found: error
