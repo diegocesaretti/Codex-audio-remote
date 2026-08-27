@@ -46,9 +46,13 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
     {
         ThrowIfDisposed();
         LastError = "";
+        var totalWatch = Stopwatch.StartNew();
+
+        var phaseWatch = Stopwatch.StartNew();
         await EnsureConnectedAsync(cancellationToken);
         await InitializeOnceAsync(cancellationToken);
         await ReadAccountAsync(cancellationToken);
+        Console.WriteLine($"Realtime fast-path · app-server/account ready in {phaseWatch.ElapsedMilliseconds} ms");
 
         if (!string.Equals(AuthMode, "chatgpt", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Codex App Server is not logged in with ChatGPT OAuth. Run 'codex login' first.");
@@ -60,28 +64,54 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
         realtimeSdpApplied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var offerSdp = await oauthWebRtcPeer.CreateOfferAsync();
 
-        var threadParams = new Dictionary<string, object?>();
+        var threadParams = new Dictionary<string, object?>
+        {
+            ["ephemeral"] = true
+        };
         if (!string.IsNullOrWhiteSpace(cwd) && Directory.Exists(cwd))
             threadParams["cwd"] = Path.GetFullPath(cwd);
 
+        phaseWatch.Restart();
         var thread = await RequestAsync("thread/start", threadParams, cancellationToken);
+        Console.WriteLine($"Realtime fast-path · ephemeral thread/start in {phaseWatch.ElapsedMilliseconds} ms");
         threadId = thread.GetProperty("thread").GetProperty("id").GetString() ?? "";
         if (string.IsNullOrWhiteSpace(threadId))
             throw new InvalidOperationException("thread/start did not return a thread id.");
 
-        Console.WriteLine("Codex patched OAuth WebRTC: creating V3 session");
+        object? initialItems = null;
+        var haContext = HomeAssistantWebSocketCache.Current?.GetCompactContext(80);
+        if (!string.IsNullOrWhiteSpace(haContext) &&
+            !haContext.StartsWith("Home Assistant cache unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            var developerContext =
+                "LIVE HOME ASSISTANT CONTEXT captured immediately before this voice session. " +
+                "Use this snapshot to resolve device/entity names and current states quickly. " +
+                "For any state-changing action, still call the configured Home Assistant MCP/tool and do not claim success until the tool confirms it.\n\n" +
+                haContext;
+            initialItems = new[] { new { role = "developer", text = developerContext } };
+            Console.WriteLine($"Realtime fast-path · HA initial context ready · chars={developerContext.Length}");
+        }
+        else
+        {
+            Console.WriteLine("Realtime fast-path · HA initial context unavailable; starting without it");
+        }
+
+        Console.WriteLine("Codex patched OAuth WebRTC: creating V3 session · ephemeral + HA initialItems");
+        phaseWatch.Restart();
         await RequestAsync("thread/realtime/start", new
         {
             threadId,
             outputModality = "audio",
             version = "v3",
             includeStartupContext = true,
+            initialItems,
             transport = new
             {
                 type = "webrtc",
                 sdp = offerSdp
             }
         }, cancellationToken);
+        Console.WriteLine($"Realtime fast-path · thread/realtime/start ack in {phaseWatch.ElapsedMilliseconds} ms");
 
         var startedAt = Environment.TickCount64;
         while (!realtimeStarted && Environment.TickCount64 - startedAt < 12000)
@@ -95,6 +125,7 @@ internal sealed class CodexRealtimeBridge : IAsyncDisposable, IDisposable
             throw new TimeoutException("Codex realtime V3 did not emit thread/realtime/started within 12 seconds.");
 
         await realtimeSdpApplied.Task.WaitAsync(TimeSpan.FromSeconds(12), cancellationToken);
+        Console.WriteLine($"Realtime fast-path · READY in {totalWatch.ElapsedMilliseconds} ms total");
     }
 
     public async Task AppendAudioAsync(byte[] pcm, int count, CancellationToken cancellationToken = default)
