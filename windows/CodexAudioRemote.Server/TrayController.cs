@@ -126,7 +126,7 @@ static class TrayController
             SetHomeAssistantUrl(normalized);
             SetHomeAssistantToken(tokenBox.Text.Trim());
             HomeAssistantWebSocketCache.Current?.RequestReconnect();
-            icon?.ShowBalloonTip(1200, "Codex Audio Remote", "Reconectando cache de Home Assistant…", ToolTip.Info);
+            icon?.ShowBalloonTip(1200, "Codex Audio Remote", "Reconectando cache de Home Assistant…", ToolTipIcon.Info);
             RefreshStatus();
         };
 
@@ -171,7 +171,8 @@ static class TrayController
             if (string.IsNullOrWhiteSpace(value)) return "";
             var encrypted = Convert.FromBase64String(value);
             var clear = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(clear);
+            try { return Encoding.UTF8.GetString(clear); }
+            finally { CryptographicOperations.ZeroMemory(clear); }
         }
         catch { return ""; }
     }
@@ -187,9 +188,12 @@ static class TrayController
                 return;
             }
             var clear = Encoding.UTF8.GetBytes(token);
-            var encrypted = ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser);
-            key.SetValue(HomeAssistantTokenName, Convert.ToBase64String(encrypted));
-            CryptographicOperations.ZeroMemory(clear);
+            try
+            {
+                var encrypted = ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser);
+                key.SetValue(HomeAssistantTokenName, Convert.ToBase64String(encrypted));
+            }
+            finally { CryptographicOperations.ZeroMemory(clear); }
         }
         catch { }
     }
