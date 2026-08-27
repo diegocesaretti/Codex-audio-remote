@@ -9,34 +9,20 @@ if ($source -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'Refusing HA
 if ($source -notmatch 'type = "webrtc"') { throw 'Refusing HA patch: official WebRTC transport is missing.' }
 if ($source -match 'type = "existingCall"') { throw 'Refusing HA patch: existingCall unexpectedly present.' }
 if ($source -match 'directRealtimeCall\.CreateAsync') { throw 'Refusing HA patch: direct ChatGPT call unexpectedly present.' }
+if ($source -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'Refusing HA patch: working thread continuity flow is missing.' }
 
-$oldThread = @'
-        var threadParams = new Dictionary<string, object?>();
-        if (!string.IsNullOrWhiteSpace(cwd) && Directory.Exists(cwd))
-            threadParams["cwd"] = Path.GetFullPath(cwd);
-
-        var thread = await RequestAsync("thread/start", threadParams, cancellationToken);
-'@
-
-$newThread = @'
-        var threadParams = new Dictionary<string, object?>();
-        if (!string.IsNullOrWhiteSpace(cwd) && Directory.Exists(cwd))
-            threadParams["cwd"] = Path.GetFullPath(cwd);
-
-        // Fast-path change #1 only: voice threads are disposable. This does not alter
-        // the Realtime V3/WebRTC handshake below.
-        threadParams["ephemeral"] = true;
-
-        // Snapshot is prepared by the independent HA WebSocket cache. Empty context is valid
-        // and must never block or fail voice startup.
+# IMPORTANT: do NOT touch thread/start/thread/resume. The known-good build has configurable
+# persistent thread continuity. HA context is intentionally layered only onto realtime/start.
+$sessionMarker = '        Console.WriteLine($"Starting official Codex WebRTC session · version={RealtimeVersion} · model={RealtimeModel} · voice={RealtimeVoice}");'
+if (-not $source.Contains($sessionMarker)) { throw 'Official V3 session marker not found after transforms.' }
+$contextBlock = @'
+        // Independent live HA snapshot. Empty context is valid and never blocks voice startup.
+        // This does not change thread continuity, model, voice, SDP, auth or WebRTC transport.
         var haContext = HomeAssistantWebSocketCache.GetGlobalContext(80);
-        var threadStartAt = Stopwatch.GetTimestamp();
-        var thread = await RequestAsync("thread/start", threadParams, cancellationToken);
-        Console.WriteLine($"Realtime thread/start · {Stopwatch.GetElapsedTime(threadStartAt).TotalMilliseconds:0} ms · ephemeral=True · HA-context={!string.IsNullOrWhiteSpace(haContext)} · chars={haContext.Length}");
-'@
+        Console.WriteLine($"HA realtime context · available={!string.IsNullOrWhiteSpace(haContext)} · chars={haContext.Length}");
 
-if (-not $source.Contains($oldThread)) { throw 'thread/start anchor not found after official transforms.' }
-$source = $source.Replace($oldThread, $newThread)
+'@
+$source = $source.Replace($sessionMarker, $contextBlock + $sessionMarker)
 
 $oldRealtime = @'
             codexResponsesAsItems = false,
@@ -47,9 +33,8 @@ $oldRealtime = @'
 $newRealtime = @'
             codexResponsesAsItems = false,
 
-            // Fast-path change #2 only: feed the already-current HA snapshot as V3 realtime
-            // developer instructions. Transport, model, voice, SDP and protocol version remain
-            // byte-for-byte the known-good official flow.
+            // HA fast-path: only add developer instructions to the already-working V3 session.
+            // The proven media/auth path remains unchanged.
             realtimeStartInstructions = string.IsNullOrWhiteSpace(haContext)
                 ? null
                 : "HOME ASSISTANT FAST PATH. The following state snapshot is already current. " +
@@ -62,14 +47,15 @@ $newRealtime = @'
 if (-not $source.Contains($oldRealtime)) { throw 'V3 realtime/start anchor not found after official transforms.' }
 $source = $source.Replace($oldRealtime, $newRealtime)
 
-# Final invariants: HA may change context only; it may not change the proven media/auth path.
+# Final invariants: HA may change context only; it may not change the proven media/auth/thread path.
 if ($source -notmatch 'RealtimeVersion = "v3"') { throw 'V3 lost after HA patch.' }
 if ($source -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'Realtime model changed after HA patch.' }
 if ($source -notmatch 'type = "webrtc"') { throw 'WebRTC transport lost after HA patch.' }
 if ($source -match 'type = "existingCall"') { throw 'HA patch introduced existingCall.' }
 if ($source -match 'directRealtimeCall\.CreateAsync') { throw 'HA patch introduced direct realtime call.' }
+if ($source -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'HA patch changed thread continuity.' }
 if ($source -notmatch 'realtimeStartInstructions') { throw 'HA realtime context instruction missing.' }
-if ($source -notmatch 'threadParams\["ephemeral"\] = true') { throw 'Ephemeral thread missing.' }
+if ($source -match 'threadParams\["ephemeral"\]') { throw 'HA recovery build must not alter thread lifecycle with ephemeral.' }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
 
@@ -91,4 +77,4 @@ AppDomain.CurrentDomain.ProcessExit += (_, _) => HomeAssistantWebSocketCache.Dis
 }
 Set-Content -LiteralPath $programPath -Value $program -Encoding utf8 -NoNewline
 
-Write-Host 'HA context layered onto known-good official V3 flow without changing Realtime transport.'
+Write-Host 'HA context layered onto known-good official V3 flow; thread lifecycle and Realtime transport unchanged.'
