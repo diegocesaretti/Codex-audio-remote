@@ -1,88 +1,22 @@
-diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
-index dc6056d5..929eccc9 100644
---- a/codex-rs/core/src/realtime_conversation.rs
-+++ b/codex-rs/core/src/realtime_conversation.rs
-@@ -1236,8 +1236,20 @@ async fn prepare_realtime_start(
-             ConfiguredRealtimeVoice::Use
-         }
-     };
-+    // Frameless V3 WebRTC calls are assigned a model by the Codex backend.
-+    // Including session.model is rejected for ChatGPT OAuth, and auth can be
-+    // absent here even though the provider has already supplied OAuth headers.
-+    let omit_server_assigned_model = version == RealtimeWsVersion::V3
-+        && matches!(&transport, ConversationStartTransport::Webrtc { .. });
-     let mut session_config =
--        build_realtime_session_config(sess, &params, version, configured_voice).await?;
-+        build_realtime_session_config(
-+            sess,
-+            &params,
-+            version,
-+            configured_voice,
-+            omit_server_assigned_model,
-+        )
-+        .await?;
-     if matches!(&transport, ConversationStartTransport::ExistingCall { .. }) {
-         session_config.session_id = params.realtime_session_id.clone();
-     }
-@@ -1311,6 +1323,7 @@ pub(crate) async fn build_realtime_session_config(
-     params: &ConversationStartParams,
-     version: RealtimeWsVersion,
-     configured_voice: ConfiguredRealtimeVoice,
-+    omit_server_assigned_model: bool,
- ) -> CodexResult<RealtimeSessionConfig> {
-     for (name, instructions) in [
-         (
-@@ -1379,7 +1392,7 @@ pub(crate) async fn build_realtime_session_config(
-             "initial realtime items must not exceed {REALTIME_INITIAL_ITEMS_MAX_TOKENS} estimated tokens in total"
-         )));
-     }
--    let model = Some(
-+    let model = (!omit_server_assigned_model).then(|| {
-         params
-             .model
-             .clone()
-@@ -1387,8 +1399,8 @@ pub(crate) async fn build_realtime_session_config(
-             .unwrap_or_else(|| match version {
-                 RealtimeWsVersion::V1 | RealtimeWsVersion::V2 => DEFAULT_REALTIME_MODEL.to_string(),
-                 RealtimeWsVersion::V3 => DEFAULT_FRAMELESS_REALTIME_MODEL.to_string(),
--            }),
--    );
-+            })
-+    });
-     let event_parser = match version {
-         RealtimeWsVersion::V1 => RealtimeEventParser::V1,
-         RealtimeWsVersion::V2 => RealtimeEventParser::RealtimeV2,
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
-index b43e02d9..af73a751 100644
 --- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
-@@ -132,6 +132,15 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
+@@ -140,6 +140,7 @@ impl<T: HttpTransport> RealtimeCallClient<T> {
          let mut session = realtime_session_json(session_config)?;
          if let Some(session) = session.as_object_mut() {
              session.remove("id");
-+            // WebRTC call creation is assigned a model by the realtime service. Remove the
-+            // configured Codex default at the final request boundary so it cannot be sent as
-+            // session.model, which ChatGPT OAuth rejects.
-+            let removed_model = session.remove("model").is_some();
-+            tracing::info!(
-+                removed_model,
-+                "Codex Audio Remote OAuth patch: sanitized realtime call session"
-+            );
++            session.remove("model");
          }
          // TODO(aibrahim): Align the SIWC route with the API multipart shape and remove this branch.
          if self.uses_backend_request_shape() {
 diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
 --- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
 +++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
-@@ -142,8 +142,12 @@ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<
-             session.model = config.model;
+@@ -156,7 +156,7 @@ pub fn session_update_session_json(config: RealtimeSessionConfig) -> JsonResult<
              to_value(session)
          }
          RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(
 -            config.model,
-+            // AVAS/ChatGPT assigns the Frameless model server-side. Never serialize model
-+            // for V3 here; this is the common boundary used by realtime call creation and
-+            // prevents session.model from being reintroduced after core preparation.
 +            None,
              config.instructions,
              config.initial_items,
