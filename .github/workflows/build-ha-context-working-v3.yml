@@ -69,10 +69,11 @@ jobs:
           if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
           if ($bridge -match 'type = "existingCall"') { throw 'REGRESSION: existingCall reintroduced' }
           if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'REGRESSION: direct ChatGPT realtime/calls reintroduced' }
+          if ($bridge -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'REGRESSION: working thread continuity changed' }
+          if ($bridge -match 'threadParams\["ephemeral"\]') { throw 'REGRESSION: recovery build must not alter thread lifecycle' }
           if ($bridge -notmatch 'realtimeStartInstructions') { throw 'HA context was not attached to realtime V3' }
-          if ($bridge -notmatch 'threadParams\["ephemeral"\] = true') { throw 'ephemeral thread missing' }
           if ($program -notmatch 'HomeAssistantWebSocketCache\.StartGlobal') { throw 'HA WebSocket cache startup missing' }
-          Write-Host 'Verified: original working V3 transport preserved; only HA context/ephemeral added.'
+          Write-Host 'Verified: original working V3 transport/thread lifecycle preserved; only HA realtime context added.'
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official-ha-context
