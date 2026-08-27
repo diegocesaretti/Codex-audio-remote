@@ -46,49 +46,39 @@ jobs:
     steps:
       - name: Checkout Codex Audio Remote
         uses: actions/checkout@v4
-
       - name: Checkout OpenAI Codex
         uses: actions/checkout@v4
         with:
           repository: openai/codex
           ref: 343074d4207d572809bd8cea15f4be1d09d98e0b
           path: upstream-codex
-
       - name: Apply ChatGPT OAuth WebRTC compatibility patch
         shell: pwsh
         run: git -C upstream-codex apply "$env:GITHUB_WORKSPACE\patches\openai-codex-oauth-webrtc.patch"
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: upstream-codex/codex-rs
-
       - name: Build patched Codex CLI
         working-directory: upstream-codex/codex-rs
         run: cargo build --release -p codex-cli --bin codex
-
       - name: Set up .NET 8
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
-
       - name: Bundle patched Codex CLI
         shell: pwsh
         run: Copy-Item -LiteralPath upstream-codex/codex-rs/target/release/codex.exe -Destination dist/windows/codex.exe
-
       - name: Verify OAuth realtime bundle
         shell: pwsh
         run: |
           if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'CodexAudioRemote.Server.exe missing' }
           if (-not (Test-Path dist/windows/codex.exe)) { throw 'patched codex.exe missing' }
           Get-Item dist/windows/CodexAudioRemote.Server.exe, dist/windows/codex.exe | Format-Table Name, Length
-
       - name: Upload Windows OAuth Realtime artifact
         uses: actions/upload-artifact@v4
         with:
@@ -120,7 +110,9 @@ jobs:
         run: python3 scripts/fix-android-preroll-wake-greeting-suppression.py
       - name: Reset capture boundary at uplink
         run: python3 scripts/fix-android-uplink-listen-boundary.py
-      - name: Verify Android PAUSED lifecycle, preroll and immediate uplink capture
+      - name: Apply Vosk live laboratory
+        run: python3 scripts/prepare-android-vosk-live-lab.py
+      - name: Verify Android PAUSED lifecycle, preroll, uplink and Vosk live lab
         run: |
           grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'AudioCuePlayer.Cue.LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
@@ -136,6 +128,11 @@ jobs:
           grep -q 'UPLINK_CAPTURE_GUARD_MS = 180L' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'Uplink boundary reset' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'buffer restarted' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'VoskWakeGate wakeGate' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'wakeGate.observeAudio' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'checkWake(String json, boolean isFinal)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'VoskWakeTuningView' android/app/src/main/res/layout/activity_main.xml
+          grep -q 'VoskLiveDetectionsView' android/app/src/main/res/layout/activity_main.xml
           grep -q 'cue_wake_uri_2' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
           grep -q 'cue_wake_uri_3' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePlayer.java
           grep -q 'EXTRA_WAKE_SLOT' android/app/src/main/java/com/bwa3d/codexremote/AudioCuePickerActivity.java
