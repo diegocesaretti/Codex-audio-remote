@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
+    branches: [ main, rewrite/state-machine-v2, 'fix/**', 'exp/latest-ha-fastpath' ]
   pull_request:
 
 concurrency:
@@ -14,16 +14,25 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        if: github.ref == 'refs/heads/exp/latest-ha-fastpath' || github.head_ref == 'exp/latest-ha-fastpath'
+        with:
+          python-version: '3.x'
+      - name: Prepare official Codex Home Assistant fast-path
+        if: github.ref == 'refs/heads/exp/latest-ha-fastpath' || github.head_ref == 'exp/latest-ha-fastpath'
+        run: python scripts/prepare-windows-ha-fastpath.py
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
-      - name: Verify stock Codex package
-        if: github.ref == 'refs/heads/experimental/stock-codex-chromium-webrtc' || github.head_ref == 'experimental/stock-codex-chromium-webrtc'
+      - name: Verify stock Codex only
+        if: github.ref == 'refs/heads/exp/latest-ha-fastpath' || github.head_ref == 'exp/latest-ha-fastpath' || github.ref == 'refs/heads/experimental/stock-codex-chromium-webrtc' || github.head_ref == 'experimental/stock-codex-chromium-webrtc'
         shell: pwsh
         run: |
-          if (Test-Path dist/windows/codex.exe) { throw 'ExistingCall experiment must use stock Codex from PATH and must not bundle codex.exe' }
+          if (Test-Path dist/windows/codex.exe) { throw 'This build must use the installed official Codex from PATH and must not bundle codex.exe' }
+          if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'CodexAudioRemote.Server.exe missing' }
+          Write-Host 'Verified: companion only; no bundled/patched codex.exe'
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
