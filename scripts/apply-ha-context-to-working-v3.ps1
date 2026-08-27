@@ -72,4 +72,23 @@ if ($source -notmatch 'realtimeStartInstructions') { throw 'HA realtime context 
 if ($source -notmatch 'threadParams\["ephemeral"\] = true') { throw 'Ephemeral thread missing.' }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
+
+# Start the independent HA cache only AFTER all legacy Program.cs transforms have finished.
+# This avoids changing any source block that those known-good scripts expect to match exactly.
+$programPath = Join-Path $PSScriptRoot '..\windows\CodexAudioRemote.Server\Program.cs'
+$program = Get-Content -LiteralPath $programPath -Raw
+$programAnchor = 'var options = Options.Parse(args);'
+if (-not $program.Contains($programAnchor)) { throw 'Program.cs options anchor missing after official transforms.' }
+if ($program -notmatch 'HomeAssistantWebSocketCache\.StartGlobal') {
+    $programInsert = @'
+var options = Options.Parse(args);
+
+// Independent HA state cache. It does not own or alter Codex Realtime/WebRTC.
+HomeAssistantWebSocketCache.StartGlobal();
+AppDomain.CurrentDomain.ProcessExit += (_, _) => HomeAssistantWebSocketCache.DisposeGlobal();
+'@
+    $program = $program.Replace($programAnchor, $programInsert.TrimEnd())
+}
+Set-Content -LiteralPath $programPath -Value $program -Encoding utf8 -NoNewline
+
 Write-Host 'HA context layered onto known-good official V3 flow without changing Realtime transport.'
