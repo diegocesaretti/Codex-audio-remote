@@ -9,5 +9,6 @@
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="System.Speech" Version="8.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 </Project>
