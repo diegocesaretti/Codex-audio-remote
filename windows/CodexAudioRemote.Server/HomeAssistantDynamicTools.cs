@@ -84,6 +84,17 @@ internal static class HomeAssistantDynamicTools
         return true;
     }
 
+    public static bool IsCompatibilityError(Exception ex)
+    {
+        var text = ex.Message ?? "";
+        return text.Contains("dynamicTools", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("dynamic tools", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("experimental", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("unknown field", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("invalid params", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("unsupported", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static void MarkThreadRegistered(string threadId)
     {
         if (string.IsNullOrWhiteSpace(threadId)) return;
