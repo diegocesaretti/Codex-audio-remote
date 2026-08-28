@@ -1,8 +1,8 @@
-name: build-ha-context-working-v3
+name: build-ha-websocket-control-tool
 
 on:
   push:
-    branches: [ fix/ha-context-on-working-v3 ]
+    branches: [ feat/ha-websocket-control-tool ]
   workflow_dispatch:
 
 jobs:
@@ -17,8 +17,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # IMPORTANT: these are the exact transforms from the previously working
-      # official V3 pipeline. HA context is applied only after all of them.
+      # Reproduce the exact known-good official V3 pipeline first.
       - name: Apply captured official Codex realtime flow
         shell: pwsh
         run: ./scripts/prepare-official-realtime.ps1
@@ -55,38 +54,52 @@ jobs:
         shell: pwsh
         run: ./scripts/fix-ha-live-mirror-runtime.ps1
 
+      # Only after the known-good runtime is fully reconstructed do we layer HA features.
       - name: Layer HA state context onto working V3
         shell: pwsh
         run: ./scripts/apply-ha-context-to-working-v3.ps1
+
+      - name: Register native HA dynamic tools and WS control
+        shell: pwsh
+        run: ./scripts/apply-ha-dynamic-tools.ps1
 
       - name: Verify no realtime regression
         shell: pwsh
         run: |
           $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
           $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
+          $cache = Get-Content windows/CodexAudioRemote.Server/HomeAssistantWebSocketCache.cs -Raw
+          $tools = Get-Content windows/CodexAudioRemote.Server/HomeAssistantDynamicTools.cs -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
           if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
           if ($bridge -match 'type = "existingCall"') { throw 'REGRESSION: existingCall reintroduced' }
           if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'REGRESSION: direct ChatGPT realtime/calls reintroduced' }
-          if ($bridge -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'REGRESSION: working thread continuity changed' }
-          if ($bridge -match 'threadParams\["ephemeral"\]') { throw 'REGRESSION: recovery build must not alter thread lifecycle' }
-          if ($bridge -notmatch 'realtimeStartInstructions') { throw 'HA context was not attached to realtime V3' }
+          if ($bridge -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'REGRESSION: working thread continuity missing' }
+          if ($bridge -match 'threadParams\["ephemeral"\]') { throw 'REGRESSION: thread lifecycle changed to ephemeral' }
+          if ($bridge -notmatch 'realtimeStartInstructions') { throw 'HA context missing' }
+          if ($bridge -notmatch 'HomeAssistantDynamicTools\.AddToThreadStart') { throw 'Codex dynamicTools not registered' }
+          if ($bridge -notmatch 'item/tool/call') { throw 'dynamic tool request handler missing' }
+          if ($bridge -notmatch 'home_assistant\.control') { throw 'HA dynamic control instruction missing' }
           if ($program -notmatch 'HomeAssistantWebSocketCache\.StartGlobal') { throw 'HA WebSocket cache startup missing' }
-          Write-Host 'Verified: original working V3 transport/thread lifecycle preserved; only HA realtime context added.'
+          if ($cache -notmatch 'type = "call_service"') { throw 'HA WS call_service missing' }
+          if ($cache -notmatch 'confirmed') { throw 'HA state confirmation missing' }
+          if ($tools -notmatch 'name = "control"') { throw 'control tool schema missing' }
+          if ($tools -notmatch 'name = "get_state"') { throw 'get_state tool schema missing' }
+          Write-Host 'Verified: known-good V3/WebRTC preserved + native dynamicTools + direct HA WS call_service.'
 
       - name: Publish Windows companion
-        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official-ha-context
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/official-ha-ws-tool
 
       - name: Verify stock Codex package
         shell: pwsh
         run: |
-          if (-not (Test-Path dist/official-ha-context/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
-          if (Test-Path dist/official-ha-context/codex.exe) { throw 'Package must not bundle codex.exe' }
+          if (-not (Test-Path dist/official-ha-ws-tool/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
+          if (Test-Path dist/official-ha-ws-tool/codex.exe) { throw 'Package must not bundle codex.exe' }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexAudioRemote-Windows-WorkingV3-HAContext
-          path: dist/official-ha-context
+          name: CodexAudioRemote-Windows-V3-HA-WebSocket-Tool
+          path: dist/official-ha-ws-tool
           if-no-files-found: error
