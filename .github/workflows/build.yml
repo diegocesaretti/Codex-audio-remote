@@ -17,6 +17,9 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Normalize dormant SOL shared source
+        shell: pwsh
+        run: ./scripts/normalize-sol-shared-source.ps1
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
       - name: Verify stock Codex package
@@ -65,6 +68,10 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Normalize dormant SOL shared source
+        shell: pwsh
+        run: ./scripts/normalize-sol-shared-source.ps1
 
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
