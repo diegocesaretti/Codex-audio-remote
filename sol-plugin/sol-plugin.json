@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, SOL MCP/input APIs, durable HA context cache and future-ready speaker-to-person bindings.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
@@ -17,6 +17,14 @@
     "input.codex-audio",
     "mcp.codex-audio",
     "identity.speaker-binding"
+  ],
+  "requires": [
+    "plugin-api.v1",
+    "input.register",
+    "input.write",
+    "input.status",
+    "mcp.register",
+    "filesystem.plugin-data"
   ],
   "permissions": [
     "network.local",
