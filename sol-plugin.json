@@ -1,9 +1,9 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.1.0",
-  "description": "Codex Realtime V3 voice bridge hosted and supervised by SOL. The standalone build remains independent and untouched.",
+  "version": "1.2.1",
+  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, SOL MCP/input APIs, durable HA context cache and future-ready speaker-to-person bindings.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -12,15 +12,31 @@
   "capabilities": [
     "audio.realtime",
     "codex.oauth",
-    "homeassistant.context",
-    "voice.android-client"
+    "homeassistant.context-cache",
+    "voice.android-client",
+    "input.codex-audio",
+    "mcp.codex-audio",
+    "identity.speaker-binding"
+  ],
+  "requires": [
+    "plugin-api.v1",
+    "input.register",
+    "input.write",
+    "input.status",
+    "mcp.register",
+    "filesystem.plugin-data"
   ],
   "permissions": [
     "network.local",
     "audio.input",
     "audio.output",
     "windows.registry",
-    "process.codex"
+    "process.codex",
+    "input.register",
+    "input.write",
+    "input.status",
+    "mcp.register",
+    "filesystem.plugin-data"
   ],
   "settings": [
     {
@@ -58,6 +74,13 @@
       "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración standalone."
     },
     {
+      "key": "ingest_transcripts",
+      "label": "Guardar transcripciones en SOL",
+      "type": "boolean",
+      "description": "Ingiere únicamente transcripciones finales. Si el hablante está vinculado, agrega el personEntityId canónico como metadata.",
+      "default": true
+    },
+    {
       "key": "home_assistant_enabled",
       "label": "Home Assistant habilitado",
       "type": "boolean",
@@ -70,6 +93,13 @@
       "description": "Ejemplo: http://homeassistant.local:8123. Vacío conserva el valor standalone."
     },
     {
+      "key": "home_assistant_token",
+      "label": "Token de Home Assistant",
+      "type": "secret",
+      "description": "Token de larga duración usado por el WebSocket de contexto. SOL lo inyecta sólo al proceso del plugin.",
+      "env": "HOME_ASSISTANT_TOKEN"
+    },
+    {
       "key": "home_assistant_api_port",
       "label": "Puerto del adaptador HA",
       "type": "number",
@@ -78,10 +108,19 @@
       "max": 65535
     },
     {
+      "key": "home_assistant_cache_flush_ms",
+      "label": "Persistencia del caché HA (ms)",
+      "type": "number",
+      "description": "Debounce para guardar el último snapshot/eventos de Home Assistant en SOL_PLUGIN_DATA_DIR.",
+      "default": 2000,
+      "min": 250,
+      "max": 60000
+    },
+    {
       "key": "downlink_device",
       "label": "Salida de audio",
       "type": "text",
-      "description": "ID o parte del nombre del dispositivo de salida. Vacío usa la salida guardada por el standalone."
+      "description": "ID o parte del nombre del dispositivo de salida. Vacío usa la salida que ya tiene guardada Codex Audio Remote."
     },
     {
       "key": "btcom_path",
