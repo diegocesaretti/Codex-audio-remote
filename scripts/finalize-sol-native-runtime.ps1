@@ -29,6 +29,11 @@ $readerNew = 'new StreamReader(request.InputStream, request.ContentEncoding ?? E
 if (-not $runtime.Contains($readerOld)) { throw 'SOL native finalize: StreamReader anchor missing.' }
 $runtime = $runtime.Replace($readerOld, $readerNew)
 
+# This project imports WinForms globally, so Timer must be explicitly the threading timer used
+# for debounce persistence rather than System.Windows.Forms.Timer.
+$cache = $cache.Replace('    Timer? persistTimer;', '    System.Threading.Timer? persistTimer;')
+$cache = $cache.Replace('            persistTimer ??= new Timer(_ =>', '            persistTimer ??= new System.Threading.Timer(_ =>')
+
 $utcTicksOld = 'Interlocked.Exchange(ref lastUpdateTicks, parsed.UtcTicks);'
 $utcTicksNew = 'Interlocked.Exchange(ref lastUpdateTicks, parsed.UtcDateTime.Ticks);'
 if ($cache.Contains($utcTicksOld)) { $cache = $cache.Replace($utcTicksOld, $utcTicksNew) }
