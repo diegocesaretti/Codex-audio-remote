@@ -61,10 +61,14 @@ jobs:
         shell: pwsh
         run: ./scripts/apply-ha-context-to-working-v3.ps1
 
-      # Only now add SOL-hosted behavior. The standalone workflow/branch is untouched.
+      # SOL behavior is applied only after the complete known-good audio/HA stack.
       - name: Layer SOL plugin mode
         shell: pwsh
         run: ./scripts/prepare-sol-plugin-mode.ps1
+
+      - name: Finalize SOL native callback routing
+        shell: pwsh
+        run: ./scripts/finalize-sol-native-runtime.ps1
 
       - name: Verify golden V3 invariants and plugin isolation
         shell: pwsh
@@ -95,13 +99,15 @@ jobs:
           if ($appSettings -notmatch 'SolPluginHost\.Setting\("home_assistant_url"\)') { throw 'SOL HA URL setting overlay missing' }
           if ($downlink -notmatch 'SolPluginAudioSettings\.SelectedDeviceId') { throw 'SOL audio output setting overlay missing' }
           if ($server -notmatch 'SolRuntimeBridge\.TryCreate') { throw 'SOL runtime bridge was not wired into RealtimeSessionServer' }
+          if ($server -notmatch 'TryHandleCallbackAsync') { throw 'SOL MCP callback is not routed by the proven Realtime listener' }
           if ($server -notmatch 'OnSessionStarted') { throw 'SOL speaker session lifecycle missing' }
           if ($server -notmatch 'IngestTranscriptAsync') { throw 'SOL transcript ingest hook missing' }
           if ($solRuntime -notmatch 'codex_audio_bind_current_speaker') { throw 'Speaker binding MCP tool missing' }
           if ($solRuntime -notmatch 'ApplyVoiceprintResolution') { throw 'Future voiceprint resolver contract missing' }
           if ($solRuntime -notmatch '/v1/plugin-api/inputs/register') { throw 'SOL plugin input registration missing' }
-          if ($haCache -notmatch 'speaker-bindings' -and $manifest -notmatch 'identity.speaker-binding') { throw 'Speaker binding capability missing' }
-          if ($haCache -notmatch 'loaded .* persisted states' -and $haCache -notmatch 'LoadPersisted') { throw 'Durable HA cache missing' }
+          if ($haCache -notmatch 'LoadPersisted') { throw 'Durable HA cache missing' }
+          if ($haCache -notmatch 'subscribe_events') { throw 'HA event subscription missing' }
+          if ($manifest -notmatch 'identity.speaker-binding') { throw 'Speaker binding capability missing' }
           if ($manifest -notmatch '"mcp.register"') { throw 'Manifest MCP permission missing' }
           if ($manifest -notmatch '"input.write"') { throw 'Manifest input write permission missing' }
           Write-Host 'Verified: golden V3 preserved; native SOL MCP/input/speaker integration layered additively.'
