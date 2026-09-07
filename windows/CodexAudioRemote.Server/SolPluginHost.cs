@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 
 internal static class SolPluginHost
@@ -5,6 +6,26 @@ internal static class SolPluginHost
     public static bool Enabled
         => string.Equals(Environment.GetEnvironmentVariable("SOL_PLUGIN_MODE"), "1", StringComparison.OrdinalIgnoreCase)
            || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SOL_PLUGIN_ID"));
+
+    public static string? Setting(string key)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(key)) return null;
+        var normalized = key.Trim().ToUpperInvariant().Replace('-', '_').Replace('.', '_');
+        var value = Environment.GetEnvironmentVariable("SOL_PLUGIN_SETTING_" + normalized);
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    public static bool? BoolSetting(string key)
+    {
+        var value = Setting(key);
+        return bool.TryParse(value, out var parsed) ? parsed : null;
+    }
+
+    public static int? IntSetting(string key)
+    {
+        var value = Setting(key);
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+    }
 
     public static void Ready(string backend)
     {
@@ -32,7 +53,7 @@ internal static class SolPluginHost
         Write(new
         {
             type = "sol.plugin.health",
-            health,
+            status = health,
             details = new { message },
         });
     }
