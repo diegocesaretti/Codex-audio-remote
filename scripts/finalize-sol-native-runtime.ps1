@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
 
 $serverPath = 'windows/CodexAudioRemote.Server/RealtimeSessionServer.cs'
+$runtimePath = 'windows/CodexAudioRemote.Server/SolRuntimeBridge.cs'
+$cachePath = 'windows/CodexAudioRemote.Server/HomeAssistantWebSocketCache.cs'
 $server = Get-Content $serverPath -Raw
+$runtime = Get-Content $runtimePath -Raw
+$cache = Get-Content $cachePath -Raw
 
 $ctorOld = '        solRuntime = SolRuntimeBridge.TryCreate(GetSolSnapshot, reason => EndSessionAsync(reason));'
 $ctorNew = '        solRuntime = SolRuntimeBridge.TryCreate(GetSolSnapshot, reason => EndSessionAsync(reason), options.Port);'
@@ -19,5 +23,21 @@ $routeBlock = @'
 '@
 $server = $server.Replace($routeAnchor, $routeBlock.TrimEnd())
 
+# Keep the repository source readable while normalizing framework-overload details for net8.0.
+$readerOld = 'new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8, true, leaveOpen: false)'
+$readerNew = 'new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8, true, 4096, false)'
+if (-not $runtime.Contains($readerOld)) { throw 'SOL native finalize: StreamReader anchor missing.' }
+$runtime = $runtime.Replace($readerOld, $readerNew)
+
+$utcTicksOld = 'Interlocked.Exchange(ref lastUpdateTicks, parsed.UtcTicks);'
+$utcTicksNew = 'Interlocked.Exchange(ref lastUpdateTicks, parsed.UtcDateTime.Ticks);'
+if ($cache.Contains($utcTicksOld)) { $cache = $cache.Replace($utcTicksOld, $utcTicksNew) }
+
+$persistAgeOld = 'updatedAt = new DateTimeOffset(Math.Max(Interlocked.Read(ref lastUpdateTicks), DateTimeOffset.UtcNow.Ticks), TimeSpan.Zero),'
+$persistAgeNew = 'updatedAt = new DateTimeOffset(Interlocked.Read(ref lastUpdateTicks) > 0 ? Interlocked.Read(ref lastUpdateTicks) : DateTimeOffset.UtcNow.Ticks, TimeSpan.Zero),'
+if ($cache.Contains($persistAgeOld)) { $cache = $cache.Replace($persistAgeOld, $persistAgeNew) }
+
 Set-Content $serverPath $server -Encoding UTF8
+Set-Content $runtimePath $runtime -Encoding UTF8
+Set-Content $cachePath $cache -Encoding UTF8
 Write-Host 'SOL native MCP callback routing finalized on the existing Realtime listener.'
