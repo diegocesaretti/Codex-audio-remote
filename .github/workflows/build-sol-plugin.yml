@@ -1,0 +1,110 @@
+name: build-sol-plugin
+
+on:
+  push:
+    branches: [ feat/sol-plugin-port ]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # Reproduce the exact known-good standalone V3 build first.
+      - name: Apply captured official Codex realtime flow
+        shell: pwsh
+        run: ./scripts/prepare-official-realtime.ps1
+
+      - name: Bind persisted runtime settings
+        shell: pwsh
+        run: ./scripts/apply-runtime-settings.ps1
+
+      - name: Route V3 audio through WebRTC media track
+        shell: pwsh
+        run: ./scripts/prepare-webrtc-media-audio.ps1
+
+      - name: Instrument WebRTC audio flow
+        shell: pwsh
+        run: ./scripts/instrument-webrtc-audio.ps1
+
+      - name: Wire Home Assistant speech into Realtime
+        shell: pwsh
+        run: ./scripts/prepare-realtime-ha-speech.ps1
+
+      - name: Add listening pause lifecycle and secondary mirrors
+        shell: pwsh
+        run: ./scripts/prepare-realtime-lifecycle-mirrors.ps1
+
+      - name: Fix direct V3 speech and HA Cast stream
+        shell: pwsh
+        run: ./scripts/prepare-ha-stream-direct-speech-v2.ps1
+
+      - name: Harden HA speak readiness and mirror persistence
+        shell: pwsh
+        run: ./scripts/fix-ha-speak-race-and-mirror-persistence.ps1
+
+      - name: Make HA mirror live-toggleable and low latency
+        shell: pwsh
+        run: ./scripts/fix-ha-live-mirror-runtime.ps1
+
+      - name: Layer HA state context onto working V3
+        shell: pwsh
+        run: ./scripts/apply-ha-context-to-working-v3.ps1
+
+      # Only now add the SOL-hosted behavior. The standalone workflow/branch is untouched.
+      - name: Layer SOL plugin mode
+        shell: pwsh
+        run: ./scripts/prepare-sol-plugin-mode.ps1
+
+      - name: Verify golden V3 invariants and plugin isolation
+        shell: pwsh
+        run: |
+          $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
+          $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
+          $tray = Get-Content windows/CodexAudioRemote.Server/TrayController.cs -Raw
+          $host = Get-Content windows/CodexAudioRemote.Server/SolPluginHost.cs -Raw
+          if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
+          if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
+          if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
+          if ($bridge -match 'type = "existingCall"') { throw 'REGRESSION: existingCall reintroduced' }
+          if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'REGRESSION: direct ChatGPT realtime/calls reintroduced' }
+          if ($bridge -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'REGRESSION: working thread continuity changed' }
+          if ($bridge -match 'threadParams\["ephemeral"\]') { throw 'REGRESSION: plugin build must preserve thread lifecycle' }
+          if ($bridge -notmatch 'realtimeStartInstructions') { throw 'REGRESSION: HA context missing' }
+          if ($program -notmatch 'SolPluginHost\.Enabled \|\| TrayController\.VoiceBackend') { throw 'Plugin build does not force V3 without mutating standalone settings' }
+          if ($program -notmatch 'SolPluginHost\.Ready\("realtime-v3"\)') { throw 'Plugin readiness signal missing' }
+          if ($tray -notmatch 'if \(SolPluginHost\.Enabled\)') { throw 'Plugin tray suppression missing' }
+          if ($host -notmatch 'sol\.plugin\.ready') { throw 'SOL plugin protocol helper missing' }
+          Write-Host 'Verified: golden V3 transport/lifecycle preserved; SOL layer is additive and plugin-only.'
+
+      - name: Publish plugin runtime
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/sol-plugin
+
+      - name: Assemble .solplugin package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/sol-plugin/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
+          if (Test-Path dist/sol-plugin/codex.exe) { throw 'Package must not bundle codex.exe' }
+          Copy-Item sol-plugin/sol-plugin.json dist/sol-plugin/sol-plugin.json
+          $zip = 'dist/CodexAudioRemote-SOL.zip'
+          $plugin = 'dist/CodexAudioRemote.solplugin'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          if (Test-Path $plugin) { Remove-Item $plugin -Force }
+          Compress-Archive -Path dist/sol-plugin/* -DestinationPath $zip -CompressionLevel Optimal
+          Move-Item $zip $plugin
+          Write-Host "Built $plugin"
+
+      - name: Upload SOL plugin artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-SOL-Plugin
+          path: dist/CodexAudioRemote.solplugin
+          if-no-files-found: error
