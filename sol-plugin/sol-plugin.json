@@ -73,15 +73,6 @@
       "default": true
     },
     {
-      "key": "sol_api_port",
-      "label": "Puerto MCP local del plugin",
-      "type": "number",
-      "description": "Loopback privado usado por SOL para invocar herramientas MCP del plugin.",
-      "default": 8771,
-      "min": 1024,
-      "max": 65535
-    },
-    {
       "key": "home_assistant_enabled",
       "label": "Home Assistant habilitado",
       "type": "boolean",
