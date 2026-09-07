@@ -24,7 +24,7 @@ $serverNeedle = '    using var realtimeServer = new RealtimeSessionServer(option
 Require-Contains $program $serverNeedle 'RealtimeSessionServer construction'
 $program = $program.Replace(
     $serverNeedle,
-    $serverNeedle + "`r`n    SolPluginHost.Ready(\"realtime-v3\");"
+    $serverNeedle + "`r`n    SolPluginHost.Ready(`"realtime-v3`");"
 )
 
 # Keep classic mode observable too if this source is ever reused independently.
@@ -41,7 +41,7 @@ $trayNeedle = '        HideConsoleWindow();'
 Require-Contains $tray $trayNeedle 'tray initialization'
 $tray = $tray.Replace(
     $trayNeedle,
-    $trayNeedle + "`r`n        if (SolPluginHost.Enabled)`r`n        {`r`n            SolPluginHost.Log(\"info\", \"SOL plugin mode active · standalone tray suppressed\");`r`n            return;`r`n        }"
+    $trayNeedle + "`r`n        if (SolPluginHost.Enabled)`r`n        {`r`n            SolPluginHost.Log(`"info`", `"SOL plugin mode active · standalone tray suppressed`");`r`n            return;`r`n        }"
 )
 
 Set-Content $programPath $program -Encoding UTF8
