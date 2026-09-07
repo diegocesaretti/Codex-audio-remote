@@ -69,7 +69,7 @@ jobs:
           $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
           $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
           $tray = Get-Content windows/CodexAudioRemote.Server/TrayController.cs -Raw
-          $host = Get-Content windows/CodexAudioRemote.Server/SolPluginHost.cs -Raw
+          $pluginHostSource = Get-Content windows/CodexAudioRemote.Server/SolPluginHost.cs -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
           if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
@@ -81,7 +81,7 @@ jobs:
           if ($program -notmatch 'SolPluginHost\.Enabled \|\| TrayController\.VoiceBackend') { throw 'Plugin build does not force V3 without mutating standalone settings' }
           if ($program -notmatch 'SolPluginHost\.Ready\("realtime-v3"\)') { throw 'Plugin readiness signal missing' }
           if ($tray -notmatch 'if \(SolPluginHost\.Enabled\)') { throw 'Plugin tray suppression missing' }
-          if ($host -notmatch 'sol\.plugin\.ready') { throw 'SOL plugin protocol helper missing' }
+          if ($pluginHostSource -notmatch 'sol\.plugin\.ready') { throw 'SOL plugin protocol helper missing' }
           Write-Host 'Verified: golden V3 transport/lifecycle preserved; SOL layer is additive and plugin-only.'
 
       - name: Publish plugin runtime
