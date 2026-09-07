@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "codex-audio-remote",
+  "name": "Codex Audio Remote",
+  "version": "1.0.0",
+  "description": "Codex Realtime V3 voice bridge hosted and supervised by SOL. Ported from the known-good standalone build without modifying it.",
+  "runtime": "executable",
+  "entry": "CodexAudioRemote.Server.exe",
+  "args": [],
+  "autoStart": true,
+  "restartPolicy": "on-failure",
+  "capabilities": [
+    "audio.realtime",
+    "codex.oauth",
+    "homeassistant.context",
+    "voice.android-client"
+  ],
+  "permissions": [
+    "network.local",
+    "audio.input",
+    "audio.output",
+    "windows.registry",
+    "process.codex"
+  ]
+}
