@@ -5,6 +5,9 @@ on:
     branches: [ feat/sol-plugin-port ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   windows:
     runs-on: windows-latest
@@ -69,6 +72,8 @@ jobs:
           $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
           $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
           $tray = Get-Content windows/CodexAudioRemote.Server/TrayController.cs -Raw
+          $appSettings = Get-Content windows/CodexAudioRemote.Server/AppSettings.cs -Raw
+          $downlink = Get-Content windows/CodexAudioRemote.Server/DownlinkDeviceSettings.cs -Raw
           $pluginHostSource = Get-Content windows/CodexAudioRemote.Server/SolPluginHost.cs -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
@@ -82,6 +87,9 @@ jobs:
           if ($program -notmatch 'SolPluginHost\.Ready\("realtime-v3"\)') { throw 'Plugin readiness signal missing' }
           if ($tray -notmatch 'if \(SolPluginHost\.Enabled\)') { throw 'Plugin tray suppression missing' }
           if ($pluginHostSource -notmatch 'sol\.plugin\.ready') { throw 'SOL plugin protocol helper missing' }
+          if ($appSettings -notmatch 'SolPluginHost\.Setting\("realtime_voice"\)') { throw 'SOL voice setting overlay missing' }
+          if ($appSettings -notmatch 'SolPluginHost\.Setting\("home_assistant_url"\)') { throw 'SOL HA URL setting overlay missing' }
+          if ($downlink -notmatch 'SolPluginAudioSettings\.SelectedDeviceId') { throw 'SOL audio output setting overlay missing' }
           Write-Host 'Verified: golden V3 transport/lifecycle preserved; SOL layer is additive and plugin-only.'
 
       - name: Publish plugin runtime
@@ -100,6 +108,18 @@ jobs:
           Compress-Archive -Path dist/sol-plugin/* -DestinationPath $zip -CompressionLevel Optimal
           Move-Item $zip $plugin
           Write-Host "Built $plugin"
+
+      - name: Publish stable SOL plugin release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'sol-plugin-latest'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Codex Audio Remote · SOL Plugin' --notes 'Stable install endpoint for SOL Plugin Manager. Built from the isolated plugin port; standalone build remains untouched.' --prerelease
+          }
+          gh release upload $tag dist/CodexAudioRemote.solplugin --repo $env:GITHUB_REPOSITORY --clobber
 
       - name: Upload SOL plugin artifact
         continue-on-error: true
