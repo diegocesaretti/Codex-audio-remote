@@ -4,11 +4,13 @@ $programPath = 'windows/CodexAudioRemote.Server/Program.cs'
 $trayPath = 'windows/CodexAudioRemote.Server/TrayController.cs'
 $appSettingsPath = 'windows/CodexAudioRemote.Server/AppSettings.cs'
 $downlinkPath = 'windows/CodexAudioRemote.Server/DownlinkDeviceSettings.cs'
+$realtimeServerPath = 'windows/CodexAudioRemote.Server/RealtimeSessionServer.cs'
 
 $program = Get-Content $programPath -Raw
 $tray = Get-Content $trayPath -Raw
 $appSettings = Get-Content $appSettingsPath -Raw
 $downlink = Get-Content $downlinkPath -Raw
+$realtimeServer = Get-Content $realtimeServerPath -Raw
 
 function Require-Contains([string]$text, [string]$needle, [string]$label) {
     if (-not $text.Contains($needle)) { throw "SOL plugin transform: missing expected $label" }
@@ -113,9 +115,114 @@ $downlink = $downlink.Replace(
     '    public static int BtcomWaitSeconds => SolPluginAudioSettings.BtcomWaitSeconds ?? Math.Clamp(Load().BtcomWaitSeconds, 1, 15);'
 )
 
+# Wire the generic SOL runtime bridge only after every known-good V3/HA transform has
+# completed. This keeps audio/WebRTC ownership unchanged and makes SOL integration additive.
+$solFieldNeedle = '    readonly CodexRealtimeBridge bridge;'
+Require-Contains $realtimeServer $solFieldNeedle 'Realtime bridge field'
+$realtimeServer = $realtimeServer.Replace(
+    $solFieldNeedle,
+    $solFieldNeedle + "`r`n    readonly SolRuntimeBridge? solRuntime;`r`n    string solDeviceKey = `"unknown`";"
+)
+
+$solCtorNeedle = '        bridge = new CodexRealtimeBridge(OnRealtimeAudioAsync, OnRealtimeTranscriptAsync);'
+Require-Contains $realtimeServer $solCtorNeedle 'Realtime bridge constructor'
+$realtimeServer = $realtimeServer.Replace(
+    $solCtorNeedle,
+    $solCtorNeedle + "`r`n        solRuntime = SolRuntimeBridge.TryCreate(GetSolSnapshot, reason => EndSessionAsync(reason));"
+)
+
+$solRunNeedle = '        listener.Start();'
+Require-Contains $realtimeServer $solRunNeedle 'Realtime listener start'
+$realtimeServer = $realtimeServer.Replace(
+    $solRunNeedle,
+    $solRunNeedle + "`r`n        if (solRuntime is not null) await solRuntime.StartAsync();"
+)
+
+$solConnectNeedle = '        Console.WriteLine($"Realtime Android client connected · generation={generation} · {context.Request.RemoteEndPoint}");'
+Require-Contains $realtimeServer $solConnectNeedle 'Android client connected log'
+$solConnectBlock = @'
+        Console.WriteLine($"Realtime Android client connected · generation={generation} · {context.Request.RemoteEndPoint}");
+        solRuntime?.ObserveRemoteClient(context.Request.RemoteEndPoint);
+        solDeviceKey = context.Request.RemoteEndPoint is IPEndPoint ip
+            ? "remote:" + ip.Address
+            : "remote:" + (context.Request.RemoteEndPoint?.ToString() ?? "unknown");
+'@
+$realtimeServer = $realtimeServer.Replace($solConnectNeedle, $solConnectBlock.TrimEnd())
+
+$solHelloNeedle = @'
+            case "hello":
+            case "sync":
+                await SendStateToCurrentAsync();
+                return;
+'@
+Require-Contains $realtimeServer $solHelloNeedle 'hello/sync control block'
+$solHelloBlock = @'
+            case "hello":
+            {
+                solRuntime?.ObserveClientHello(root);
+                var explicitKey = ReadString(root, "speakerKey", "");
+                if (string.IsNullOrWhiteSpace(explicitKey)) explicitKey = ReadString(root, "deviceId", "");
+                if (string.IsNullOrWhiteSpace(explicitKey)) explicitKey = ReadString(root, "clientId", "");
+                if (!string.IsNullOrWhiteSpace(explicitKey)) solDeviceKey = "device:" + explicitKey.Trim();
+                await SendStateToCurrentAsync();
+                return;
+            }
+            case "sync":
+                await SendStateToCurrentAsync();
+                return;
+'@
+$realtimeServer = $realtimeServer.Replace($solHelloNeedle, $solHelloBlock)
+
+$solSessionStartNeedle = @'
+            await SendStateToCurrentAsync();
+            Console.WriteLine("Session " + id + ": starting Codex Realtime WebRTC");
+'@
+Require-Contains $realtimeServer $solSessionStartNeedle 'session activation announcement'
+$solSessionStartBlock = @'
+            solRuntime?.OnSessionStarted(id);
+            await SendStateToCurrentAsync();
+            Console.WriteLine("Session " + id + ": starting Codex Realtime WebRTC");
+'@
+$realtimeServer = $realtimeServer.Replace($solSessionStartNeedle, $solSessionStartBlock)
+
+$solSessionEndNeedle = '        Console.WriteLine("Session " + endingId + ": ended · " + reason);'
+Require-Contains $realtimeServer $solSessionEndNeedle 'session end log'
+$realtimeServer = $realtimeServer.Replace(
+    $solSessionEndNeedle,
+    '        solRuntime?.OnSessionEnded(endingId);' + "`r`n" + $solSessionEndNeedle
+)
+
+$solTranscriptNeedle = '        NoteRealtimeActivity(role, done);'
+Require-Contains $realtimeServer $solTranscriptNeedle 'Realtime transcript activity hook'
+$realtimeServer = $realtimeServer.Replace(
+    $solTranscriptNeedle,
+    $solTranscriptNeedle + "`r`n        if (done && solRuntime is not null)`r`n            _ = solRuntime.IngestTranscriptAsync(role, text, true, CurrentSessionId());"
+)
+
+$solSnapshotNeedle = '    string CurrentSessionId() { lock (sync) return sessionId; }'
+Require-Contains $realtimeServer $solSnapshotNeedle 'current session getter'
+$solSnapshotBlock = @'
+    string CurrentSessionId() { lock (sync) return sessionId; }
+
+    SolAudioRuntimeSnapshot GetSolSnapshot()
+    {
+        lock (sync)
+            return new SolAudioRuntimeSnapshot(state, sessionId, revision, stateReason, clientGeneration, solDeviceKey);
+    }
+'@
+$realtimeServer = $realtimeServer.Replace($solSnapshotNeedle, $solSnapshotBlock.TrimEnd())
+
+$solDisposeNeedle = '        bridge.Dispose();'
+Require-Contains $realtimeServer $solDisposeNeedle 'Realtime bridge dispose'
+$realtimeServer = $realtimeServer.Replace(
+    $solDisposeNeedle,
+    '        solRuntime?.Dispose();' + "`r`n" + $solDisposeNeedle
+)
+
 Set-Content $programPath $program -Encoding UTF8
 Set-Content $trayPath $tray -Encoding UTF8
 Set-Content $appSettingsPath $appSettings -Encoding UTF8
 Set-Content $downlinkPath $downlink -Encoding UTF8
+Set-Content $realtimeServerPath $realtimeServer -Encoding UTF8
 
-Write-Host 'SOL plugin mode layered after the known-good V3 transforms; settings remain standalone-compatible fallbacks.'
+Write-Host 'SOL plugin mode layered after golden V3 transforms; native MCP/input bridge and speaker identity contract enabled without changing standalone.'

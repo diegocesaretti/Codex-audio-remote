@@ -18,10 +18,34 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
 
     readonly ConcurrentDictionary<string, CachedState> states = new(StringComparer.OrdinalIgnoreCase);
     readonly CancellationTokenSource lifetime = new();
+    readonly SemaphoreSlim persistGate = new(1, 1);
+    readonly object persistSync = new();
+    readonly string? persistPath;
+    readonly int flushMs;
+
     Task? loopTask;
+    Timer? persistTimer;
     volatile bool connected;
+    volatile bool loadedFromDisk;
     long lastUpdateTicks;
+    long lastPersistedTicks;
+    long eventCount;
     int disposed;
+
+    HomeAssistantWebSocketCache()
+    {
+        flushMs = Math.Clamp(SolPluginHost.IntSetting("home_assistant_cache_flush_ms") ?? 2000, 250, 60000);
+        if (SolPluginHost.Enabled)
+        {
+            var dataDir = (Environment.GetEnvironmentVariable("SOL_PLUGIN_DATA_DIR") ?? "").Trim();
+            if (dataDir.Length > 0)
+            {
+                Directory.CreateDirectory(dataDir);
+                persistPath = Path.Combine(dataDir, "home-assistant-state-cache.json");
+                LoadPersisted();
+            }
+        }
+    }
 
     public static void StartGlobal()
     {
@@ -51,7 +75,7 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
 
     string GetCompactContext(int maxEntities)
     {
-        if (!connected || states.IsEmpty) return "";
+        if (states.IsEmpty) return "";
         var lines = states.Values
             .Where(s => RelevantDomains.Contains(DomainOf(s.EntityId), StringComparer.OrdinalIgnoreCase))
             .OrderBy(s => DomainOf(s.EntityId), StringComparer.OrdinalIgnoreCase)
@@ -65,11 +89,13 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
         var age = ticks <= 0
             ? "unknown"
             : Math.Max(0, (DateTimeOffset.UtcNow - new DateTimeOffset(ticks, TimeSpan.Zero)).TotalSeconds).ToString("0.0") + "s";
-        return "HOME ASSISTANT LIVE CACHE (age " + age + ")\n" + string.Join("\n", lines);
+        var source = connected ? "LIVE" : loadedFromDisk ? "PERSISTED/OFFLINE" : "CACHED/OFFLINE";
+        return $"HOME ASSISTANT {source} CACHE (age {age})\n" + string.Join("\n", lines);
     }
 
     async Task RunLoopAsync(CancellationToken token)
     {
+        var failures = 0;
         while (!token.IsCancellationRequested)
         {
             if (!AppSettings.HomeAssistantEnabled)
@@ -102,35 +128,79 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
                 if (!auth.TryGetProperty("type", out var authType) || authType.GetString() != "auth_ok")
                     throw new UnauthorizedAccessException("Home Assistant WebSocket authentication failed.");
 
-                connected = true;
-                Console.WriteLine("HA context cache · WebSocket connected");
-                await SendJsonAsync(ws, new { id = 1, type = "get_states" }, token);
+                // Match the SOL Home Assistant plugin's race-free startup: subscribe first,
+                // then buffer state_changed events while get_states is in flight.
                 await SendJsonAsync(ws, new { id = 2, type = "subscribe_events", event_type = "state_changed" }, token);
+                await WaitForSuccessfulResultAsync(ws, 2, token);
+
+                var buffered = new List<JsonElement>();
+                await SendJsonAsync(ws, new { id = 1, type = "get_states" }, token);
+                while (!token.IsCancellationRequested && ws.State == WebSocketState.Open)
+                {
+                    var root = await ReceiveJsonAsync(ws, token);
+                    if (IsResult(root, 1))
+                    {
+                        if (!IsSuccess(root)) throw new InvalidOperationException("HA get_states failed during cache prime.");
+                        if (!root.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Array)
+                            throw new InvalidOperationException("HA get_states returned an invalid snapshot.");
+                        ReplaceStates(result);
+                        break;
+                    }
+                    if (IsStateEvent(root)) buffered.Add(root.Clone());
+                }
+                foreach (var evt in buffered) ApplyStateChanged(evt);
+
+                connected = true;
+                failures = 0;
+                Touch(schedulePersist: true);
+                Console.WriteLine($"HA context cache · WebSocket connected · primed={states.Count} · buffered={buffered.Count} · disk={loadedFromDisk}");
 
                 while (!token.IsCancellationRequested && ws.State == WebSocketState.Open)
                 {
                     var root = await ReceiveJsonAsync(ws, token);
-                    var type = root.TryGetProperty("type", out var typeProp) ? typeProp.GetString() ?? "" : "";
-                    if (type == "result" && root.TryGetProperty("id", out var idProp) && idProp.TryGetInt32(out var id) && id == 1)
-                    {
-                        if (root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True &&
-                            root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Array)
-                            ReplaceStates(result);
-                        continue;
-                    }
-                    if (type == "event") ApplyStateChanged(root);
+                    if (IsStateEvent(root)) ApplyStateChanged(root);
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
                 connected = false;
-                Console.WriteLine("HA context cache · reconnect: " + ex.Message);
-                await Delay(token, 1800);
+                failures++;
+                var backoff = Math.Min(30000, 1000 * (1 << Math.Min(5, Math.Max(0, failures - 1)))) + Random.Shared.Next(0, 500);
+                Console.WriteLine($"HA context cache · reconnect in {backoff}ms: {ex.Message}");
+                await Delay(token, backoff);
             }
-            finally { connected = false; }
+            finally
+            {
+                connected = false;
+                SchedulePersist();
+            }
         }
     }
+
+    static async Task WaitForSuccessfulResultAsync(ClientWebSocket ws, int expectedId, CancellationToken token)
+    {
+        while (!token.IsCancellationRequested && ws.State == WebSocketState.Open)
+        {
+            var root = await ReceiveJsonAsync(ws, token);
+            if (!IsResult(root, expectedId)) continue;
+            if (!IsSuccess(root)) throw new InvalidOperationException($"HA WebSocket command {expectedId} failed.");
+            return;
+        }
+        throw new WebSocketException("Home Assistant closed while waiting for subscription result.");
+    }
+
+    static bool IsResult(JsonElement root, int id)
+        => root.TryGetProperty("type", out var type) && type.GetString() == "result" &&
+           root.TryGetProperty("id", out var idProp) && idProp.TryGetInt32(out var parsed) && parsed == id;
+
+    static bool IsSuccess(JsonElement root)
+        => root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True;
+
+    static bool IsStateEvent(JsonElement root)
+        => root.TryGetProperty("type", out var type) && type.GetString() == "event" &&
+           root.TryGetProperty("event", out var evt) && evt.ValueKind == JsonValueKind.Object &&
+           evt.TryGetProperty("event_type", out var eventType) && eventType.GetString() == "state_changed";
 
     void ReplaceStates(JsonElement array)
     {
@@ -140,8 +210,7 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
             var parsed = ParseState(item);
             if (parsed is not null) states[parsed.EntityId] = parsed;
         }
-        Touch();
-        Console.WriteLine("HA context cache · primed " + states.Count + " states");
+        Touch(schedulePersist: true);
     }
 
     void ApplyStateChanged(JsonElement root)
@@ -152,14 +221,16 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
         if (!data.TryGetProperty("new_state", out var newState) || newState.ValueKind == JsonValueKind.Null)
         {
             states.TryRemove(entityId, out _);
-            Touch();
+            Interlocked.Increment(ref eventCount);
+            Touch(schedulePersist: true);
             return;
         }
         var parsed = ParseState(newState);
         if (parsed is not null)
         {
             states[parsed.EntityId] = parsed;
-            Touch();
+            Interlocked.Increment(ref eventCount);
+            Touch(schedulePersist: true);
         }
     }
 
@@ -246,12 +317,111 @@ internal sealed class HomeAssistantWebSocketCache : IDisposable
         catch (OperationCanceledException) { }
     }
 
-    void Touch() => Interlocked.Exchange(ref lastUpdateTicks, DateTimeOffset.UtcNow.Ticks);
+    void Touch(bool schedulePersist)
+    {
+        Interlocked.Exchange(ref lastUpdateTicks, DateTimeOffset.UtcNow.Ticks);
+        if (schedulePersist) SchedulePersist();
+    }
+
+    void SchedulePersist()
+    {
+        if (persistPath is null || Volatile.Read(ref disposed) != 0) return;
+        lock (persistSync)
+        {
+            persistTimer ??= new Timer(_ =>
+            {
+                lock (persistSync)
+                {
+                    persistTimer?.Dispose();
+                    persistTimer = null;
+                }
+                _ = PersistAsync();
+            }, null, flushMs, Timeout.Infinite);
+        }
+    }
+
+    async Task PersistAsync()
+    {
+        if (persistPath is null) return;
+        await persistGate.WaitAsync();
+        try
+        {
+            var snapshot = states.Values
+                .OrderBy(value => value.EntityId, StringComparer.OrdinalIgnoreCase)
+                .Select(value => new
+                {
+                    entityId = value.EntityId,
+                    state = value.State,
+                    friendlyName = value.FriendlyName,
+                    attributes = value.Attributes
+                })
+                .ToArray();
+            var payload = JsonSerializer.Serialize(new
+            {
+                version = 1,
+                updatedAt = new DateTimeOffset(Math.Max(Interlocked.Read(ref lastUpdateTicks), DateTimeOffset.UtcNow.Ticks), TimeSpan.Zero),
+                eventCount = Interlocked.Read(ref eventCount),
+                states = snapshot
+            });
+            var directory = Path.GetDirectoryName(persistPath)!;
+            Directory.CreateDirectory(directory);
+            var temporary = persistPath + "." + Environment.ProcessId + ".tmp";
+            await File.WriteAllTextAsync(temporary, payload);
+            File.Move(temporary, persistPath, true);
+            Interlocked.Exchange(ref lastPersistedTicks, DateTimeOffset.UtcNow.Ticks);
+        }
+        catch (Exception ex)
+        {
+            SolPluginHost.Log("warn", "HA cache persist failed: " + ex.Message);
+        }
+        finally { persistGate.Release(); }
+    }
+
+    void LoadPersisted()
+    {
+        if (persistPath is null || !File.Exists(persistPath)) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(persistPath));
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("states", out var array) || array.ValueKind != JsonValueKind.Array) return;
+            foreach (var item in array.EnumerateArray())
+            {
+                var entityId = item.TryGetProperty("entityId", out var entity) ? entity.GetString() : null;
+                if (string.IsNullOrWhiteSpace(entityId)) continue;
+                var state = item.TryGetProperty("state", out var stateProp) ? stateProp.GetString() ?? "" : "";
+                var friendly = item.TryGetProperty("friendlyName", out var friendlyProp) ? friendlyProp.GetString() ?? entityId : entityId;
+                var attrs = item.TryGetProperty("attributes", out var attributes) && attributes.ValueKind == JsonValueKind.Object
+                    ? attributes.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
+                states[entityId] = new CachedState(entityId, state, friendly, attrs);
+            }
+            if (root.TryGetProperty("updatedAt", out var updatedAt) && updatedAt.ValueKind == JsonValueKind.String &&
+                DateTimeOffset.TryParse(updatedAt.GetString(), out var parsed))
+                Interlocked.Exchange(ref lastUpdateTicks, parsed.UtcTicks);
+            else if (File.GetLastWriteTimeUtc(persistPath) is var fileTime)
+                Interlocked.Exchange(ref lastUpdateTicks, new DateTimeOffset(fileTime, TimeSpan.Zero).Ticks);
+            if (root.TryGetProperty("eventCount", out var count) && count.TryGetInt64(out var parsedCount))
+                Interlocked.Exchange(ref eventCount, parsedCount);
+            loadedFromDisk = states.Count > 0;
+            Console.WriteLine($"HA context cache · loaded {states.Count} persisted states before WebSocket connect");
+        }
+        catch (Exception ex)
+        {
+            SolPluginHost.Log("warn", "HA cache load failed: " + ex.Message);
+        }
+    }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         lifetime.Cancel();
+        lock (persistSync)
+        {
+            persistTimer?.Dispose();
+            persistTimer = null;
+        }
+        try { PersistAsync().GetAwaiter().GetResult(); } catch { }
         lifetime.Dispose();
+        persistGate.Dispose();
     }
 }

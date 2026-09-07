@@ -2,11 +2,13 @@ name: build-sol-plugin
 
 on:
   push:
-    branches: [ feat/sol-plugin-port ]
+    branches: [ feat/sol-plugin-port, feat/sol-native-audio-identity ]
   workflow_dispatch:
 
 permissions:
   contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
   windows:
@@ -20,7 +22,6 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # Reproduce the exact known-good standalone V3 build first.
       - name: Apply captured official Codex realtime flow
         shell: pwsh
         run: ./scripts/prepare-official-realtime.ps1
@@ -61,20 +62,27 @@ jobs:
         shell: pwsh
         run: ./scripts/apply-ha-context-to-working-v3.ps1
 
-      # Only now add the SOL-hosted behavior. The standalone workflow/branch is untouched.
       - name: Layer SOL plugin mode
         shell: pwsh
         run: ./scripts/prepare-sol-plugin-mode.ps1
+
+      - name: Finalize SOL native callback routing
+        shell: pwsh
+        run: ./scripts/finalize-sol-native-runtime.ps1
 
       - name: Verify golden V3 invariants and plugin isolation
         shell: pwsh
         run: |
           $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
+          $server = Get-Content windows/CodexAudioRemote.Server/RealtimeSessionServer.cs -Raw
           $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
           $tray = Get-Content windows/CodexAudioRemote.Server/TrayController.cs -Raw
           $appSettings = Get-Content windows/CodexAudioRemote.Server/AppSettings.cs -Raw
           $downlink = Get-Content windows/CodexAudioRemote.Server/DownlinkDeviceSettings.cs -Raw
           $pluginHostSource = Get-Content windows/CodexAudioRemote.Server/SolPluginHost.cs -Raw
+          $solRuntime = Get-Content windows/CodexAudioRemote.Server/SolRuntimeBridge.cs -Raw
+          $haCache = Get-Content windows/CodexAudioRemote.Server/HomeAssistantWebSocketCache.cs -Raw
+          $manifest = Get-Content sol-plugin/sol-plugin.json -Raw
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
           if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
@@ -90,10 +98,37 @@ jobs:
           if ($appSettings -notmatch 'SolPluginHost\.Setting\("realtime_voice"\)') { throw 'SOL voice setting overlay missing' }
           if ($appSettings -notmatch 'SolPluginHost\.Setting\("home_assistant_url"\)') { throw 'SOL HA URL setting overlay missing' }
           if ($downlink -notmatch 'SolPluginAudioSettings\.SelectedDeviceId') { throw 'SOL audio output setting overlay missing' }
-          Write-Host 'Verified: golden V3 transport/lifecycle preserved; SOL layer is additive and plugin-only.'
+          if ($server -notmatch 'SolRuntimeBridge\.TryCreate') { throw 'SOL runtime bridge was not wired into RealtimeSessionServer' }
+          if ($server -notmatch 'TryHandleCallbackAsync') { throw 'SOL MCP callback is not routed by the proven Realtime listener' }
+          if ($server -notmatch 'OnSessionStarted') { throw 'SOL speaker session lifecycle missing' }
+          if ($server -notmatch 'IngestTranscriptAsync') { throw 'SOL transcript ingest hook missing' }
+          if ($solRuntime -notmatch 'codex_audio_bind_current_speaker') { throw 'Speaker binding MCP tool missing' }
+          if ($solRuntime -notmatch 'ApplyVoiceprintResolution') { throw 'Future voiceprint resolver contract missing' }
+          if ($solRuntime -notmatch '/v1/plugin-api/inputs/register') { throw 'SOL plugin input registration missing' }
+          if ($haCache -notmatch 'LoadPersisted') { throw 'Durable HA cache missing' }
+          if ($haCache -notmatch 'subscribe_events') { throw 'HA event subscription missing' }
+          if ($manifest -notmatch 'identity.speaker-binding') { throw 'Speaker binding capability missing' }
+          if ($manifest -notmatch '"mcp.register"') { throw 'Manifest MCP permission missing' }
+          if ($manifest -notmatch '"input.write"') { throw 'Manifest input write permission missing' }
+          Write-Host 'Verified: golden V3 preserved; native SOL MCP/input/speaker integration layered additively.'
 
       - name: Publish plugin runtime
-        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/sol-plugin
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $lines = @()
+          & dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/sol-plugin 2>&1 | Tee-Object -Variable lines
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+            if ($env:GITHUB_REF -eq 'refs/heads/feat/sol-native-audio-identity') {
+              $errors = $lines | ForEach-Object { $_.ToString() } | Where-Object { $_ -match ': error ' -or $_ -match 'error CS\d+' }
+              if (-not $errors) { $errors = $lines | Select-Object -Last 80 | ForEach-Object { $_.ToString() } }
+              $body = "CI compiler diagnostics for commit ``$env:GITHUB_SHA``:`n`n``````text`n" + (($errors | Select-Object -Last 80) -join "`n") + "`n``````"
+              gh pr comment 11 --repo $env:GITHUB_REPOSITORY --body $body
+            }
+            exit $exitCode
+          }
 
       - name: Assemble .solplugin package
         shell: pwsh
@@ -110,6 +145,7 @@ jobs:
           Write-Host "Built $plugin"
 
       - name: Publish stable SOL plugin release asset
+        if: github.ref == 'refs/heads/feat/sol-plugin-port'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
