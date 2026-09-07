@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Codex Realtime V3 voice bridge hosted and supervised by SOL. Ported from the known-good standalone build without modifying it.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
@@ -21,5 +21,86 @@
     "audio.output",
     "windows.registry",
     "process.codex"
-  ]
+  ],
+  "settings": [
+    {
+      "key": "realtime_voice",
+      "label": "Voz Realtime",
+      "type": "select",
+      "description": "Voz usada por Codex Realtime V3.",
+      "default": "sol",
+      "options": [
+        { "value": "alloy", "label": "Alloy" },
+        { "value": "arbor", "label": "Arbor" },
+        { "value": "ash", "label": "Ash" },
+        { "value": "ballad", "label": "Ballad" },
+        { "value": "breeze", "label": "Breeze" },
+        { "value": "cedar", "label": "Cedar" },
+        { "value": "coral", "label": "Coral" },
+        { "value": "cove", "label": "Cove" },
+        { "value": "echo", "label": "Echo" },
+        { "value": "ember", "label": "Ember" },
+        { "value": "juniper", "label": "Juniper" },
+        { "value": "maple", "label": "Maple" },
+        { "value": "marin", "label": "Marin" },
+        { "value": "sage", "label": "Sage" },
+        { "value": "shimmer", "label": "Shimmer" },
+        { "value": "sol", "label": "Sol" },
+        { "value": "spruce", "label": "Spruce" },
+        { "value": "vale", "label": "Vale" },
+        { "value": "verse", "label": "Verse" }
+      ]
+    },
+    {
+      "key": "realtime_working_directory",
+      "label": "Carpeta de trabajo Realtime",
+      "type": "path",
+      "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración standalone."
+    },
+    {
+      "key": "home_assistant_enabled",
+      "label": "Home Assistant habilitado",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "home_assistant_url",
+      "label": "URL de Home Assistant",
+      "type": "text",
+      "description": "Ejemplo: http://homeassistant.local:8123. Vacío conserva el valor standalone."
+    },
+    {
+      "key": "home_assistant_api_port",
+      "label": "Puerto del adaptador HA",
+      "type": "number",
+      "default": 8766,
+      "min": 1024,
+      "max": 65535
+    },
+    {
+      "key": "downlink_device",
+      "label": "Salida de audio",
+      "type": "text",
+      "description": "ID o parte del nombre del dispositivo de salida. Vacío usa la salida que ya tiene guardada Codex Audio Remote."
+    },
+    {
+      "key": "btcom_path",
+      "label": "Ruta a btcom.exe",
+      "type": "path",
+      "description": "Opcional. Vacío conserva la detección/configuración existente."
+    },
+    {
+      "key": "btcom_wait_seconds",
+      "label": "Espera de reconexión Bluetooth",
+      "type": "number",
+      "default": 6,
+      "min": 1,
+      "max": 15
+    }
+  ],
+  "distribution": {
+    "type": "github-release",
+    "tag": "sol-plugin-latest",
+    "asset": "CodexAudioRemote.solplugin"
+  }
 }
