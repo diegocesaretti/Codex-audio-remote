@@ -11,6 +11,13 @@ internal sealed record SolAudioRuntimeSnapshot(
     long ClientGeneration,
     string DeviceKey);
 
+internal sealed record SolCanonicalPerson(
+    string EntityId,
+    string Name,
+    bool LinkedToSolMember,
+    string? Source,
+    string? SourcePluginId);
+
 internal sealed class SolRuntimeBridge : IDisposable
 {
     readonly Func<SolAudioRuntimeSnapshot> snapshot;
@@ -84,7 +91,7 @@ internal sealed class SolRuntimeBridge : IDisposable
             await EnsureInputAsync();
             await SetInputStatusAsync("connected", DateTimeOffset.UtcNow);
             await RegisterMcpToolsAsync();
-            SolPluginHost.Log("info", $"SOL native bridge ready · MCP=127.0.0.1:{callbackPort}{callbackPath} · transcript-ingest={ingestTranscripts}");
+            SolPluginHost.Log("info", $"SOL native bridge ready · MCP=127.0.0.1:{callbackPort}{callbackPath} · transcript-ingest={ingestTranscripts} · speaker-person-validation=on");
         }
         catch (Exception ex)
         {
@@ -155,20 +162,24 @@ internal sealed class SolRuntimeBridge : IDisposable
         }
     }
 
-    // Future speaker-identification engines plug in here. The downstream SOL contract already
-    // consumes canonical personEntityId, so adding a voiceprint resolver requires no transcript/MCP migration.
-    public void ApplyVoiceprintResolution(string profileId, string personEntityId, string? personLabel, double confidence)
+    // Future biometric/voiceprint implementations must resolve to a currently visible
+    // canonical SOL Person before a profile is accepted. A voiceprint is identity evidence,
+    // never a SOL login, role or permission grant.
+    public async Task<bool> ApplyVoiceprintResolutionAsync(string profileId, string personEntityId, double confidence)
     {
-        if (string.IsNullOrWhiteSpace(profileId) || string.IsNullOrWhiteSpace(personEntityId)) return;
+        if (string.IsNullOrWhiteSpace(profileId) || string.IsNullOrWhiteSpace(personEntityId)) return false;
+        var person = await ResolveCanonicalPersonAsync(personEntityId.Trim());
+        if (person is null) return false;
         var resolution = new SpeakerResolution(
-            personEntityId.Trim(),
-            string.IsNullOrWhiteSpace(personLabel) ? null : personLabel.Trim(),
+            person.EntityId,
+            person.Name,
             "voiceprint",
             profileId.Trim(),
             Math.Clamp(confidence, 0, 1),
             DateTimeOffset.UtcNow);
         bindings.SetVoiceProfile(profileId.Trim(), resolution);
         lock (sync) sessionSpeaker = resolution;
+        return true;
     }
 
     public async Task IngestTranscriptAsync(string role, string text, bool done, string sessionId)
@@ -258,19 +269,20 @@ internal sealed class SolRuntimeBridge : IDisposable
         {
             new { name = "codex_audio_status", description = "Return Codex Audio Remote realtime/session/device state and current SOL speaker resolution.", inputSchema = emptySchema, requiresSubmit = false },
             new { name = "codex_audio_get_speaker", description = "Return the current session speaker resolution and any remembered manual device binding. Unknown means no identity has been asserted.", inputSchema = emptySchema, requiresSubmit = false },
+            new { name = "codex_audio_list_people", description = "List canonical SOL Persons visible to this plugin for speaker binding. A Person is a human identity and does not imply a SOL account, role or access grant.", inputSchema = emptySchema, requiresSubmit = false },
             new
             {
                 name = "codex_audio_bind_current_speaker",
-                description = "Bind the current human speaker to an existing canonical SOL person entity. Resolve the SOL person first. This is a manual assertion, not biometric identification.",
+                description = "Bind the current human speaker to an existing canonical SOL Person. The id is validated against SOL before it is stored. This is a manual identity assertion, not biometric identification or an access grant.",
                 inputSchema = new
                 {
                     type = "object",
                     properties = new Dictionary<string, object>
                     {
                         ["confirmedByUser"] = new { type = "boolean", @const = true },
-                        ["personEntityId"] = new { type = "string", description = "Canonical SOL person entity id." },
-                        ["personLabel"] = new { type = "string", description = "Optional display label for diagnostics." },
-                        ["rememberForDevice"] = new { type = "boolean", description = "Use this person as the manual default for this satellite until speaker recognition supersedes it." }
+                        ["personEntityId"] = new { type = "string", description = "Canonical SOL Person entity id returned by codex_audio_list_people or another trusted SOL Person resolver." },
+                        ["personLabel"] = new { type = "string", description = "Deprecated display hint; SOL's canonical Person name is authoritative." },
+                        ["rememberForDevice"] = new { type = "boolean", description = "Use this Person as the manual default for this satellite until speaker recognition supersedes it." }
                     },
                     required = new[] { "confirmedByUser", "personEntityId" },
                     additionalProperties = false
@@ -336,11 +348,16 @@ internal sealed class SolRuntimeBridge : IDisposable
                 case "codex_audio_get_speaker":
                     await WriteJsonAsync(context.Response, 200, SpeakerPayload());
                     return;
+                case "codex_audio_list_people":
+                    await WriteJsonAsync(context.Response, 200, await ListCanonicalPeopleAsync());
+                    return;
                 case "codex_audio_bind_current_speaker":
                     if (!Confirmed(args)) { await WriteJsonAsync(context.Response, 403, new { error = "explicit_user_confirmation_required" }); return; }
                     var personEntityId = ReadString(args, "personEntityId")?.Trim();
                     if (string.IsNullOrWhiteSpace(personEntityId)) { await WriteJsonAsync(context.Response, 400, new { error = "personEntityId_required" }); return; }
-                    if (!BindCurrentSpeaker(personEntityId, ReadString(args, "personLabel"), ReadBool(args, "rememberForDevice"), out var bindError))
+                    var canonicalPerson = await ResolveCanonicalPersonAsync(personEntityId);
+                    if (canonicalPerson is null) { await WriteJsonAsync(context.Response, 404, new { error = "canonical_sol_person_not_found" }); return; }
+                    if (!BindCurrentSpeaker(canonicalPerson.EntityId, canonicalPerson.Name, ReadBool(args, "rememberForDevice"), out var bindError))
                     {
                         await WriteJsonAsync(context.Response, 409, new { error = bindError });
                         return;
@@ -368,7 +385,7 @@ internal sealed class SolRuntimeBridge : IDisposable
         }
     }
 
-    bool BindCurrentSpeaker(string personEntityId, string? personLabel, bool rememberForDevice, out string? error)
+    bool BindCurrentSpeaker(string personEntityId, string personLabel, bool rememberForDevice, out string? error)
     {
         lock (sync)
         {
@@ -377,7 +394,7 @@ internal sealed class SolRuntimeBridge : IDisposable
                 error = "no_active_voice_session";
                 return false;
             }
-            sessionSpeaker = new SpeakerResolution(personEntityId, string.IsNullOrWhiteSpace(personLabel) ? null : personLabel.Trim(), "manual", null, null, DateTimeOffset.UtcNow);
+            sessionSpeaker = new SpeakerResolution(personEntityId, personLabel, "manual-validated", null, null, DateTimeOffset.UtcNow);
             if (rememberForDevice && activeDeviceKey != "unknown") bindings.SetDeviceDefault(activeDeviceKey, sessionSpeaker);
             error = null;
             return true;
@@ -410,7 +427,8 @@ internal sealed class SolRuntimeBridge : IDisposable
             speaker = SpeakerDto(speaker),
             transcriptIngest = ingestTranscripts,
             speakerIdentification = "not-implemented",
-            futureResolverContract = "voiceprint -> canonical SOL personEntityId"
+            personContract = "speaker bindings must resolve to a visible canonical SOL Person; Person identity grants no SOL access",
+            futureResolverContract = "voiceprint -> validate canonical SOL personEntityId -> speaker binding"
         };
     }
 
@@ -427,7 +445,15 @@ internal sealed class SolRuntimeBridge : IDisposable
             speaker = sessionSpeaker;
             deviceDefault = bindings.GetDeviceDefault(activeDeviceKey);
         }
-        return new { sessionId, deviceKey, current = SpeakerDto(speaker), rememberedDeviceDefault = SpeakerDto(deviceDefault), identificationImplemented = false };
+        return new
+        {
+            sessionId,
+            deviceKey,
+            current = SpeakerDto(speaker),
+            rememberedDeviceDefault = SpeakerDto(deviceDefault),
+            identificationImplemented = false,
+            personIdentityGrantsAccess = false
+        };
     }
 
     static object? SpeakerDto(SpeakerResolution? value) => value is null ? null : new
@@ -439,6 +465,41 @@ internal sealed class SolRuntimeBridge : IDisposable
         value.Confidence,
         value.UpdatedAt
     };
+
+    async Task<JsonElement> ListCanonicalPeopleAsync()
+    {
+        var result = await GetAsync("/v1/plugin-api/identities/people");
+        if (result is null) throw new InvalidOperationException("SOL Person directory returned no payload");
+        return result.Value;
+    }
+
+    async Task<SolCanonicalPerson?> ResolveCanonicalPersonAsync(string personEntityId)
+    {
+        if (!Guid.TryParse(personEntityId, out _)) return null;
+        var result = await GetAsync("/v1/plugin-api/identities/people/" + Uri.EscapeDataString(personEntityId), allowNotFound: true);
+        if (result is null || !result.Value.TryGetProperty("person", out var person) || person.ValueKind != JsonValueKind.Object) return null;
+        var entityId = ReadString(person, "entityId")?.Trim();
+        var name = ReadString(person, "name")?.Trim();
+        if (string.IsNullOrWhiteSpace(entityId) || string.IsNullOrWhiteSpace(name)) return null;
+        return new SolCanonicalPerson(
+            entityId,
+            name,
+            ReadBool(person, "linkedToSolMember"),
+            ReadString(person, "source"),
+            ReadString(person, "sourcePluginId"));
+    }
+
+    async Task<JsonElement?> GetAsync(string path, bool allowNotFound = false)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + path);
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        using var response = await http.SendAsync(request, lifetime.Token);
+        var text = await response.Content.ReadAsStringAsync(lifetime.Token);
+        if (allowNotFound && response.StatusCode == HttpStatusCode.NotFound) return null;
+        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"SOL Plugin API HTTP {(int)response.StatusCode}: {text}");
+        using var document = JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
+        return document.RootElement.Clone();
+    }
 
     async Task<JsonElement> RequestAsync(string path, object body)
     {
