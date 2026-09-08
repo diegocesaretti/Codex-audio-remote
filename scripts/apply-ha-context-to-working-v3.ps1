@@ -16,10 +16,13 @@ if ($source -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { th
 $sessionMarker = '        Console.WriteLine($"Starting official Codex WebRTC session · version={RealtimeVersion} · model={RealtimeModel} · voice={RealtimeVoice}");'
 if (-not $source.Contains($sessionMarker)) { throw 'Official V3 session marker not found after transforms.' }
 $contextBlock = @'
-        // Independent live HA snapshot. Empty context is valid and never blocks voice startup.
-        // This does not change thread continuity, model, voice, SDP, auth or WebRTC transport.
-        var haContext = HomeAssistantWebSocketCache.GetGlobalContext(80);
-        Console.WriteLine($"HA realtime context · available={!string.IsNullOrWhiteSpace(haContext)} · chars={haContext.Length}");
+        // Standalone keeps its proven direct HA WebSocket cache. Under SOL, Home Assistant
+        // state belongs to the Home Assistant plugin and is consumed through SOL's read-only
+        // plugin bus; Audio Remote never receives or stores the HA token/cache in plugin mode.
+        var haContext = SolPluginHost.Enabled
+            ? await SolHomeAssistantContext.GetContextAsync(80, cancellationToken)
+            : HomeAssistantWebSocketCache.GetGlobalContext(80);
+        Console.WriteLine($"HA realtime context · source={(SolPluginHost.Enabled ? "sol-home-assistant-plugin" : "standalone-cache")} · available={!string.IsNullOrWhiteSpace(haContext)} · chars={haContext.Length}");
 
 '@
 $source = $source.Replace($sessionMarker, $contextBlock + $sessionMarker)
@@ -59,8 +62,8 @@ if ($source -match 'threadParams\["ephemeral"\]') { throw 'HA recovery build mus
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
 
-# Start the independent HA cache only AFTER all legacy Program.cs transforms have finished.
-# This avoids changing any source block that those known-good scripts expect to match exactly.
+# The direct HA cache remains a standalone fallback only. In SOL plugin mode the Home Assistant
+# plugin is the single owner of HA credentials, WebSocket connection and persistent state cache.
 $programPath = Join-Path $PSScriptRoot '..\windows\CodexAudioRemote.Server\Program.cs'
 $program = Get-Content -LiteralPath $programPath -Raw
 $programAnchor = 'var options = Options.Parse(args);'
@@ -69,12 +72,15 @@ if ($program -notmatch 'HomeAssistantWebSocketCache\.StartGlobal') {
     $programInsert = @'
 var options = Options.Parse(args);
 
-// Independent HA state cache. It does not own or alter Codex Realtime/WebRTC.
-HomeAssistantWebSocketCache.StartGlobal();
-AppDomain.CurrentDomain.ProcessExit += (_, _) => HomeAssistantWebSocketCache.DisposeGlobal();
+// Standalone-only HA state cache. SOL plugin mode delegates state/context to the Home Assistant plugin.
+if (!SolPluginHost.Enabled)
+{
+    HomeAssistantWebSocketCache.StartGlobal();
+    AppDomain.CurrentDomain.ProcessExit += (_, _) => HomeAssistantWebSocketCache.DisposeGlobal();
+}
 '@
     $program = $program.Replace($programAnchor, $programInsert.TrimEnd())
 }
 Set-Content -LiteralPath $programPath -Value $program -Encoding utf8 -NoNewline
 
-Write-Host 'HA context layered onto known-good official V3 flow; thread lifecycle and Realtime transport unchanged.'
+Write-Host 'HA context layered onto known-good V3: standalone cache preserved; SOL mode delegates to Home Assistant plugin.'
