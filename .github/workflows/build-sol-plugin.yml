@@ -3,6 +3,8 @@ name: build-sol-plugin
 on:
   push:
     branches: [ feat/sol-plugin-port, feat/sol-native-audio-identity ]
+  pull_request:
+    branches: [ feat/sol-plugin-port ]
   workflow_dispatch:
 
 permissions:
@@ -103,14 +105,18 @@ jobs:
           if ($server -notmatch 'OnSessionStarted') { throw 'SOL speaker session lifecycle missing' }
           if ($server -notmatch 'IngestTranscriptAsync') { throw 'SOL transcript ingest hook missing' }
           if ($solRuntime -notmatch 'codex_audio_bind_current_speaker') { throw 'Speaker binding MCP tool missing' }
-          if ($solRuntime -notmatch 'ApplyVoiceprintResolution') { throw 'Future voiceprint resolver contract missing' }
+          if ($solRuntime -notmatch 'codex_audio_list_people') { throw 'Canonical SOL Person listing tool missing' }
+          if ($solRuntime -notmatch '/v1/plugin-api/identities/people') { throw 'Canonical SOL Person validation API missing' }
+          if ($solRuntime -notmatch 'canonical_sol_person_not_found') { throw 'Speaker binding does not reject unknown SOL Person ids' }
+          if ($solRuntime -notmatch 'ApplyVoiceprintResolutionAsync') { throw 'Future validated voiceprint resolver contract missing' }
           if ($solRuntime -notmatch '/v1/plugin-api/inputs/register') { throw 'SOL plugin input registration missing' }
           if ($haCache -notmatch 'LoadPersisted') { throw 'Durable HA cache missing' }
           if ($haCache -notmatch 'subscribe_events') { throw 'HA event subscription missing' }
           if ($manifest -notmatch 'identity.speaker-binding') { throw 'Speaker binding capability missing' }
+          if ($manifest -notmatch '"identity.read"') { throw 'Manifest canonical Person read contract missing' }
           if ($manifest -notmatch '"mcp.register"') { throw 'Manifest MCP permission missing' }
           if ($manifest -notmatch '"input.write"') { throw 'Manifest input write permission missing' }
-          Write-Host 'Verified: golden V3 preserved; native SOL MCP/input/speaker integration layered additively.'
+          Write-Host 'Verified: golden V3 preserved; native SOL MCP/input and validated canonical Person binding layered additively.'
 
       - name: Publish plugin runtime
         shell: pwsh
