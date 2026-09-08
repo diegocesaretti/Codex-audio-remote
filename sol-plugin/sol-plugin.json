@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.3.0",
-  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, SOL MCP/input APIs, durable HA context cache and validated speaker-to-canonical-Person bindings.",
+  "version": "1.3.1",
+  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, canonical SOL Persons and Home Assistant context delegated to SOL's Home Assistant plugin.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -12,7 +12,7 @@
   "capabilities": [
     "audio.realtime",
     "codex.oauth",
-    "homeassistant.context-cache",
+    "homeassistant.context-consumer",
     "voice.android-client",
     "input.codex-audio",
     "mcp.codex-audio",
@@ -38,6 +38,7 @@
     "input.status",
     "identity.read",
     "mcp.register",
+    "mcp.invoke.read",
     "filesystem.plugin-data"
   ],
   "settings": [
@@ -84,39 +85,32 @@
     },
     {
       "key": "home_assistant_enabled",
-      "label": "Home Assistant habilitado",
+      "label": "Integración de audio con Home Assistant",
       "type": "boolean",
+      "description": "Controla las funciones de audio/mirror de Audio Remote. El estado y caché de Home Assistant pertenecen siempre al plugin Home Assistant cuando corre bajo SOL.",
       "default": true
     },
     {
       "key": "home_assistant_url",
-      "label": "URL de Home Assistant",
+      "label": "URL de Home Assistant para audio/mirror",
       "type": "text",
-      "description": "Ejemplo: http://homeassistant.local:8123. Vacío conserva el valor standalone."
+      "description": "Opcional para funciones legacy de mirror/cast de audio. No se usa para el caché de estado en modo SOL."
     },
     {
       "key": "home_assistant_token",
-      "label": "Token de Home Assistant",
+      "label": "Token HA para audio/mirror legacy",
       "type": "secret",
-      "description": "Token de larga duración usado por el WebSocket de contexto. SOL lo inyecta sólo al proceso del plugin.",
+      "description": "Opcional y sólo para funciones directas de audio/mirror. El contexto de estado en modo SOL usa el plugin Home Assistant y no este token.",
       "env": "HOME_ASSISTANT_TOKEN"
     },
     {
       "key": "home_assistant_api_port",
-      "label": "Puerto del adaptador HA",
+      "label": "Puerto del adaptador de audio para HA",
       "type": "number",
+      "description": "Puerto local de /api/speak, /api/tts y realtime-mirror. No es una segunda API de estado de Home Assistant.",
       "default": 8766,
       "min": 1024,
       "max": 65535
-    },
-    {
-      "key": "home_assistant_cache_flush_ms",
-      "label": "Persistencia del caché HA (ms)",
-      "type": "number",
-      "description": "Debounce para guardar el último snapshot/eventos de Home Assistant en SOL_PLUGIN_DATA_DIR.",
-      "default": 2000,
-      "min": 250,
-      "max": 60000
     },
     {
       "key": "downlink_device",
