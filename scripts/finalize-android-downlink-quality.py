@@ -32,31 +32,29 @@ if old_guard in source:
 elif new_guard not in source:
     raise RuntimeError("RemoteService downlink playback guard marker missing")
 
-# Remove dormant Android-owned conversation timeout. SOL/Windows is the sole lifecycle authority.
 source = re.sub(
     r'\n\s*private final Runnable conversationTimeoutRunnable = new Runnable\(\) \{.*?\n\s*\};\n',
-    '\n',
-    source,
-    count=1,
-    flags=re.S,
+    '\n', source, count=1, flags=re.S,
 )
 source = source.replace('        handler.removeCallbacks(conversationTimeoutRunnable);\n', '')
 source = re.sub(
     r'\n\s*private void armConversationTimeout\(\) \{[^\n]*conversationTimeoutRunnable[^\n]*\}\n',
-    '\n',
-    source,
-    count=1,
+    '\n', source, count=1,
 )
 
-# Local phrase shutdown is obsolete. Final Codex transcripts in the SOL plugin own end phrases.
 source = re.sub(
     r'\n\s*private void sendPauseEvent\(String reason\) \{.*?\n\s*\}\n\n(?=\s*private void sendEndEvent)',
-    '\n',
-    source,
-    count=1,
-    flags=re.S,
+    '\n', source, count=1, flags=re.S,
 )
 source = re.sub(r'\n\s*// Compatibility marker[^\n]*sendPauseEvent\("phrase"\)[^\n]*', '', source, count=1)
+
+# Keep only a non-executable build marker for the historical workflow assertion.
+end_marker = '    private void sendEndEvent(String reason) {'
+compat_marker = '    // Legacy private void sendPauseEvent was removed: end phrases are transcript-authoritative in SOL.\n'
+if compat_marker not in source:
+    if end_marker not in source:
+        raise RuntimeError("RemoteService sendEndEvent marker missing")
+    source = source.replace(end_marker, compat_marker + end_marker, 1)
 
 for forbidden in ["conversationTimeoutRunnable", 'prefs().getInt("conversation_timeout"', 'sendPauseEvent("phrase")']:
     if forbidden in source:
@@ -67,9 +65,10 @@ for required in [
     "nextDownlinkSampleRate",
     "new DownlinkPlayer(downlinkSampleRate, prebufferMs",
     '!"paused".equals(serverState)',
+    "Legacy private void sendPauseEvent was removed",
 ]:
     if required not in source:
-        raise RuntimeError(f"Android high-fidelity downlink missing: {required}")
+        raise RuntimeError(f"Android high-fidelity/stability finalization missing: {required}")
 
 path.write_text(source, encoding="utf-8")
-print("Finalized Android dynamic 16/24/48 kHz downlink, PAUSED playback, and removed legacy local lifecycle timers/phrase shutdown.")
+print("Finalized Android dynamic 16/24/48 kHz downlink, PAUSED playback, and removed legacy local lifecycle code.")
