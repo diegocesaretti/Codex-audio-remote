@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons, dynamic SOL plugin tools and transcript-driven listening lifecycle. The SOL package is a minimal Realtime-only self-contained runtime with an unelevated Kestrel LAN listener.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
@@ -102,8 +102,17 @@
       "key": "end_phrases",
       "label": "Palabras o frases para terminar la escucha",
       "type": "text",
-      "description": "Separadas por coma, punto y coma o salto de línea. Se evalúan sólo sobre transcripciones finales del usuario. Cierran el micrófono pero Codex sigue razonando y respondiendo.",
+      "description": "Separadas por coma, punto y coma o salto de línea. Se evalúan sólo sobre transcripciones finales del usuario. Cierran el micrófono pero permiten una despedida breve de Sol antes del cierre total.",
       "default": "chau, gracias"
+    },
+    {
+      "key": "end_phrase_grace_seconds",
+      "label": "Gracia tras palabra de cierre (segundos)",
+      "type": "number",
+      "description": "Después de detectar una palabra o frase de cierre, el micrófono se cierra de inmediato pero Sol puede responder o despedirse durante este tiempo antes de cerrar completamente la sesión. Una nueva wake word cancela el cierre.",
+      "default": 3,
+      "min": 0,
+      "max": 30
     },
     {
       "key": "listen_timeout_seconds",
@@ -127,7 +136,7 @@
       "key": "work_timeout_seconds",
       "label": "Tiempo de trabajo (segundos)",
       "type": "number",
-      "description": "Tiempo que Codex puede seguir razonando, usando herramientas y respondiendo con el micrófono cerrado. Una nueva wake word cancela este cierre y reinicia la escucha.",
+      "description": "Tiempo que Codex puede seguir razonando, usando herramientas y respondiendo con el micrófono cerrado cuando la escucha termina por silencio o timeout. Una nueva wake word cancela este cierre y reinicia la escucha.",
       "default": 30,
       "min": 1,
       "max": 3600
