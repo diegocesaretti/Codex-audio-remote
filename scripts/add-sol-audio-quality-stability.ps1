@@ -100,7 +100,7 @@ $methods = @'
         var seconds = SolAudioQualitySettings.ReconnectGraceSeconds;
         if (seconds <= 0)
         {
-            _ = EndSessionAsync("transport_lost");
+            _ = EndSessionAsync("transport_lost_timeout");
             return;
         }
 
