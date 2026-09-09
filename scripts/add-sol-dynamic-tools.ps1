@@ -30,7 +30,7 @@ $startBlock = @'
         var solToolSession = solDynamicTools is null
             ? null
             : await solDynamicTools.PrepareSessionAsync(cancellationToken);
-        if (solToolSession?.ForceNewThread == true)
+        if (solToolSession?.CatalogChanged == true && !string.IsNullOrWhiteSpace(AppSettings.RealtimePersistentThreadId))
         {
             Console.WriteLine("SOL dynamic tool catalog changed · creating one fresh Codex thread so the new tools are visible");
             AppSettings.RequestNewRealtimeConversation();
