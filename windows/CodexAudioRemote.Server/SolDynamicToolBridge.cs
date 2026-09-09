@@ -1,5 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 internal sealed record SolDynamicToolDescriptor(
@@ -13,7 +15,8 @@ internal sealed record SolDynamicToolSession(
     object[] DynamicTools,
     string DeveloperInstructions,
     bool ForceNewThread,
-    int ToolCount);
+    int ToolCount,
+    string CatalogSignature);
 
 /// <summary>
 /// Makes the SOL plugin tool catalog available to Codex App Server as thread-scoped
@@ -22,7 +25,7 @@ internal sealed record SolDynamicToolSession(
 /// </summary>
 internal sealed class SolDynamicToolBridge : IDisposable
 {
-    const string MigrationMarker = ".realtime-dynamic-tools-v1";
+    const string CatalogMarker = ".realtime-dynamic-tools-v1";
 
     readonly HttpClient http;
     readonly string baseUrl;
@@ -36,7 +39,7 @@ internal sealed class SolDynamicToolBridge : IDisposable
     {
         this.baseUrl = baseUrl.TrimEnd('/');
         this.token = token;
-        markerPath = Path.Combine(dataDir, MigrationMarker);
+        markerPath = Path.Combine(dataDir, CatalogMarker);
         http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
     }
 
@@ -77,16 +80,19 @@ internal sealed class SolDynamicToolBridge : IDisposable
               "For an action tool, invoke it only when the current human speech explicitly requested that action, and supply confirmedByUser=true only in that case. " +
               "Do not infer authorization from prior conversation. Available SOL tools: " + names + ".";
 
-        var forceNew = !File.Exists(markerPath) && !string.IsNullOrWhiteSpace(AppSettings.RealtimePersistentThreadId);
-        SolPluginHost.Log("info", $"Realtime SOL dynamic tools prepared · count={catalog.Count} · forceNewThread={forceNew} · tools={names}");
-        return new SolDynamicToolSession(dynamicTools, instructions, forceNew, catalog.Count);
+        var signature = ComputeCatalogSignature(catalog);
+        var rememberedSignature = ReadRememberedSignature();
+        var hasSavedThread = !string.IsNullOrWhiteSpace(AppSettings.RealtimePersistentThreadId);
+        var forceNew = hasSavedThread && !string.Equals(rememberedSignature, signature, StringComparison.Ordinal);
+        SolPluginHost.Log("info", $"Realtime SOL dynamic tools prepared · count={catalog.Count} · forceNewThread={forceNew} · catalog={signature[..Math.Min(12, signature.Length)]} · tools={names}");
+        return new SolDynamicToolSession(dynamicTools, instructions, forceNew, catalog.Count, signature);
     }
 
-    public void MarkThreadReady()
+    public void MarkThreadReady(string catalogSignature)
     {
-        if (disposed || File.Exists(markerPath)) return;
-        try { File.WriteAllText(markerPath, DateTimeOffset.UtcNow.ToString("O") + Environment.NewLine); }
-        catch (Exception ex) { SolPluginHost.Log("warn", "Could not persist Realtime dynamic-tools migration marker: " + ex.Message); }
+        if (disposed || string.IsNullOrWhiteSpace(catalogSignature)) return;
+        try { File.WriteAllText(markerPath, catalogSignature.Trim() + Environment.NewLine); }
+        catch (Exception ex) { SolPluginHost.Log("warn", "Could not persist Realtime SOL tool catalog signature: " + ex.Message); }
     }
 
     public async Task<JsonElement> InvokeAsync(string toolName, JsonElement arguments, CancellationToken cancellationToken)
@@ -99,10 +105,13 @@ internal sealed class SolDynamicToolBridge : IDisposable
         var route = string.Equals(tool.RequiredScope, "actions", StringComparison.Ordinal)
             ? "/v1/plugin-api/mcp/tools/invoke-action"
             : "/v1/plugin-api/mcp/tools/invoke-read";
+        var safeArguments = arguments.ValueKind == JsonValueKind.Object
+            ? arguments
+            : JsonDocument.Parse("{}").RootElement.Clone();
         var payload = new Dictionary<string, object?>
         {
             ["name"] = tool.Name,
-            ["arguments"] = arguments.ValueKind == JsonValueKind.Object ? arguments : JsonDocument.Parse("{}").RootElement.Clone()
+            ["arguments"] = safeArguments
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, baseUrl + route);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -145,7 +154,20 @@ internal sealed class SolDynamicToolBridge : IDisposable
                 : JsonDocument.Parse("{\"type\":\"object\",\"properties\":{}}").RootElement.Clone();
             result.Add(new SolDynamicToolDescriptor(pluginId, name, description, schema, scope));
         }
-        return result;
+        return result.OrderBy(item => item.PluginId, StringComparer.Ordinal).ThenBy(item => item.Name, StringComparer.Ordinal).ToList();
+    }
+
+    string ReadRememberedSignature()
+    {
+        try { return File.Exists(markerPath) ? File.ReadAllText(markerPath).Trim() : ""; }
+        catch { return ""; }
+    }
+
+    static string ComputeCatalogSignature(IEnumerable<SolDynamicToolDescriptor> catalog)
+    {
+        var canonical = string.Join("\n", catalog.Select(item =>
+            item.PluginId + "\t" + item.Name + "\t" + item.RequiredScope + "\t" + item.Description + "\t" + item.InputSchema.GetRawText()));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
     }
 
     static string? ReadString(JsonElement root, string name)
