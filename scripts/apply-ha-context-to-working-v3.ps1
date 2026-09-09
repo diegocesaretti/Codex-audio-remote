@@ -11,17 +11,15 @@ if ($source -match 'type = "existingCall"') { throw 'Refusing context patch: exi
 if ($source -match 'directRealtimeCall\.CreateAsync') { throw 'Refusing context patch: direct ChatGPT call unexpectedly present.' }
 if ($source -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'Refusing context patch: working thread continuity flow is missing.' }
 
-# IMPORTANT: do not touch thread/start/thread/resume. SOL context and voice style are
-# layered only onto thread/realtime/start, leaving the proven media/auth path intact.
+# This transform is for the SOL-native package only. Home Assistant state is owned by
+# the Home Assistant SOL plugin and consumed through the read-only plugin bus. There
+# is intentionally no direct HA token/WebSocket/cache fallback in this package.
 $sessionMarker = '        Console.WriteLine($"Starting official Codex WebRTC session · version={RealtimeVersion} · model={RealtimeModel} · voice={RealtimeVoice}");'
 if (-not $source.Contains($sessionMarker)) { throw 'Official V3 session marker not found after transforms.' }
 $contextBlock = @'
-        // Under SOL, Home Assistant state comes from the Home Assistant plugin through
-        // the read-only plugin bus. Voice style is also a native Realtime instruction:
-        // no TTS bootstrap, hidden turn, virtual cable or microphone injection is used.
         var haContext = SolPluginHost.Enabled
             ? await SolHomeAssistantContext.GetContextAsync(80, cancellationToken)
-            : HomeAssistantWebSocketCache.GetGlobalContext(80);
+            : string.Empty;
         var voiceStyleInstructions = SolPluginHost.Enabled ? SolVoiceStyle.Instructions : string.Empty;
         var haInstructions = string.IsNullOrWhiteSpace(haContext)
             ? string.Empty
@@ -40,19 +38,15 @@ $oldRealtime = @'
             includeStartupContext = false,
             initialItems = Array.Empty<object>(),
 '@
-
 $newRealtime = @'
             codexResponsesAsItems = false,
             realtimeStartInstructions = string.IsNullOrWhiteSpace(realtimeInstructions) ? null : realtimeInstructions,
             includeStartupContext = false,
             initialItems = Array.Empty<object>(),
 '@
-
 if (-not $source.Contains($oldRealtime)) { throw 'V3 realtime/start anchor not found after official transforms.' }
 $source = $source.Replace($oldRealtime, $newRealtime)
 
-# Final invariants: context/style may change instructions only; they may not change
-# the proven model, WebRTC transport, OAuth ownership or thread continuity.
 if ($source -notmatch 'RealtimeVersion = "v3"') { throw 'V3 lost after context patch.' }
 if ($source -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'Realtime model changed after context patch.' }
 if ($source -notmatch 'type = "webrtc"') { throw 'WebRTC transport lost after context patch.' }
@@ -61,29 +55,8 @@ if ($source -match 'directRealtimeCall\.CreateAsync') { throw 'Context patch int
 if ($source -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'Context patch changed thread continuity.' }
 if ($source -notmatch 'realtimeStartInstructions') { throw 'Realtime instructions missing.' }
 if ($source -notmatch 'SolVoiceStyle\.Instructions') { throw 'Native voice style instructions missing.' }
+if ($source -match 'HomeAssistantWebSocketCache') { throw 'Direct HA cache leaked into native bridge.' }
 if ($source -match 'threadParams\["ephemeral"\]') { throw 'Context build must not alter thread lifecycle with ephemeral.' }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
-
-# The direct HA cache remains a standalone fallback only. In SOL plugin mode the Home Assistant
-# plugin is the single owner of HA credentials, WebSocket connection and persistent state cache.
-$programPath = Join-Path $PSScriptRoot '..\windows\CodexAudioRemote.Server\Program.cs'
-$program = Get-Content -LiteralPath $programPath -Raw
-$programAnchor = 'var options = Options.Parse(args);'
-if (-not $program.Contains($programAnchor)) { throw 'Program.cs options anchor missing after official transforms.' }
-if ($program -notmatch 'HomeAssistantWebSocketCache\.StartGlobal') {
-    $programInsert = @'
-var options = Options.Parse(args);
-
-// Standalone-only HA state cache. SOL plugin mode delegates state/context to the Home Assistant plugin.
-if (!SolPluginHost.Enabled)
-{
-    HomeAssistantWebSocketCache.StartGlobal();
-    AppDomain.CurrentDomain.ProcessExit += (_, _) => HomeAssistantWebSocketCache.DisposeGlobal();
-}
-'@
-    $program = $program.Replace($programAnchor, $programInsert.TrimEnd())
-}
-Set-Content -LiteralPath $programPath -Value $program -Encoding utf8 -NoNewline
-
-Write-Host 'HA context + native voice style layered onto known-good V3 without changing media/audio transport.'
+Write-Host 'SOL HA context + native voice style layered onto V3; no direct HA cache or legacy audio path.'
