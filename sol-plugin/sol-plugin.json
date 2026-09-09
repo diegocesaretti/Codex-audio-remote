@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.5.1",
-  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons, dynamic SOL plugin tools and transcript-driven listening lifecycle. The SOL package is a minimal Realtime-only self-contained runtime with an unelevated Kestrel LAN listener.",
+  "version": "1.5.2",
+  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons, dynamic SOL plugin tools, high-fidelity configurable downlink and transcript-driven listening lifecycle.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -97,6 +97,36 @@
       "label": "Carpeta de trabajo Realtime",
       "type": "path",
       "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración persistida."
+    },
+    {
+      "key": "downlink_quality",
+      "label": "Calidad de voz",
+      "type": "select",
+      "description": "Resolución PCM enviada al cliente Android. Alta conserva hasta 48 kHz del audio WebRTC; Equilibrada usa 24 kHz; Compatibilidad usa 16 kHz.",
+      "default": "high",
+      "options": [
+        { "value": "high", "label": "Alta · 48 kHz" },
+        { "value": "balanced", "label": "Equilibrada · 24 kHz" },
+        { "value": "compatibility", "label": "Compatibilidad · 16 kHz" }
+      ]
+    },
+    {
+      "key": "downlink_gain_percent",
+      "label": "Nivel de salida de voz (%)",
+      "type": "number",
+      "description": "Ganancia aplicada al PCM de salida. 100 conserva el nivel original. Valores altos se limitan para evitar overflow.",
+      "default": 100,
+      "min": 50,
+      "max": 125
+    },
+    {
+      "key": "transport_reconnect_grace_seconds",
+      "label": "Gracia ante microcortes de red (segundos)",
+      "type": "number",
+      "description": "Mantiene Realtime vivo durante un corte breve del WebSocket Android. Si el teléfono reconecta dentro de este tiempo, la conversación continúa.",
+      "default": 4,
+      "min": 0,
+      "max": 15
     },
     {
       "key": "end_phrases",
