@@ -52,3 +52,8 @@ Set-Content $serverPath $server -Encoding UTF8
 Set-Content $runtimePath $runtime -Encoding UTF8
 Set-Content $cachePath $cache -Encoding UTF8
 Write-Host 'SOL native MCP callback routing finalized; Audio MCP prefix aligned to codex_audio_remote_.'
+
+# Dynamic SOL tools are intentionally layered last so they cannot perturb the proven V3
+# transformations above. This gives Codex Realtime live plugin tools while HA remains the
+# sole owner of its WebSocket/cache.
+& (Join-Path $PSScriptRoot 'add-sol-dynamic-tools.ps1')
