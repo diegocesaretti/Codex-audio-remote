@@ -133,6 +133,15 @@
       "max": 3600
     },
     {
+      "key": "session_timeout_seconds",
+      "label": "Tiempo máximo total de conversación (segundos)",
+      "type": "number",
+      "description": "Límite absoluto desde cada wake word. No se reinicia por actividad, silencio ni respuestas de Sol. Una nueva wake word reinicia este contador y todos los demás desde cero.",
+      "default": 40,
+      "min": 1,
+      "max": 3600
+    },
+    {
       "key": "ingest_transcripts",
       "label": "Guardar transcripciones en SOL",
       "type": "boolean",
