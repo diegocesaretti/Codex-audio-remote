@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, SOL MCP/input APIs, durable HA context cache and validated speaker-to-canonical-Person bindings.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
@@ -68,6 +68,27 @@
         { "value": "vale", "label": "Vale" },
         { "value": "verse", "label": "Verse" }
       ]
+    },
+    {
+      "key": "voice_style",
+      "label": "Estilo de voz",
+      "type": "select",
+      "description": "Mini prompt que se antepone al primer audio de cada sesión para estabilizar la prosodia. No cambia la voz elegida.",
+      "default": "flirty",
+      "options": [
+        { "value": "stable", "label": "Estable" },
+        { "value": "warm", "label": "Cálido" },
+        { "value": "flirty", "label": "Flirty sutil" },
+        { "value": "expressive", "label": "Expresivo" },
+        { "value": "custom", "label": "Personalizado" },
+        { "value": "off", "label": "Desactivado" }
+      ]
+    },
+    {
+      "key": "voice_style_custom_prompt",
+      "label": "Prompt de estilo personalizado",
+      "type": "text",
+      "description": "Se usa sólo con Estilo de voz = Personalizado. Máximo efectivo: 240 caracteres para no agregar latencia excesiva."
     },
     {
       "key": "realtime_working_directory",
