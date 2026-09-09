@@ -10,7 +10,7 @@ Console.CancelKeyPress += (_, e) =>
 AppDomain.CurrentDomain.ProcessExit += (_, _) => realtimeServer.Dispose();
 
 Console.WriteLine("Codex Audio Remote · SOL native Realtime V3");
-Console.WriteLine("Audio path: Android PCM ↔ Codex WebRTC. No virtual cable, loopback, Bluetooth reconnect or btcom path is loaded.");
+Console.WriteLine("Audio path: Android PCM ↔ Codex WebRTC · native Realtime-only runtime");
 SolPluginHost.Ready("realtime-v3");
 await realtimeServer.RunAsync();
 
