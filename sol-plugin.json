@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.4.0",
-  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, SOL MCP/input APIs, durable HA context cache and validated speaker-to-canonical-Person bindings.",
+  "version": "1.4.1",
+  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons and dynamic SOL plugin tools. The SOL package is a minimal Realtime-only runtime.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -12,7 +12,8 @@
   "capabilities": [
     "audio.realtime",
     "codex.oauth",
-    "homeassistant.context-cache",
+    "homeassistant.context-consumer",
+    "consumer.sol-plugin-tools",
     "voice.android-client",
     "input.codex-audio",
     "mcp.codex-audio",
@@ -25,12 +26,11 @@
     "input.status",
     "identity.read",
     "mcp.register",
+    "mcp.invoke.read",
     "filesystem.plugin-data"
   ],
   "permissions": [
     "network.local",
-    "audio.input",
-    "audio.output",
     "windows.registry",
     "process.codex",
     "input.register",
@@ -38,6 +38,8 @@
     "input.status",
     "identity.read",
     "mcp.register",
+    "mcp.invoke.read",
+    "mcp.invoke.actions",
     "filesystem.plugin-data"
   ],
   "settings": [
@@ -73,7 +75,7 @@
       "key": "voice_style",
       "label": "Estilo de voz",
       "type": "select",
-      "description": "Mini prompt que se antepone al primer audio de cada sesión para estabilizar la prosodia. No cambia la voz elegida.",
+      "description": "Instrucción nativa de Realtime aplicada al iniciar cada sesión. No inyecta audio ni agrega un turno oculto.",
       "default": "flirty",
       "options": [
         { "value": "stable", "label": "Estable" },
@@ -88,13 +90,13 @@
       "key": "voice_style_custom_prompt",
       "label": "Prompt de estilo personalizado",
       "type": "text",
-      "description": "Se usa sólo con Estilo de voz = Personalizado. Máximo efectivo: 240 caracteres para no agregar latencia excesiva."
+      "description": "Se usa sólo con Estilo de voz = Personalizado. Máximo efectivo: 240 caracteres."
     },
     {
       "key": "realtime_working_directory",
       "label": "Carpeta de trabajo Realtime",
       "type": "path",
-      "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración standalone."
+      "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración persistida."
     },
     {
       "key": "ingest_transcripts",
@@ -102,62 +104,6 @@
       "type": "boolean",
       "description": "Ingiere únicamente transcripciones finales. Si el hablante está vinculado, agrega un personEntityId canónico validado por SOL como metadata.",
       "default": true
-    },
-    {
-      "key": "home_assistant_enabled",
-      "label": "Home Assistant habilitado",
-      "type": "boolean",
-      "default": true
-    },
-    {
-      "key": "home_assistant_url",
-      "label": "URL de Home Assistant",
-      "type": "text",
-      "description": "Ejemplo: http://homeassistant.local:8123. Vacío conserva el valor standalone."
-    },
-    {
-      "key": "home_assistant_token",
-      "label": "Token de Home Assistant",
-      "type": "secret",
-      "description": "Token de larga duración usado por el WebSocket de contexto. SOL lo inyecta sólo al proceso del plugin.",
-      "env": "HOME_ASSISTANT_TOKEN"
-    },
-    {
-      "key": "home_assistant_api_port",
-      "label": "Puerto del adaptador HA",
-      "type": "number",
-      "default": 8766,
-      "min": 1024,
-      "max": 65535
-    },
-    {
-      "key": "home_assistant_cache_flush_ms",
-      "label": "Persistencia del caché HA (ms)",
-      "type": "number",
-      "description": "Debounce para guardar el último snapshot/eventos de Home Assistant en SOL_PLUGIN_DATA_DIR.",
-      "default": 2000,
-      "min": 250,
-      "max": 60000
-    },
-    {
-      "key": "downlink_device",
-      "label": "Salida de audio",
-      "type": "text",
-      "description": "ID o parte del nombre del dispositivo de salida. Vacío usa la salida que ya tiene guardada Codex Audio Remote."
-    },
-    {
-      "key": "btcom_path",
-      "label": "Ruta a btcom.exe",
-      "type": "path",
-      "description": "Opcional. Vacío conserva la detección/configuración existente."
-    },
-    {
-      "key": "btcom_wait_seconds",
-      "label": "Espera de reconexión Bluetooth",
-      "type": "number",
-      "default": 6,
-      "min": 1,
-      "max": 15
     }
   ],
   "distribution": {
