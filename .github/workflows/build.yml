@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-${{ github.ref }}
@@ -154,15 +154,27 @@ jobs:
           ls -lh android/app/src/main/assets/vosk-es.zip
       - name: Build Android debug APK
         run: gradle -p android :app:assembleDebug --stacktrace
-      - name: Publish stable Android client
-        if: github.ref == 'refs/heads/feat/sol-plugin-port'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk CodexAudioRemote-Android.apk
-          gh release upload sol-plugin-latest CodexAudioRemote-Android.apk --repo "$GITHUB_REPOSITORY" --clobber
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexAudioRemote-Android-v2
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  publish-android:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/sol-plugin-port'
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built Android client
+        uses: actions/download-artifact@v4
+        with:
+          name: CodexAudioRemote-Android-v2
+          path: dist/android
+      - name: Publish stable Android client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp dist/android/app-debug.apk CodexAudioRemote-Android.apk
+          gh release upload sol-plugin-latest CodexAudioRemote-Android.apk --repo "$GITHUB_REPOSITORY" --clobber
