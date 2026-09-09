@@ -20,6 +20,7 @@
     <Compile Include="..\CodexAudioRemote.Server\SolDynamicToolBridge.cs" Link="SolDynamicToolBridge.cs" />
     <Compile Include="..\CodexAudioRemote.Server\SolHomeAssistantContext.cs" Link="SolHomeAssistantContext.cs" />
     <Compile Include="..\CodexAudioRemote.Server\SolVoiceStyle.cs" Link="SolVoiceStyle.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolVoiceSessionSettings.cs" Link="SolVoiceSessionSettings.cs" />
   </ItemGroup>
 
   <ItemGroup>

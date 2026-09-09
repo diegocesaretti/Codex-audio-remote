@@ -2,8 +2,11 @@ name: build
 
 on:
   push:
-    branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
+    branches: [ main, rewrite/state-machine-v2, 'fix/**', feat/sol-plugin-port, feat/realtime-session-lifecycle ]
   pull_request:
+
+permissions:
+  contents: read
 
 concurrency:
   group: build-${{ github.ref }}
@@ -110,22 +113,26 @@ jobs:
           gradle-version: '8.9'
       - name: Wire Android PAUSED lifecycle and audio cues
         run: python3 scripts/prepare-android-audio-cues.py
-      - name: Make end phrases pause listening
+      - name: Make legacy local end phrases pause listening
         run: python3 scripts/fix-android-end-phrases-pause.py
+      - name: Use conversation Vosk only for wake reset
+        run: python3 scripts/add-android-wake-reset-listening.py
       - name: Capture wake follow-up audio during activation
         run: python3 scripts/prepare-android-wake-preroll.py
       - name: Keep randomized wake greetings out of preroll
         run: python3 scripts/fix-android-preroll-wake-greeting-suppression.py
       - name: Reset capture boundary at uplink
         run: python3 scripts/fix-android-uplink-listen-boundary.py
-      - name: Verify Android PAUSED lifecycle, preroll and immediate uplink capture
+      - name: Verify Android PAUSED lifecycle, wake reset, preroll and immediate uplink capture
         run: |
           grep -q 'AudioCuePlayer.Cue.UPLINK' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'AudioCuePlayer.Cue.LISTEN_END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'AudioCuePlayer.Cue.END' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'isWakeState(serverState)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'isWakeEventState(serverState)' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'Conversation wake-reset detector' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
+          grep -q 'sendWakeEvent("conversation")' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'En espera · decí Hola Sol' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
-          grep -q 'sendPauseEvent("phrase")' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'private void sendPauseEvent' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'ACTIVATION_PREROLL_MS = 3000L' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
           grep -q 'Conversation mic v2 EARLY START' android/app/src/main/java/com/bwa3d/codexremote/RemoteService.java
@@ -152,3 +159,22 @@ jobs:
         with:
           name: CodexAudioRemote-Android-v2
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  publish-android:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/feat/sol-plugin-port'
+    needs: android
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built Android client
+        uses: actions/download-artifact@v4
+        with:
+          name: CodexAudioRemote-Android-v2
+          path: dist/android
+      - name: Publish stable Android client
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp dist/android/app-debug.apk CodexAudioRemote-Android.apk
+          gh release upload sol-plugin-latest CodexAudioRemote-Android.apk --repo "$GITHUB_REPOSITORY" --clobber

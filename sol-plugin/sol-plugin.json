@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.4.2",
-  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons and dynamic SOL plugin tools. The SOL package is a minimal Realtime-only runtime with an unelevated Kestrel LAN listener.",
+  "version": "1.5.0",
+  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons, dynamic SOL plugin tools and transcript-driven listening lifecycle. The SOL package is a minimal Realtime-only self-contained runtime with an unelevated Kestrel LAN listener.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -97,6 +97,49 @@
       "label": "Carpeta de trabajo Realtime",
       "type": "path",
       "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración persistida."
+    },
+    {
+      "key": "end_phrases",
+      "label": "Palabras o frases para terminar la escucha",
+      "type": "text",
+      "description": "Separadas por coma, punto y coma o salto de línea. Se evalúan sólo sobre transcripciones finales del usuario. Cierran el micrófono pero Codex sigue razonando y respondiendo.",
+      "default": "chau, gracias"
+    },
+    {
+      "key": "listen_timeout_seconds",
+      "label": "Tiempo máximo de escucha (segundos)",
+      "type": "number",
+      "description": "Máximo continuo con el micrófono abierto. No se reinicia por actividad normal; al vencer pasa a trabajo sin interrumpir a Codex.",
+      "default": 16,
+      "min": 1,
+      "max": 600
+    },
+    {
+      "key": "silence_timeout_seconds",
+      "label": "Tiempo de silencio (segundos)",
+      "type": "number",
+      "description": "Si no aparece actividad transcripta del usuario ni de Sol durante este tiempo, se cierra la escucha. Cada nueva intervención reinicia sólo este contador. 0 desactiva el corte por silencio.",
+      "default": 8,
+      "min": 0,
+      "max": 600
+    },
+    {
+      "key": "work_timeout_seconds",
+      "label": "Tiempo de trabajo (segundos)",
+      "type": "number",
+      "description": "Tiempo que Codex puede seguir razonando, usando herramientas y respondiendo con el micrófono cerrado. Una nueva wake word cancela este cierre y reinicia la escucha.",
+      "default": 30,
+      "min": 1,
+      "max": 3600
+    },
+    {
+      "key": "session_timeout_seconds",
+      "label": "Tiempo máximo total de conversación (segundos)",
+      "type": "number",
+      "description": "Límite absoluto desde cada wake word. No se reinicia por actividad, silencio ni respuestas de Sol. Una nueva wake word reinicia este contador y todos los demás desde cero.",
+      "default": 40,
+      "min": 1,
+      "max": 3600
     },
     {
       "key": "ingest_transcripts",
