@@ -21,6 +21,7 @@
     <Compile Include="..\CodexAudioRemote.Server\SolHomeAssistantContext.cs" Link="SolHomeAssistantContext.cs" />
     <Compile Include="..\CodexAudioRemote.Server\SolVoiceStyle.cs" Link="SolVoiceStyle.cs" />
     <Compile Include="..\CodexAudioRemote.Server\SolVoiceSessionSettings.cs" Link="SolVoiceSessionSettings.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolAudioQualitySettings.cs" Link="SolAudioQualitySettings.cs" />
   </ItemGroup>
 
   <ItemGroup>
