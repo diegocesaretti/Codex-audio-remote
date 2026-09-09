@@ -20,6 +20,7 @@ $fieldReplacement = @'
     CancellationTokenSource? maxListenCts;
     CancellationTokenSource? silenceCts;
     CancellationTokenSource? workCts;
+    CancellationTokenSource? sessionTimeoutCts;
 '@
 $server = $server.Replace($fieldNeedle, $fieldReplacement.TrimEnd())
 
@@ -77,7 +78,7 @@ $startNeedle = '                await SetStateAsync("listening", "realtime_ready
 Require-Contains $server $startNeedle 'LISTENING transition'
 $server = $server.Replace(
     $startNeedle,
-    $startNeedle + "`r`n                ArmListeningTimers(id);`r`n                Console.WriteLine(`$`"Session {id}: lifecycle · {SolVoiceSessionSettings.Summary()}`");"
+    $startNeedle + "`r`n                ArmListeningTimers(id);`r`n                ScheduleSessionTimeout(id);`r`n                Console.WriteLine(`$`"Session {id}: lifecycle · {SolVoiceSessionSettings.Summary()}`");"
 )
 
 $endMarker = '    public async Task EndSessionAsync(string reason)'
@@ -120,6 +121,7 @@ $lifecycleMethods = @'
             CancelSessionTimers();
             await SetStateAsync("listening", reason);
             ArmListeningTimers(id);
+            ScheduleSessionTimeout(id);
             Console.WriteLine($"Session {id}: LISTENING · lifecycle reset · reason={reason}");
         }
         finally { lifecycleGate.Release(); }
@@ -201,6 +203,27 @@ $lifecycleMethods = @'
         });
     }
 
+    void ScheduleSessionTimeout(string id)
+    {
+        var seconds = SolVoiceSessionSettings.SessionTimeoutSeconds;
+        if (seconds <= 0 || !IsCurrentSession(id)) return;
+        var local = new CancellationTokenSource();
+        var old = Interlocked.Exchange(ref sessionTimeoutCts, local);
+        if (old is not null) { try { old.Cancel(); } catch { } old.Dispose(); }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(seconds), local.Token);
+                if (local.IsCancellationRequested || !IsCurrentSession(id)) return;
+                var current = CurrentState();
+                if (current == "listening" || current == "paused")
+                    await EndSessionAsync("session_timeout");
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
     void CancelListeningTimers()
     {
         CancelTimer(ref maxListenCts);
@@ -211,6 +234,7 @@ $lifecycleMethods = @'
     {
         CancelListeningTimers();
         CancelTimer(ref workCts);
+        CancelTimer(ref sessionTimeoutCts);
     }
 
     static void CancelTimer(ref CancellationTokenSource? source)
@@ -284,7 +308,8 @@ $statePayloadReplacement = @'
             voiceBackend = "realtime-webrtc",
             listenTimeoutSeconds = SolVoiceSessionSettings.ListenTimeoutSeconds,
             silenceTimeoutSeconds = SolVoiceSessionSettings.SilenceTimeoutSeconds,
-            workTimeoutSeconds = SolVoiceSessionSettings.WorkTimeoutSeconds
+            workTimeoutSeconds = SolVoiceSessionSettings.WorkTimeoutSeconds,
+            sessionTimeoutSeconds = SolVoiceSessionSettings.SessionTimeoutSeconds
 '@
 $server = $server.Replace($statePayloadNeedle, $statePayloadReplacement.TrimEnd())
 
@@ -306,7 +331,7 @@ $server = $server.Replace($disposeNeedle, $disposeReplacement.TrimEnd())
 Set-Content $serverPath $server -Encoding UTF8
 
 $check = Get-Content $serverPath -Raw
-foreach ($needle in @('"paused"', 'ScheduleMaxListenTimeout', 'ScheduleSilenceTimeout', 'ScheduleWorkTimeout', 'SolVoiceSessionSettings.MatchEndPhrase', 'wake_reset', 'wake_resume')) {
+foreach ($needle in @('"paused"', 'ScheduleMaxListenTimeout', 'ScheduleSilenceTimeout', 'ScheduleWorkTimeout', 'ScheduleSessionTimeout', 'SolVoiceSessionSettings.MatchEndPhrase', 'wake_reset', 'wake_resume', 'session_timeout')) {
     if (-not $check.Contains($needle)) { throw "Voice lifecycle transform verification failed: $needle" }
 }
-Write-Host 'Prepared transcript-driven LISTENING -> PAUSED -> ENDING lifecycle with wake reset.'
+Write-Host 'Prepared transcript-driven LISTENING -> PAUSED -> ENDING lifecycle with wake reset and absolute session timeout.'
