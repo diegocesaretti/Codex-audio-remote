@@ -21,6 +21,7 @@ $fieldReplacement = @'
     CancellationTokenSource? silenceCts;
     CancellationTokenSource? workCts;
     CancellationTokenSource? sessionTimeoutCts;
+    CancellationTokenSource? endPhraseGraceCts;
 '@
 $server = $server.Replace($fieldNeedle, $fieldReplacement.TrimEnd())
 
@@ -47,7 +48,7 @@ $eventReplacement = @'
                 {
                     var reason = ReadString(root, "reason", "client");
                     if (string.Equals(reason, "phrase", StringComparison.OrdinalIgnoreCase))
-                        await PauseListeningAsync("phrase");
+                        await PauseForEndPhraseAsync("phrase");
                     else
                         await EndSessionAsync(reason);
                 }
@@ -97,9 +98,30 @@ $lifecycleMethods = @'
                 id = sessionId;
             }
             CancelListeningTimers();
+            CancelTimer(ref endPhraseGraceCts);
             await SetStateAsync("paused", reason);
             ScheduleWorkTimeout(id);
             Console.WriteLine($"Session {id}: PAUSED · audio input closed · Codex keeps working · reason={reason}");
+        }
+        finally { lifecycleGate.Release(); }
+    }
+
+    async Task PauseForEndPhraseAsync(string reason)
+    {
+        await lifecycleGate.WaitAsync();
+        try
+        {
+            string id;
+            lock (sync)
+            {
+                if (state != "listening" || string.IsNullOrEmpty(sessionId)) return;
+                id = sessionId;
+            }
+            CancelListeningTimers();
+            CancelTimer(ref workCts);
+            await SetStateAsync("paused", reason);
+            ScheduleEndPhraseGraceTimeout(id);
+            Console.WriteLine($"Session {id}: PAUSED · end phrase · farewell grace={SolVoiceSessionSettings.EndPhraseGraceSeconds}s · reason={reason}");
         }
         finally { lifecycleGate.Release(); }
     }
@@ -203,6 +225,25 @@ $lifecycleMethods = @'
         });
     }
 
+    void ScheduleEndPhraseGraceTimeout(string id)
+    {
+        var seconds = SolVoiceSessionSettings.EndPhraseGraceSeconds;
+        var local = new CancellationTokenSource();
+        var old = Interlocked.Exchange(ref endPhraseGraceCts, local);
+        if (old is not null) { try { old.Cancel(); } catch { } old.Dispose(); }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (seconds > 0)
+                    await Task.Delay(TimeSpan.FromSeconds(seconds), local.Token);
+                if (!local.IsCancellationRequested && IsCurrentSession(id) && CurrentState() == "paused")
+                    await EndSessionAsync("end_phrase_grace");
+            }
+            catch (OperationCanceledException) { }
+        });
+    }
+
     void ScheduleSessionTimeout(string id)
     {
         var seconds = SolVoiceSessionSettings.SessionTimeoutSeconds;
@@ -235,6 +276,7 @@ $lifecycleMethods = @'
         CancelListeningTimers();
         CancelTimer(ref workCts);
         CancelTimer(ref sessionTimeoutCts);
+        CancelTimer(ref endPhraseGraceCts);
     }
 
     static void CancelTimer(ref CancellationTokenSource? source)
@@ -289,7 +331,7 @@ $transcriptReplacement = @'
             if (matched is not null && CurrentState() == "listening")
             {
                 Console.WriteLine($"Session {CurrentSessionId()}: end phrase matched · {matched}");
-                await PauseListeningAsync("end_phrase:" + matched);
+                await PauseForEndPhraseAsync("end_phrase:" + matched);
             }
         }
     }
@@ -309,7 +351,8 @@ $statePayloadReplacement = @'
             listenTimeoutSeconds = SolVoiceSessionSettings.ListenTimeoutSeconds,
             silenceTimeoutSeconds = SolVoiceSessionSettings.SilenceTimeoutSeconds,
             workTimeoutSeconds = SolVoiceSessionSettings.WorkTimeoutSeconds,
-            sessionTimeoutSeconds = SolVoiceSessionSettings.SessionTimeoutSeconds
+            sessionTimeoutSeconds = SolVoiceSessionSettings.SessionTimeoutSeconds,
+            endPhraseGraceSeconds = SolVoiceSessionSettings.EndPhraseGraceSeconds
 '@
 $server = $server.Replace($statePayloadNeedle, $statePayloadReplacement.TrimEnd())
 
@@ -331,7 +374,7 @@ $server = $server.Replace($disposeNeedle, $disposeReplacement.TrimEnd())
 Set-Content $serverPath $server -Encoding UTF8
 
 $check = Get-Content $serverPath -Raw
-foreach ($needle in @('"paused"', 'ScheduleMaxListenTimeout', 'ScheduleSilenceTimeout', 'ScheduleWorkTimeout', 'ScheduleSessionTimeout', 'SolVoiceSessionSettings.MatchEndPhrase', 'wake_reset', 'wake_resume', 'session_timeout')) {
+foreach ($needle in @('"paused"', 'ScheduleMaxListenTimeout', 'ScheduleSilenceTimeout', 'ScheduleWorkTimeout', 'ScheduleSessionTimeout', 'ScheduleEndPhraseGraceTimeout', 'PauseForEndPhraseAsync', 'SolVoiceSessionSettings.MatchEndPhrase', 'wake_reset', 'wake_resume', 'session_timeout', 'end_phrase_grace')) {
     if (-not $check.Contains($needle)) { throw "Voice lifecycle transform verification failed: $needle" }
 }
-Write-Host 'Prepared transcript-driven LISTENING -> PAUSED -> ENDING lifecycle with wake reset and absolute session timeout.'
+Write-Host 'Prepared transcript-driven LISTENING -> PAUSED -> ENDING lifecycle with wake reset, absolute session timeout and end-phrase farewell grace.'
