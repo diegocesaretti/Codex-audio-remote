@@ -89,7 +89,7 @@ $server = $server.Replace($disposeOld.TrimEnd(), $disposeNew.TrimEnd())
 # Kestrel types are referenced by the transformed source only in the native plugin build.
 $server = $server.Replace(
     'using System.Text.Json;',
-    "using System.Text.Json;`r`nusing Microsoft.AspNetCore.Http;`r`nusing Microsoft.AspNetCore.Hosting;")
+    "using System.Text.Json;`r`nusing Microsoft.AspNetCore.Builder;`r`nusing Microsoft.AspNetCore.Http;`r`nusing Microsoft.AspNetCore.Hosting;`r`nusing Microsoft.Extensions.Hosting;")
 
 if ($server -match 'HttpListener') { throw 'Kestrel transform: HttpListener survived in RealtimeSessionServer.' }
 if ($server -notmatch 'ListenAnyIP\(options.Port\)') { throw 'Kestrel transform: ListenAnyIP binding missing.' }
