@@ -97,6 +97,9 @@ jobs:
           if ($server -notmatch 'ScheduleWorkTimeout') { throw 'Work timer missing' }
           if ($server -notmatch 'ScheduleSessionTimeout') { throw 'Absolute session timer missing' }
           if ($server -notmatch 'session_timeout') { throw 'Absolute session timeout transition missing' }
+          if ($server -notmatch 'ScheduleEndPhraseGraceTimeout') { throw 'End phrase farewell grace timer missing' }
+          if ($server -notmatch 'PauseForEndPhraseAsync') { throw 'End phrase pause path missing' }
+          if ($server -notmatch 'end_phrase_grace') { throw 'End phrase farewell close transition missing' }
           if ($server -notmatch 'SolVoiceSessionSettings\.MatchEndPhrase') { throw 'Transcript end-phrase detection missing' }
           if ($server -notmatch 'wake_reset') { throw 'Wake reset while listening missing' }
           if ($server -notmatch 'wake_resume') { throw 'Wake resume from PAUSED missing' }
@@ -113,10 +116,12 @@ jobs:
           if ($voiceLifecycle -notmatch 'DefaultSilenceTimeoutSeconds = 8') { throw 'Silence timeout default missing' }
           if ($voiceLifecycle -notmatch 'DefaultWorkTimeoutSeconds = 30') { throw 'Work timeout default missing' }
           if ($voiceLifecycle -notmatch 'DefaultSessionTimeoutSeconds = 40') { throw 'Absolute session timeout default missing' }
+          if ($voiceLifecycle -notmatch 'DefaultEndPhraseGraceSeconds = 3') { throw 'End phrase farewell grace default missing' }
           if ($voiceLifecycle -notmatch 'DefaultEndPhrases = "chau, gracias"') { throw 'Default end phrases missing' }
-          if ($manifest -notmatch '"version": "1.5.0"') { throw 'Manifest version is not 1.5.0' }
+          if ($manifest -notmatch '"version": "1.5.1"') { throw 'Manifest version is not 1.5.1' }
           if ($manifest -notmatch '"voice_style"') { throw 'Voice style setting missing from manifest' }
           if ($manifest -notmatch '"end_phrases"') { throw 'End phrase setting missing from manifest' }
+          if ($manifest -notmatch '"end_phrase_grace_seconds"') { throw 'End phrase farewell grace setting missing from manifest' }
           if ($manifest -notmatch '"listen_timeout_seconds"') { throw 'Listen timeout setting missing from manifest' }
           if ($manifest -notmatch '"silence_timeout_seconds"') { throw 'Silence timeout setting missing from manifest' }
           if ($manifest -notmatch '"work_timeout_seconds"') { throw 'Work timeout setting missing from manifest' }
@@ -128,7 +133,7 @@ jobs:
           if ($project -match 'AudioPlatformV2|LoopbackDownlink|BtcomBluetoothReconnect|DownlinkDeviceSettings|RealtimeSecondaryAudioMirror|HomeAssistantMediaClient|SessionServerV2|TrayController') { throw 'Minimal SOL project includes legacy audio source' }
           if ($entry -match 'VirtualMic|Cable|Btcom|BluetoothReconnect') { throw 'SOL entrypoint references legacy audio plumbing' }
 
-          Write-Host 'Verified: native V3/WebRTC + Kestrel + SOL tools + transcript lifecycle LISTENING/PAUSED + wake reset + absolute session timeout; no URLACL, cable, loopback, Bluetooth or mirror runtime.'
+          Write-Host 'Verified: native V3/WebRTC + Kestrel + SOL tools + transcript lifecycle LISTENING/PAUSED + wake reset + absolute session timeout + end-phrase farewell grace; no URLACL, cable, loopback, Bluetooth or mirror runtime.'
 
       - name: Publish minimal SOL plugin runtime
         shell: pwsh
@@ -177,7 +182,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Codex Audio Remote · SOL Plugin' --notes 'Stable install endpoint for SOL Plugin Manager. Built from the isolated native plugin branch.' --prerelease
           }
-          gh release edit $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes 'Stable native SOL plugin 1.5.0: Realtime V3/WebRTC + Kestrel + transcript-driven listening lifecycle, wake reset/resume and configurable 40s absolute conversation cap; no virtual cable, loopback, Bluetooth/btcom or HA audio mirror runtime.'
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes 'Stable native SOL plugin 1.5.1: Realtime V3/WebRTC + Kestrel + transcript-driven listening lifecycle, wake reset/resume, 40s absolute conversation cap and configurable farewell grace after end phrases; no virtual cable, loopback, Bluetooth/btcom or HA audio mirror runtime.'
           gh release upload $tag dist/CodexAudioRemote.solplugin --repo $env:GITHUB_REPOSITORY --clobber
 
       - name: Upload SOL plugin artifact
