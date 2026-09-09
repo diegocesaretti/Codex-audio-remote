@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>CodexAudioRemote.Server</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\AppSettings.cs" Link="AppSettings.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\CodexRealtimeBridge.cs" Link="CodexRealtimeBridge.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\CodexOAuthWebRtcPeer.cs" Link="CodexOAuthWebRtcPeer.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\RealtimeSessionServer.cs" Link="RealtimeSessionServer.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolPluginHost.cs" Link="SolPluginHost.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolRuntimeBridge.cs" Link="SolRuntimeBridge.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolDynamicToolBridge.cs" Link="SolDynamicToolBridge.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolHomeAssistantContext.cs" Link="SolHomeAssistantContext.cs" />
+    <Compile Include="..\CodexAudioRemote.Server\SolVoiceStyle.cs" Link="SolVoiceStyle.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+  </ItemGroup>
+</Project>
