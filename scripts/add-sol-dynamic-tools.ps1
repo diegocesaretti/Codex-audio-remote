@@ -20,7 +20,7 @@ Require-Contains $source $fieldNeedle 'pending request map'
 if (-not $source.Contains('readonly SolDynamicToolBridge? solDynamicTools')) {
     $source = $source.Replace(
         $fieldNeedle,
-        $fieldNeedle + "`r`n    readonly SolDynamicToolBridge? solDynamicTools = SolDynamicToolBridge.TryCreate();"
+        $fieldNeedle + "`r`n    readonly SolDynamicToolBridge? solDynamicTools = SolDynamicToolBridge.TryCreate();`r`n    SolDynamicToolSession? pendingSolToolSession;"
     )
 }
 
@@ -35,21 +35,31 @@ $startBlock = @'
             Console.WriteLine("SOL dynamic tool catalog changed · creating one fresh Codex thread so the new tools are visible");
             AppSettings.RequestNewRealtimeConversation();
         }
-        threadId = await StartOrResumeThreadAsync(cwd, solToolSession, cancellationToken);
+        pendingSolToolSession = solToolSession;
+        try
+        {
+            // Keep this exact proven invocation for the golden V3 continuity contract.
+            threadId = await StartOrResumeThreadAsync(cwd, cancellationToken);
+        }
+        finally
+        {
+            pendingSolToolSession = null;
+        }
         if (solToolSession is not null) solDynamicTools?.MarkThreadReady(solToolSession.CatalogSignature);
 '@
 $source = $source.Replace($startNeedle, $startBlock.TrimEnd())
 
-$signatureNeedle = '    async Task<string> StartOrResumeThreadAsync(string? cwd, CancellationToken cancellationToken)'
-Require-Contains $source $signatureNeedle 'persistent thread helper signature'
-$signatureReplacement = @'
-    // Compatibility overload preserves the existing continuity contract and its CI invariant.
+$signatureNeedle = @'
     async Task<string> StartOrResumeThreadAsync(string? cwd, CancellationToken cancellationToken)
-        => await StartOrResumeThreadAsync(cwd, null, cancellationToken);
-
-    async Task<string> StartOrResumeThreadAsync(string? cwd, SolDynamicToolSession? solToolSession, CancellationToken cancellationToken)
+    {
 '@
-$source = $source.Replace($signatureNeedle, $signatureReplacement.TrimEnd())
+Require-Contains $source $signatureNeedle 'persistent thread helper signature'
+$signatureBlock = @'
+    async Task<string> StartOrResumeThreadAsync(string? cwd, CancellationToken cancellationToken)
+    {
+        var solToolSession = pendingSolToolSession;
+'@
+$source = $source.Replace($signatureNeedle, $signatureBlock)
 
 $newThreadNeedle = @'
         var threadParams = new Dictionary<string, object?>();
@@ -146,9 +156,10 @@ if ($source -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'Realtime mo
 if ($source -notmatch 'type = "webrtc"') { throw 'WebRTC transport lost after SOL dynamic-tools patch.' }
 if ($source -match 'type = "existingCall"') { throw 'SOL dynamic-tools patch introduced existingCall.' }
 if ($source -match 'directRealtimeCall\.CreateAsync') { throw 'SOL dynamic-tools patch introduced direct realtime/calls.' }
+if ($source -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'Golden thread continuity invocation was not preserved.' }
 if ($source -notmatch 'threadParams\["dynamicTools"\]') { throw 'Dynamic tools were not added to thread/start.' }
 if ($source -notmatch 'developerInstructions') { throw 'SOL tool routing instructions were not added to thread/start.' }
 if ($source -notmatch 'item/tool/call') { throw 'Dynamic tool app-server request handler missing.' }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
-Write-Host 'SOL dynamic tools layered onto golden Realtime V3 without changing media/auth transport.'
+Write-Host 'SOL dynamic tools layered onto golden Realtime V3; exact continuity invocation preserved.'
