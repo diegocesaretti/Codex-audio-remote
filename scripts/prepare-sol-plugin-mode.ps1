@@ -107,8 +107,10 @@ $realtimeServer = $realtimeServer.Replace(
     '        solRuntime?.OnSessionEnded(endingId);' + "`r`n" + $solSessionEndNeedle
 )
 
-$solTranscriptNeedle = '        NoteRealtimeActivity(role, done);'
-Require-Contains $realtimeServer $solTranscriptNeedle 'Realtime transcript activity hook'
+# Hook SOL transcript ingest directly to the clean Realtime callback. Do not depend on
+# NoteRealtimeActivity, which belonged to the discarded audio mirror/lifecycle layer.
+$solTranscriptNeedle = '        if (string.IsNullOrEmpty(text)) return;'
+Require-Contains $realtimeServer $solTranscriptNeedle 'clean Realtime transcript callback'
 $realtimeServer = $realtimeServer.Replace(
     $solTranscriptNeedle,
     $solTranscriptNeedle + "`r`n        if (done && solRuntime is not null)`r`n            _ = solRuntime.IngestTranscriptAsync(role, text, true, CurrentSessionId());"
