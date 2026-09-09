@@ -111,7 +111,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $lines = @()
-          & dotnet publish windows/CodexAudioRemote.SolPlugin/CodexAudioRemote.SolPlugin.csproj -c Release -r win-x64 --self-contained false -o dist/sol-plugin 2>&1 | Tee-Object -Variable lines
+          & dotnet publish windows/CodexAudioRemote.SolPlugin/CodexAudioRemote.SolPlugin.csproj -c Release -r win-x64 --self-contained true -o dist/sol-plugin 2>&1 | Tee-Object -Variable lines
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
             $errors = $lines | ForEach-Object { $_.ToString() } | Where-Object { $_ -match ': error ' -or $_ -match 'error CS\d+' }
