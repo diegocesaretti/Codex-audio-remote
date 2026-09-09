@@ -23,20 +23,14 @@ $routeBlock = @'
 '@
 $server = $server.Replace($routeAnchor, $routeBlock.TrimEnd())
 
-# SOL derives the mandatory MCP tool prefix from plugin id "codex-audio-remote" as
-# "codex_audio_remote_". Older Audio Remote builds used "codex_audio_" and were
-# therefore marked degraded even though Realtime audio kept working.
 if ($runtime -notmatch 'codex_audio_') { throw 'SOL native finalize: Audio MCP tool anchors missing.' }
 $runtime = $runtime.Replace('codex_audio_', 'codex_audio_remote_')
 
-# Keep the repository source readable while normalizing framework-overload details for net8.0.
 $readerOld = 'new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8, true, leaveOpen: false)'
 $readerNew = 'new StreamReader(request.InputStream, request.ContentEncoding ?? Encoding.UTF8, true, 4096, false)'
 if (-not $runtime.Contains($readerOld)) { throw 'SOL native finalize: StreamReader anchor missing.' }
 $runtime = $runtime.Replace($readerOld, $readerNew)
 
-# This project imports WinForms globally, so Timer must be explicitly the threading timer used
-# for debounce persistence rather than System.Windows.Forms.Timer.
 $cache = $cache.Replace('    Timer? persistTimer;', '    System.Threading.Timer? persistTimer;')
 $cache = $cache.Replace('            persistTimer ??= new Timer(_ =>', '            persistTimer ??= new System.Threading.Timer(_ =>')
 
@@ -53,7 +47,5 @@ Set-Content $runtimePath $runtime -Encoding UTF8
 Set-Content $cachePath $cache -Encoding UTF8
 Write-Host 'SOL native MCP callback routing finalized; Audio MCP prefix aligned to codex_audio_remote_.'
 
-# Dynamic SOL tools are intentionally layered last so they cannot perturb the proven V3
-# transformations above. This gives Codex Realtime live plugin tools while HA remains the
-# sole owner of its WebSocket/cache.
 & (Join-Path $PSScriptRoot 'add-sol-dynamic-tools.ps1')
+& (Join-Path $PSScriptRoot 'add-sol-audio-quality-stability.ps1')

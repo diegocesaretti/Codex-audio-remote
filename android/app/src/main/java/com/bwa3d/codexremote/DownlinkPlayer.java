@@ -10,11 +10,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class DownlinkPlayer implements AutoCloseable {
-    /**
-     * Keep the listener API backward-compatible with the protocol-v2 RemoteService used on
-     * Android 6 while preserving the newer onPlayed callback. Default methods are deliberately
-     * no-op so older/newer call sites can coexist without requiring platform-specific APIs.
-     */
     public interface Listener {
         default void onStarted() { }
         default void onStopped() { }
@@ -22,11 +17,11 @@ public class DownlinkPlayer implements AutoCloseable {
         default void onPlayed(byte[] pcm) { }
     }
 
-    private static final int SAMPLE_RATE = 16000;
-    private static final int BYTES_PER_MS = SAMPLE_RATE * 2 / 1000;
     private final ArrayBlockingQueue<byte[]> queue = new ArrayBlockingQueue<>(96);
     private final AtomicInteger queuedBytes = new AtomicInteger();
     private final AtomicBoolean running = new AtomicBoolean(true);
+    private final int sampleRate;
+    private final int bytesPerMs;
     private final int prebufferBytes;
     private final Listener listener;
     private final Thread thread;
@@ -37,7 +32,13 @@ public class DownlinkPlayer implements AutoCloseable {
     private long dropped;
 
     public DownlinkPlayer(int prebufferMs, Listener listener) {
-        this.prebufferBytes = Math.max(80, Math.min(500, prebufferMs)) * BYTES_PER_MS;
+        this(16000, prebufferMs, listener);
+    }
+
+    public DownlinkPlayer(int sampleRate, int prebufferMs, Listener listener) {
+        this.sampleRate = Math.max(8000, Math.min(48000, sampleRate));
+        this.bytesPerMs = Math.max(1, this.sampleRate * 2 / 1000);
+        this.prebufferBytes = Math.max(80, Math.min(500, prebufferMs)) * bytesPerMs;
         this.listener = listener;
         thread = new Thread(this::loop, "DownlinkPlayer");
         thread.setPriority(Thread.MAX_PRIORITY);
@@ -59,15 +60,15 @@ public class DownlinkPlayer implements AutoCloseable {
 
     private void ensureTrack() {
         if (track != null) return;
-        int min = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        int buffer = Math.max(Math.max(min * 4, 16384), prebufferBytes * 2);
-        track = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO,
+        int min = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        int buffer = Math.max(Math.max(min * 4, sampleRate * 2), prebufferBytes * 2);
+        track = new AudioTrack(AudioManager.STREAM_MUSIC, sampleRate, AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
         track.play();
         if (listener != null) {
             try { listener.onStarted(); } catch (Exception ignored) { }
         }
-        AndroidDebugLog.log("DownlinkPlayer START · prebuffer=" + (prebufferBytes / BYTES_PER_MS) + "ms · AudioTrackBuffer=" + buffer);
+        AndroidDebugLog.log("DownlinkPlayer START · rate=" + sampleRate + "Hz · prebuffer=" + (prebufferBytes / bytesPerMs) + "ms · AudioTrackBuffer=" + buffer);
     }
 
     private void loop() {
@@ -77,19 +78,17 @@ public class DownlinkPlayer implements AutoCloseable {
             ensureTrack();
             while (running.get()) {
                 if (!primed) {
-                    while (running.get() && queuedBytes.get() < prebufferBytes) {
-                        Thread.sleep(5);
-                    }
+                    while (running.get() && queuedBytes.get() < prebufferBytes) Thread.sleep(5);
                     if (!running.get()) break;
                     primed = true;
-                    AndroidDebugLog.log("DownlinkPlayer primed · queued=" + queuedBytes.get() + " bytes");
+                    AndroidDebugLog.log("DownlinkPlayer primed · rate=" + sampleRate + "Hz · queued=" + queuedBytes.get() + " bytes");
                 }
 
                 byte[] pcm = queue.poll(120, TimeUnit.MILLISECONDS);
                 if (pcm == null) {
                     underruns++;
                     primed = false;
-                    AndroidDebugLog.log("DownlinkPlayer UNDERRUN #" + underruns + " · queued=" + queuedBytes.get());
+                    AndroidDebugLog.log("DownlinkPlayer UNDERRUN #" + underruns + " · rate=" + sampleRate + "Hz · queued=" + queuedBytes.get());
                     continue;
                 }
                 queuedBytes.addAndGet(-pcm.length);
@@ -112,7 +111,7 @@ public class DownlinkPlayer implements AutoCloseable {
                 long now = System.currentTimeMillis();
                 if (now - lastStats >= 5000) {
                     lastStats = now;
-                    AndroidDebugLog.log("DownlinkPlayer stats · queued=" + queuedBytes.get() + " bytes · in=" + packetsIn + " · played=" + packetsPlayed + " · underruns=" + underruns + " · dropped=" + dropped);
+                    AndroidDebugLog.log("DownlinkPlayer stats · rate=" + sampleRate + "Hz · queued=" + queuedBytes.get() + " bytes · in=" + packetsIn + " · played=" + packetsPlayed + " · underruns=" + underruns + " · dropped=" + dropped);
                 }
             }
         } catch (InterruptedException ignored) {
@@ -129,7 +128,7 @@ public class DownlinkPlayer implements AutoCloseable {
             if (listener != null) {
                 try { listener.onStopped(); } catch (Exception ignored) { }
             }
-            AndroidDebugLog.log("DownlinkPlayer STOP · in=" + packetsIn + " · played=" + packetsPlayed + " · underruns=" + underruns + " · dropped=" + dropped);
+            AndroidDebugLog.log("DownlinkPlayer STOP · rate=" + sampleRate + "Hz · in=" + packetsIn + " · played=" + packetsPlayed + " · underruns=" + underruns + " · dropped=" + dropped);
         }
     }
 
