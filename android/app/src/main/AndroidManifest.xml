@@ -25,6 +25,10 @@
         </activity>
 
         <activity
+            android:name=".AudioCuePickerActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".OverlayFallbackActivity"
             android:exported="false"
             android:excludeFromRecents="true"
