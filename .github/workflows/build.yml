@@ -5,6 +5,9 @@ on:
     branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
   pull_request:
 
+permissions:
+  contents: write
+
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
@@ -19,11 +22,34 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Publish Windows companion
         run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+      - name: Package SOL plugin
+        shell: pwsh
+        run: |
+          Copy-Item -LiteralPath sol-plugin.json -Destination dist/windows/sol-plugin.json -Force
+          Compress-Archive -Path dist/windows/* -DestinationPath dist/CodexAudioRemote.solplugin -Force
+          if (-not (Test-Path dist/CodexAudioRemote.solplugin)) { throw 'CodexAudioRemote.solplugin was not created' }
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexAudioRemote-Windows-x64-v2
           path: dist/windows
+      - name: Upload SOL plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-solplugin
+          path: dist/CodexAudioRemote.solplugin
+          if-no-files-found: error
+      - name: Publish stable SOL plugin release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/CodexAudioRemote.solplugin
+          tag_name: sol-plugin-latest
+          target_commitish: ${{ github.sha }}
+          name: Codex Audio Remote · SOL Plugin
+          body: "Stable install/update endpoint for SOL Plugin Manager."
+          prerelease: true
+          overwrite_files: true
 
   android:
     runs-on: ubuntu-latest
