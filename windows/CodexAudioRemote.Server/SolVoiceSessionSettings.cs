@@ -7,6 +7,7 @@ internal static class SolVoiceSessionSettings
     public const int DefaultSilenceTimeoutSeconds = 8;
     public const int DefaultWorkTimeoutSeconds = 30;
     public const int DefaultSessionTimeoutSeconds = 40;
+    public const int DefaultEndPhraseGraceSeconds = 3;
     public const string DefaultEndPhrases = "chau, gracias";
 
     public static int ListenTimeoutSeconds
@@ -20,6 +21,9 @@ internal static class SolVoiceSessionSettings
 
     public static int SessionTimeoutSeconds
         => ReadInt("session_timeout_seconds", DefaultSessionTimeoutSeconds, 1, 3600);
+
+    public static int EndPhraseGraceSeconds
+        => ReadInt("end_phrase_grace_seconds", DefaultEndPhraseGraceSeconds, 0, 30);
 
     public static IReadOnlyList<string> EndPhrases
     {
@@ -49,7 +53,7 @@ internal static class SolVoiceSessionSettings
     }
 
     public static string Summary()
-        => $"listen={ListenTimeoutSeconds}s; silence={SilenceTimeoutSeconds}s; work={WorkTimeoutSeconds}s; session={SessionTimeoutSeconds}s; end-phrases=[{string.Join(", ", EndPhrases)}]";
+        => $"listen={ListenTimeoutSeconds}s; silence={SilenceTimeoutSeconds}s; work={WorkTimeoutSeconds}s; session={SessionTimeoutSeconds}s; end-grace={EndPhraseGraceSeconds}s; end-phrases=[{string.Join(", ", EndPhrases)}]";
 
     static int ReadInt(string key, int fallback, int min, int max)
     {
