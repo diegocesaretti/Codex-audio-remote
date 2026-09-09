@@ -3,7 +3,7 @@
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
   "version": "1.4.1",
-  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons and dynamic SOL plugin tools. The SOL package contains no virtual-cable, loopback, Bluetooth/btcom or HA audio-mirror runtime.",
+  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons and dynamic SOL plugin tools. The SOL package is a minimal Realtime-only runtime.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
