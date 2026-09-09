@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.3.3",
-  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, canonical SOL Persons and dynamic SOL plugin tools backed by Home Assistant's event-driven cache.",
+  "version": "1.4.1",
+  "description": "Native SOL voice bridge using Codex Realtime V3/WebRTC, canonical SOL Persons and dynamic SOL plugin tools. The SOL package is a minimal Realtime-only runtime.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -31,8 +31,6 @@
   ],
   "permissions": [
     "network.local",
-    "audio.input",
-    "audio.output",
     "windows.registry",
     "process.codex",
     "input.register",
@@ -74,10 +72,31 @@
       ]
     },
     {
+      "key": "voice_style",
+      "label": "Estilo de voz",
+      "type": "select",
+      "description": "Instrucción nativa de Realtime aplicada al iniciar cada sesión. No inyecta audio ni agrega un turno oculto.",
+      "default": "flirty",
+      "options": [
+        { "value": "stable", "label": "Estable" },
+        { "value": "warm", "label": "Cálido" },
+        { "value": "flirty", "label": "Flirty sutil" },
+        { "value": "expressive", "label": "Expresivo" },
+        { "value": "custom", "label": "Personalizado" },
+        { "value": "off", "label": "Desactivado" }
+      ]
+    },
+    {
+      "key": "voice_style_custom_prompt",
+      "label": "Prompt de estilo personalizado",
+      "type": "text",
+      "description": "Se usa sólo con Estilo de voz = Personalizado. Máximo efectivo: 240 caracteres."
+    },
+    {
       "key": "realtime_working_directory",
       "label": "Carpeta de trabajo Realtime",
       "type": "path",
-      "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración standalone."
+      "description": "Proyecto/carpeta que recibe las conversaciones. Vacío conserva la configuración persistida."
     },
     {
       "key": "ingest_transcripts",
@@ -85,55 +104,6 @@
       "type": "boolean",
       "description": "Ingiere únicamente transcripciones finales. Si el hablante está vinculado, agrega un personEntityId canónico validado por SOL como metadata.",
       "default": true
-    },
-    {
-      "key": "home_assistant_enabled",
-      "label": "Integración de audio con Home Assistant",
-      "type": "boolean",
-      "description": "Controla las funciones de audio/mirror de Audio Remote. El estado y caché de Home Assistant pertenecen siempre al plugin Home Assistant cuando corre bajo SOL.",
-      "default": true
-    },
-    {
-      "key": "home_assistant_url",
-      "label": "URL de Home Assistant para audio/mirror",
-      "type": "text",
-      "description": "Opcional para funciones legacy de mirror/cast de audio. No se usa para el caché de estado en modo SOL."
-    },
-    {
-      "key": "home_assistant_token",
-      "label": "Token HA para audio/mirror legacy",
-      "type": "secret",
-      "description": "Opcional y sólo para funciones directas de audio/mirror. El contexto de estado en modo SOL usa el plugin Home Assistant y no este token.",
-      "env": "HOME_ASSISTANT_TOKEN"
-    },
-    {
-      "key": "home_assistant_api_port",
-      "label": "Puerto del adaptador de audio para HA",
-      "type": "number",
-      "description": "Puerto local de /api/speak, /api/tts y realtime-mirror. No es una segunda API de estado de Home Assistant.",
-      "default": 8766,
-      "min": 1024,
-      "max": 65535
-    },
-    {
-      "key": "downlink_device",
-      "label": "Salida de audio",
-      "type": "text",
-      "description": "ID o parte del nombre del dispositivo de salida. Vacío usa la salida que ya tiene guardada Codex Audio Remote."
-    },
-    {
-      "key": "btcom_path",
-      "label": "Ruta a btcom.exe",
-      "type": "path",
-      "description": "Opcional. Vacío conserva la detección/configuración existente."
-    },
-    {
-      "key": "btcom_wait_seconds",
-      "label": "Espera de reconexión Bluetooth",
-      "type": "number",
-      "default": 6,
-      "min": 1,
-      "max": 15
     }
   ],
   "distribution": {
