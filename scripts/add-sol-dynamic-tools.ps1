@@ -42,10 +42,14 @@ $source = $source.Replace($startNeedle, $startBlock.TrimEnd())
 
 $signatureNeedle = '    async Task<string> StartOrResumeThreadAsync(string? cwd, CancellationToken cancellationToken)'
 Require-Contains $source $signatureNeedle 'persistent thread helper signature'
-$source = $source.Replace(
-    $signatureNeedle,
-    '    async Task<string> StartOrResumeThreadAsync(string? cwd, SolDynamicToolSession? solToolSession, CancellationToken cancellationToken)'
-)
+$signatureReplacement = @'
+    // Compatibility overload preserves the existing continuity contract and its CI invariant.
+    async Task<string> StartOrResumeThreadAsync(string? cwd, CancellationToken cancellationToken)
+        => await StartOrResumeThreadAsync(cwd, null, cancellationToken);
+
+    async Task<string> StartOrResumeThreadAsync(string? cwd, SolDynamicToolSession? solToolSession, CancellationToken cancellationToken)
+'@
+$source = $source.Replace($signatureNeedle, $signatureReplacement.TrimEnd())
 
 $newThreadNeedle = @'
         var threadParams = new Dictionary<string, object?>();
