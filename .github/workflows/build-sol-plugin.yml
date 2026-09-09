@@ -40,31 +40,11 @@ jobs:
         shell: pwsh
         run: ./scripts/instrument-webrtc-audio.ps1
 
-      - name: Wire Home Assistant speech into Realtime
-        shell: pwsh
-        run: ./scripts/prepare-realtime-ha-speech.ps1
-
-      - name: Add listening pause lifecycle and secondary mirrors
-        shell: pwsh
-        run: ./scripts/prepare-realtime-lifecycle-mirrors.ps1
-
-      - name: Fix direct V3 speech and HA Cast stream
-        shell: pwsh
-        run: ./scripts/prepare-ha-stream-direct-speech-v2.ps1
-
-      - name: Harden HA speak readiness and mirror persistence
-        shell: pwsh
-        run: ./scripts/fix-ha-speak-race-and-mirror-persistence.ps1
-
-      - name: Make HA mirror live-toggleable and low latency
-        shell: pwsh
-        run: ./scripts/fix-ha-live-mirror-runtime.ps1
-
-      - name: Layer HA state context onto working V3
+      - name: Layer SOL Home Assistant context and native voice style
         shell: pwsh
         run: ./scripts/apply-ha-context-to-working-v3.ps1
 
-      - name: Layer SOL plugin mode
+      - name: Layer Realtime-only SOL plugin mode
         shell: pwsh
         run: ./scripts/prepare-sol-plugin-mode.ps1
 
@@ -72,81 +52,76 @@ jobs:
         shell: pwsh
         run: ./scripts/finalize-sol-native-runtime.ps1
 
-      - name: Verify golden V3 invariants and plugin isolation
+      - name: Verify golden V3 and clean native plugin invariants
         shell: pwsh
         run: |
           $bridge = Get-Content windows/CodexAudioRemote.Server/CodexRealtimeBridge.cs -Raw
           $server = Get-Content windows/CodexAudioRemote.Server/RealtimeSessionServer.cs -Raw
-          $program = Get-Content windows/CodexAudioRemote.Server/Program.cs -Raw
-          $tray = Get-Content windows/CodexAudioRemote.Server/TrayController.cs -Raw
-          $appSettings = Get-Content windows/CodexAudioRemote.Server/AppSettings.cs -Raw
-          $downlink = Get-Content windows/CodexAudioRemote.Server/DownlinkDeviceSettings.cs -Raw
           $pluginHostSource = Get-Content windows/CodexAudioRemote.Server/SolPluginHost.cs -Raw
           $solRuntime = Get-Content windows/CodexAudioRemote.Server/SolRuntimeBridge.cs -Raw
-          $haCache = Get-Content windows/CodexAudioRemote.Server/HomeAssistantWebSocketCache.cs -Raw
           $solHa = Get-Content windows/CodexAudioRemote.Server/SolHomeAssistantContext.cs -Raw
+          $voiceStyle = Get-Content windows/CodexAudioRemote.Server/SolVoiceStyle.cs -Raw
           $manifest = Get-Content sol-plugin/sol-plugin.json -Raw
+          $project = Get-Content windows/CodexAudioRemote.SolPlugin/CodexAudioRemote.SolPlugin.csproj -Raw
+          $entry = Get-Content windows/CodexAudioRemote.SolPlugin/Program.cs -Raw
+
           if ($bridge -notmatch 'RealtimeVersion = "v3"') { throw 'REGRESSION: V3 missing' }
           if ($bridge -notmatch 'RealtimeModel = "gpt-live-1-codex"') { throw 'REGRESSION: model changed' }
-          if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official webrtc transport missing' }
+          if ($bridge -notmatch 'type = "webrtc"') { throw 'REGRESSION: official WebRTC transport missing' }
           if ($bridge -match 'type = "existingCall"') { throw 'REGRESSION: existingCall reintroduced' }
           if ($bridge -match 'directRealtimeCall\.CreateAsync') { throw 'REGRESSION: direct ChatGPT realtime/calls reintroduced' }
-          if ($bridge -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'REGRESSION: working thread continuity changed' }
-          if ($bridge -match 'threadParams\["ephemeral"\]') { throw 'REGRESSION: plugin build must preserve thread lifecycle' }
-          if ($bridge -notmatch 'realtimeStartInstructions') { throw 'REGRESSION: HA context missing' }
-          if ($bridge -notmatch 'SolHomeAssistantContext\.GetContextAsync') { throw 'SOL mode does not consume HA context through the SOL plugin bus' }
-          if ($program -notmatch 'if \(!SolPluginHost\.Enabled\)') { throw 'Direct HA cache is not isolated to standalone mode' }
-          if ($program -notmatch 'SolPluginHost\.Enabled \|\| TrayController\.VoiceBackend') { throw 'Plugin build does not force V3 without mutating standalone settings' }
-          if ($program -notmatch 'SolPluginHost\.Ready\("realtime-v3"\)') { throw 'Plugin readiness signal missing' }
-          if ($tray -notmatch 'if \(SolPluginHost\.Enabled\)') { throw 'Plugin tray suppression missing' }
+          if ($bridge -notmatch 'StartOrResumeThreadAsync\(cwd, cancellationToken\)') { throw 'REGRESSION: thread continuity changed' }
+          if ($bridge -notmatch 'realtimeStartInstructions') { throw 'Realtime instruction channel missing' }
+          if ($bridge -notmatch 'SolVoiceStyle\.Instructions') { throw 'Native voice style is not wired into Realtime instructions' }
+          if ($bridge -notmatch 'SolHomeAssistantContext\.GetContextAsync') { throw 'SOL mode does not consume HA context through plugin bus' }
+          if ($bridge -match 'thread/realtime/appendAudio') { throw 'Legacy sideband audio append survived' }
+          if ($bridge -notmatch 'oauthWebRtcPeer\.PushPcmAsync') { throw 'WebRTC PCM uplink missing' }
+          if ($server -match 'TrayController|AudioCableSink|LoopbackDownlink|BtcomBluetoothReconnect') { throw 'Legacy desktop audio dependency survived in Realtime server' }
+          if ($server -notmatch 'SolRuntimeBridge\.TryCreate') { throw 'SOL runtime bridge missing' }
+          if ($server -notmatch 'TryHandleCallbackAsync') { throw 'SOL MCP callback routing missing' }
           if ($pluginHostSource -notmatch 'sol\.plugin\.ready') { throw 'SOL plugin protocol helper missing' }
-          if ($appSettings -notmatch 'SolPluginHost\.Setting\("realtime_voice"\)') { throw 'SOL voice setting overlay missing' }
-          if ($downlink -notmatch 'SolPluginAudioSettings\.SelectedDeviceId') { throw 'SOL audio output setting overlay missing' }
-          if ($server -notmatch 'SolRuntimeBridge\.TryCreate') { throw 'SOL runtime bridge was not wired into RealtimeSessionServer' }
-          if ($server -notmatch 'TryHandleCallbackAsync') { throw 'SOL MCP callback is not routed by the proven Realtime listener' }
-          if ($server -notmatch 'OnSessionStarted') { throw 'SOL speaker session lifecycle missing' }
-          if ($server -notmatch 'IngestTranscriptAsync') { throw 'SOL transcript ingest hook missing' }
-          if ($solRuntime -notmatch 'codex_audio_remote_bind_current_speaker') { throw 'Correctly-prefixed speaker binding MCP tool missing' }
-          if ($solRuntime -match 'name = "codex_audio_bind_current_speaker"') { throw 'Legacy invalid MCP prefix survived finalization' }
+          if ($solRuntime -notmatch 'codex_audio_remote_bind_current_speaker') { throw 'Speaker binding MCP tool missing' }
           if ($solRuntime -notmatch 'codex_audio_remote_list_people') { throw 'Canonical SOL Person listing tool missing' }
-          if ($solRuntime -notmatch '/v1/plugin-api/identities/people') { throw 'Canonical SOL Person validation API missing' }
-          if ($solRuntime -notmatch 'canonical_sol_person_not_found') { throw 'Speaker binding does not reject unknown SOL Person ids' }
-          if ($solRuntime -notmatch 'ApplyVoiceprintResolutionAsync') { throw 'Future validated voiceprint resolver contract missing' }
-          if ($solRuntime -notmatch '/v1/plugin-api/inputs/register') { throw 'SOL plugin input registration missing' }
-          if ($haCache -notmatch 'LoadPersisted') { throw 'Standalone durable HA cache missing' }
-          if ($haCache -notmatch 'subscribe_events') { throw 'Standalone HA event subscription missing' }
-          if ($solHa -notmatch '/v1/plugin-api/mcp/tools/invoke-read') { throw 'SOL HA context client does not use plugin read bus' }
-          if ($solHa -notmatch 'home_assistant_search_states') { throw 'SOL HA context client does not consume Home Assistant plugin state' }
-          if ($manifest -notmatch 'identity.speaker-binding') { throw 'Speaker binding capability missing' }
-          if ($manifest -notmatch '"identity.read"') { throw 'Manifest canonical Person read contract missing' }
-          if ($manifest -notmatch '"mcp.register"') { throw 'Manifest MCP permission missing' }
-          if ($manifest -notmatch '"mcp.invoke.read"') { throw 'Manifest read-only plugin bus permission missing' }
-          if ($manifest -notmatch '"input.write"') { throw 'Manifest input write permission missing' }
-          Write-Host 'Verified: golden V3 preserved; MCP prefix fixed; SOL mode delegates HA state to Home Assistant plugin; standalone cache preserved.'
+          if ($solRuntime -notmatch '/v1/plugin-api/identities/people') { throw 'Canonical SOL Person API missing' }
+          if ($solHa -notmatch '/v1/plugin-api/mcp/tools/invoke-read') { throw 'HA context does not use read-only plugin bus' }
+          if ($voiceStyle -notmatch 'voice_style') { throw 'Voice style setting reader missing' }
+          if ($voiceStyle -notmatch 'flirty') { throw 'Flirty preset missing' }
+          if ($manifest -notmatch '"version": "1.4.1"') { throw 'Manifest version is not 1.4.1' }
+          if ($manifest -notmatch '"voice_style"') { throw 'Voice style setting missing from manifest' }
+          if ($manifest -match 'btcom|downlink_device|home_assistant_token|audio/mirror|Bluetooth') { throw 'Legacy audio/Bluetooth settings survived in plugin manifest' }
+          if ($project -match 'NAudio|System\.Speech|CodexAudioRemote\.Server\.csproj') { throw 'Minimal SOL project pulled legacy audio/TTS dependencies' }
+          if ($project -match 'AudioPlatformV2|LoopbackDownlink|BtcomBluetoothReconnect|DownlinkDeviceSettings|RealtimeSecondaryAudioMirror|HomeAssistantMediaClient|SessionServerV2|TrayController') { throw 'Minimal SOL project includes legacy audio source' }
+          if ($entry -match 'VirtualMic|Cable|Btcom|BluetoothReconnect') { throw 'SOL entrypoint references legacy audio plumbing' }
 
-      - name: Publish plugin runtime
+          Write-Host 'Verified: native V3/WebRTC + SOL tools + HA context + direct voice style; no cable/loopback/Bluetooth/mirror runtime in package project.'
+
+      - name: Publish minimal SOL plugin runtime
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $lines = @()
-          & dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/sol-plugin 2>&1 | Tee-Object -Variable lines
+          & dotnet publish windows/CodexAudioRemote.SolPlugin/CodexAudioRemote.SolPlugin.csproj -c Release -r win-x64 --self-contained false -o dist/sol-plugin 2>&1 | Tee-Object -Variable lines
           $exitCode = $LASTEXITCODE
           if ($exitCode -ne 0) {
-            if ($env:GITHUB_REF -eq 'refs/heads/feat/sol-native-audio-identity') {
-              $errors = $lines | ForEach-Object { $_.ToString() } | Where-Object { $_ -match ': error ' -or $_ -match 'error CS\d+' }
-              if (-not $errors) { $errors = $lines | Select-Object -Last 80 | ForEach-Object { $_.ToString() } }
-              $body = "CI compiler diagnostics for commit ``$env:GITHUB_SHA``:`n`n``````text`n" + (($errors | Select-Object -Last 80) -join "`n") + "`n``````"
-              gh pr comment 11 --repo $env:GITHUB_REPOSITORY --body $body
-            }
+            $errors = $lines | ForEach-Object { $_.ToString() } | Where-Object { $_ -match ': error ' -or $_ -match 'error CS\d+' }
+            if (-not $errors) { $errors = $lines | Select-Object -Last 80 | ForEach-Object { $_.ToString() } }
+            Write-Host (($errors | Select-Object -Last 80) -join "`n")
             exit $exitCode
           }
 
-      - name: Assemble .solplugin package
+      - name: Verify published runtime has no legacy audio dependencies
         shell: pwsh
         run: |
           if (-not (Test-Path dist/sol-plugin/CodexAudioRemote.Server.exe)) { throw 'Server executable missing' }
           if (Test-Path dist/sol-plugin/codex.exe) { throw 'Package must not bundle codex.exe' }
+          $legacy = Get-ChildItem dist/sol-plugin -File | Where-Object { $_.Name -match 'NAudio|Lame|System\.Speech' }
+          if ($legacy) { throw ('Legacy audio dependencies packaged: ' + (($legacy | Select-Object -ExpandProperty Name) -join ', ')) }
+          Get-ChildItem dist/sol-plugin -File | Select-Object Name,Length | Format-Table -AutoSize
+
+      - name: Assemble .solplugin package
+        shell: pwsh
+        run: |
           Copy-Item sol-plugin/sol-plugin.json dist/sol-plugin/sol-plugin.json
           $zip = 'dist/CodexAudioRemote-SOL.zip'
           $plugin = 'dist/CodexAudioRemote.solplugin'
@@ -165,8 +140,9 @@ jobs:
           $tag = 'sol-plugin-latest'
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Codex Audio Remote · SOL Plugin' --notes 'Stable install endpoint for SOL Plugin Manager. Built from the isolated plugin port; standalone build remains untouched.' --prerelease
+            gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Codex Audio Remote · SOL Plugin' --notes 'Stable install endpoint for SOL Plugin Manager. Built from the isolated native plugin branch.' --prerelease
           }
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes 'Stable native SOL plugin: Realtime V3/WebRTC only; no virtual cable, loopback, Bluetooth/btcom or HA audio mirror runtime.'
           gh release upload $tag dist/CodexAudioRemote.solplugin --repo $env:GITHUB_REPOSITORY --clobber
 
       - name: Upload SOL plugin artifact
