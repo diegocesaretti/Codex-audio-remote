@@ -59,8 +59,9 @@ $runReplacement = @'
 '@
 $server = [regex]::Replace($server, $runPattern, $runReplacement.TrimEnd(), 1)
 
-Require-Contains $server 'context.AcceptWebSocketAsync(null)' 'HttpListener WebSocket accept'
-$server = $server.Replace('context.AcceptWebSocketAsync(null)', 'context.WebSockets.AcceptWebSocketAsync()')
+$oldAccept = '(await context.AcceptWebSocketAsync(null)).WebSocket'
+Require-Contains $server $oldAccept 'HttpListener WebSocket accept result'
+$server = $server.Replace($oldAccept, 'await context.WebSockets.AcceptWebSocketAsync()')
 
 # Preserve the existing speaker/device identity semantics using Kestrel connection metadata.
 $acceptMarker = '        WebSocket? old;'
