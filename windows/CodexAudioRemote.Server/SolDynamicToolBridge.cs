@@ -14,7 +14,7 @@ internal sealed record SolDynamicToolDescriptor(
 internal sealed record SolDynamicToolSession(
     object[] DynamicTools,
     string DeveloperInstructions,
-    bool ForceNewThread,
+    bool CatalogChanged,
     int ToolCount,
     string CatalogSignature);
 
@@ -82,10 +82,9 @@ internal sealed class SolDynamicToolBridge : IDisposable
 
         var signature = ComputeCatalogSignature(catalog);
         var rememberedSignature = ReadRememberedSignature();
-        var hasSavedThread = !string.IsNullOrWhiteSpace(AppSettings.RealtimePersistentThreadId);
-        var forceNew = hasSavedThread && !string.Equals(rememberedSignature, signature, StringComparison.Ordinal);
-        SolPluginHost.Log("info", $"Realtime SOL dynamic tools prepared · count={catalog.Count} · forceNewThread={forceNew} · catalog={signature[..Math.Min(12, signature.Length)]} · tools={names}");
-        return new SolDynamicToolSession(dynamicTools, instructions, forceNew, catalog.Count, signature);
+        var catalogChanged = !string.Equals(rememberedSignature, signature, StringComparison.Ordinal);
+        SolPluginHost.Log("info", $"Realtime SOL dynamic tools prepared · count={catalog.Count} · catalogChanged={catalogChanged} · catalog={signature[..Math.Min(12, signature.Length)]} · tools={names}");
+        return new SolDynamicToolSession(dynamicTools, instructions, catalogChanged, catalog.Count, signature);
     }
 
     public void MarkThreadReady(string catalogSignature)
