@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "id": "codex-audio-remote",
   "name": "Codex Audio Remote",
-  "version": "1.3.2",
-  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, canonical SOL Persons and Home Assistant context delegated to SOL's Home Assistant plugin.",
+  "version": "1.3.3",
+  "description": "Native SOL voice bridge using the known-good Codex Realtime V3 audio path, canonical SOL Persons and dynamic SOL plugin tools backed by Home Assistant's event-driven cache.",
   "runtime": "executable",
   "entry": "CodexAudioRemote.Server.exe",
   "args": [],
@@ -13,6 +13,7 @@
     "audio.realtime",
     "codex.oauth",
     "homeassistant.context-consumer",
+    "consumer.sol-plugin-tools",
     "voice.android-client",
     "input.codex-audio",
     "mcp.codex-audio",
@@ -40,6 +41,7 @@
     "identity.read",
     "mcp.register",
     "mcp.invoke.read",
+    "mcp.invoke.actions",
     "filesystem.plugin-data"
   ],
   "settings": [
