@@ -10,7 +10,17 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class DownlinkPlayer implements AutoCloseable {
-    public interface Listener { void onPlayed(byte[] pcm); }
+    /**
+     * Keep the listener API backward-compatible with the protocol-v2 RemoteService used on
+     * Android 6 while preserving the newer onPlayed callback. Default methods are deliberately
+     * no-op so older/newer call sites can coexist without requiring platform-specific APIs.
+     */
+    public interface Listener {
+        default void onStarted() { }
+        default void onStopped() { }
+        default void onAudio(byte[] pcm) { }
+        default void onPlayed(byte[] pcm) { }
+    }
 
     private static final int SAMPLE_RATE = 16000;
     private static final int BYTES_PER_MS = SAMPLE_RATE * 2 / 1000;
@@ -54,6 +64,9 @@ public class DownlinkPlayer implements AutoCloseable {
         track = new AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT, buffer, AudioTrack.MODE_STREAM);
         track.play();
+        if (listener != null) {
+            try { listener.onStarted(); } catch (Exception ignored) { }
+        }
         AndroidDebugLog.log("DownlinkPlayer START · prebuffer=" + (prebufferBytes / BYTES_PER_MS) + "ms · AudioTrackBuffer=" + buffer);
     }
 
@@ -92,6 +105,7 @@ public class DownlinkPlayer implements AutoCloseable {
                 }
                 packetsPlayed++;
                 if (listener != null) {
+                    try { listener.onAudio(pcm); } catch (Exception ignored) { }
                     try { listener.onPlayed(pcm); } catch (Exception ignored) { }
                 }
 
@@ -111,6 +125,9 @@ public class DownlinkPlayer implements AutoCloseable {
             if (t != null) {
                 try { t.pause(); t.flush(); t.stop(); } catch (Exception ignored) { }
                 try { t.release(); } catch (Exception ignored) { }
+            }
+            if (listener != null) {
+                try { listener.onStopped(); } catch (Exception ignored) { }
             }
             AndroidDebugLog.log("DownlinkPlayer STOP · in=" + packetsIn + " · played=" + packetsPlayed + " · underruns=" + underruns + " · dropped=" + dropped);
         }
