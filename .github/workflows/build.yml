@@ -25,6 +25,29 @@ jobs:
           name: CodexAudioRemote-Windows-x64-v2
           path: dist/windows
 
+  tv-standalone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android platform
+        run: yes | sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Build Oreo TV Satellite using AmbiP-compatible toolchain
+        run: gradle --no-daemon -p tv-standalone :app:assembleDebug --stacktrace
+      - name: Upload Oreo TV Satellite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexTVSatellite-Oreo-AmbiPBuild
+          path: tv-standalone/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
   android:
     runs-on: ubuntu-latest
     steps:
@@ -39,13 +62,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-      - name: Build Android TV Satellite APK
-        run: gradle -p android :tvsatellite:assembleDebug --stacktrace
-      - name: Upload Android TV Satellite artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: CodexTVSatellite-Android7plus
-          path: android/tvsatellite/build/outputs/apk/debug/tvsatellite-debug.apk
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
