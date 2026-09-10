@@ -39,6 +39,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
+      - name: Build Android TV Satellite APK
+        run: gradle -p android :tvsatellite:assembleDebug --stacktrace
+      - name: Upload Android TV Satellite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexTVSatellite-Android7plus
+          path: android/tvsatellite/build/outputs/apk/debug/tvsatellite-debug.apk
       - name: Bundle Vosk Spanish wake model
         run: |
           mkdir -p android/app/src/main/assets
@@ -46,15 +53,8 @@ jobs:
           ls -lh android/app/src/main/assets/vosk-es.zip
       - name: Build Android phone APK
         run: gradle -p android :app:assembleDebug --stacktrace
-      - name: Build Android TV Satellite APK
-        run: gradle -p android :tvsatellite:assembleDebug --stacktrace
       - name: Upload Android phone artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexAudioRemote-Android-v2
           path: android/app/build/outputs/apk/debug/app-debug.apk
-      - name: Upload Android TV Satellite artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: CodexTVSatellite-Android7plus
-          path: android/tvsatellite/build/outputs/apk/debug/tvsatellite-debug.apk
