@@ -1,0 +1,11 @@
+{
+  "domain": "codex_tv",
+  "name": "Codex TV Satellite",
+  "version": "0.1.0",
+  "documentation": "https://github.com/diegocesaretti/Codex-audio-remote",
+  "issue_tracker": "https://github.com/diegocesaretti/Codex-audio-remote/issues",
+  "config_flow": true,
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "requirements": []
+}
