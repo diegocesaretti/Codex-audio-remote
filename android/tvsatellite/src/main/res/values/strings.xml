@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Codex TV Satellite</string>
+    <string name="accessibility_service_name">Codex TV Satellite control</string>
+    <string name="accessibility_service_description">Permite a Codex observar y controlar la interfaz de Android TV desde tu red local.</string>
+</resources>
