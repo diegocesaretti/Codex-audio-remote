@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [ main, rewrite/state-machine-v2, 'fix/**' ]
+    branches: [ main, rewrite/state-machine-v2, 'fix/**', 'feature/**' ]
   pull_request:
 
 concurrency:
@@ -44,10 +44,17 @@ jobs:
           mkdir -p android/app/src/main/assets
           curl -L --fail --retry 3 -o android/app/src/main/assets/vosk-es.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
           ls -lh android/app/src/main/assets/vosk-es.zip
-      - name: Build Android debug APK
+      - name: Build Android phone APK
         run: gradle -p android :app:assembleDebug --stacktrace
-      - name: Upload Android artifact
+      - name: Build Android TV Satellite APK
+        run: gradle -p android :tvsatellite:assembleDebug --stacktrace
+      - name: Upload Android phone artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexAudioRemote-Android-v2
           path: android/app/build/outputs/apk/debug/app-debug.apk
+      - name: Upload Android TV Satellite artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexTVSatellite-Android7plus
+          path: android/tvsatellite/build/outputs/apk/debug/tvsatellite-debug.apk
