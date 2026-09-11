@@ -10,6 +10,7 @@ import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.view.Display;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
@@ -21,38 +22,85 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class TvAccessibilityService extends AccessibilityService {
     private static volatile TvAccessibilityService instance;
     private static volatile String lastPackage = "";
+    private static final AtomicLong EVENT_SEQUENCE = new AtomicLong(0L);
+    private static final Object EVENT_LOCK = new Object();
+    private static volatile long lastEventAtElapsed = 0L;
+    private static volatile int lastEventType = 0;
 
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        markUiEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
         LocalHttpServer.ensureStarted(getApplicationContext());
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event != null && event.getPackageName() != null) {
-            lastPackage = event.getPackageName().toString();
+        if (event != null) {
+            if (event.getPackageName() != null) lastPackage = event.getPackageName().toString();
+            markUiEvent(event.getEventType());
         }
     }
 
-    @Override
-    public void onInterrupt() {
+    private static void markUiEvent(int eventType) {
+        lastEventType = eventType;
+        lastEventAtElapsed = SystemClock.elapsedRealtime();
+        EVENT_SEQUENCE.incrementAndGet();
+        synchronized (EVENT_LOCK) { EVENT_LOCK.notifyAll(); }
     }
+
+    public static long eventSequence() { return EVENT_SEQUENCE.get(); }
+    public static long lastEventAgeMs() {
+        long at = lastEventAtElapsed;
+        return at == 0L ? -1L : Math.max(0L, SystemClock.elapsedRealtime() - at);
+    }
+
+    public static JSONObject waitForUiSettled(long sinceSequence, long quietMs, long timeoutMs) {
+        long quiet = Math.max(60L, Math.min(750L, quietMs));
+        long timeout = Math.max(100L, Math.min(5000L, timeoutMs));
+        long deadline = SystemClock.elapsedRealtime() + timeout;
+        long observed = EVENT_SEQUENCE.get();
+        boolean changed = observed > sinceSequence;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            long age = lastEventAgeMs();
+            if ((changed || sinceSequence < 0L) && age >= quiet) break;
+            long remain = deadline - SystemClock.elapsedRealtime();
+            if (remain <= 0L) break;
+            synchronized (EVENT_LOCK) {
+                try { EVENT_LOCK.wait(Math.min(remain, Math.max(quiet, 80L))); }
+                catch (InterruptedException ignored) { Thread.currentThread().interrupt(); break; }
+            }
+            long next = EVENT_SEQUENCE.get();
+            if (next > observed || next > sinceSequence) changed = true;
+            observed = next;
+        }
+        JSONObject result = new JSONObject();
+        try {
+            result.put("sequence", EVENT_SEQUENCE.get());
+            result.put("changed", changed);
+            result.put("quiet_ms", quiet);
+            result.put("last_event_age_ms", lastEventAgeMs());
+            result.put("last_event_type", lastEventType);
+        } catch (Throwable ignored) {}
+        return result;
+    }
+
+    @Override public void onInterrupt() {}
 
     @Override
     public void onDestroy() {
         if (instance == this) instance = null;
+        markUiEvent(AccessibilityEvent.TYPE_WINDOWS_CHANGED);
         super.onDestroy();
     }
 
-    public static boolean isConnected() {
-        return instance != null;
-    }
+    public static boolean isConnected() { return instance != null; }
 
     public static JSONObject snapshot() {
         JSONObject out = new JSONObject();
@@ -61,16 +109,22 @@ public class TvAccessibilityService extends AccessibilityService {
             out.put("accessibility_connected", svc != null);
             out.put("android_api", Build.VERSION.SDK_INT);
             out.put("package", lastPackage == null ? "" : lastPackage);
+            out.put("ui_event_sequence", EVENT_SEQUENCE.get());
+            out.put("last_ui_event_age_ms", lastEventAgeMs());
             if (svc == null) return out;
 
             AccessibilityNodeInfo root = svc.getRootInActiveWindow();
-            if (root != null && root.getPackageName() != null) {
-                out.put("package", root.getPackageName().toString());
-            }
+            if (root != null && root.getPackageName() != null) out.put("package", root.getPackageName().toString());
 
-            AccessibilityNodeInfo focused = svc.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
-            if (focused == null) focused = svc.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-            if (focused != null) out.put("focused", nodeSummary(focused));
+            AccessibilityNodeInfo focused = bestFocusedNode(svc, root);
+            if (focused != null) {
+                JSONObject focus = nodeSummary(focused);
+                addNormalizedBounds(svc, focus, focused);
+                focus.put("source", "accessibility");
+                focus.put("confidence", 0.96);
+                out.put("focused", focus);
+                out.put("focus_hint", focus);
+            }
 
             int[] count = new int[]{0};
             if (root != null) out.put("tree", nodeJson(root, 0, count));
@@ -79,6 +133,34 @@ public class TvAccessibilityService extends AccessibilityService {
             try { out.put("error", t.toString()); } catch (Throwable ignored) {}
         }
         return out;
+    }
+
+    private static AccessibilityNodeInfo bestFocusedNode(TvAccessibilityService svc, AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo node = svc.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
+        if (node == null) node = svc.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (node != null) return node;
+        return findSelectedOrFocused(root, 0);
+    }
+
+    private static AccessibilityNodeInfo findSelectedOrFocused(AccessibilityNodeInfo node, int depth) {
+        if (node == null || depth > 10) return null;
+        if ((node.isFocused() || node.isAccessibilityFocused() || node.isSelected()) && node.isVisibleToUser()) return node;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo found = findSelectedOrFocused(node.getChild(i), depth + 1);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    public static Rect focusedBounds() {
+        TvAccessibilityService svc = instance;
+        if (svc == null) return null;
+        AccessibilityNodeInfo root = svc.getRootInActiveWindow();
+        AccessibilityNodeInfo node = bestFocusedNode(svc, root);
+        if (node == null) return null;
+        Rect r = new Rect();
+        node.getBoundsInScreen(r);
+        return r.isEmpty() ? null : r;
     }
 
     private static JSONObject nodeSummary(AccessibilityNodeInfo node) {
@@ -90,8 +172,11 @@ public class TvAccessibilityService extends AccessibilityService {
             putText(obj, "view_id", node.getViewIdResourceName());
             obj.put("clickable", node.isClickable());
             obj.put("editable", node.isEditable());
+            obj.put("focusable", node.isFocusable());
             obj.put("focused", node.isFocused());
             obj.put("accessibility_focused", node.isAccessibilityFocused());
+            obj.put("selected", node.isSelected());
+            obj.put("visible", node.isVisibleToUser());
             obj.put("enabled", node.isEnabled());
             Rect r = new Rect();
             node.getBoundsInScreen(r);
@@ -100,6 +185,23 @@ public class TvAccessibilityService extends AccessibilityService {
             obj.put("bounds", bounds);
         } catch (Throwable ignored) {}
         return obj;
+    }
+
+    private static void addNormalizedBounds(TvAccessibilityService svc, JSONObject obj, AccessibilityNodeInfo node) {
+        try {
+            WindowManager wm = (WindowManager) svc.getSystemService(WINDOW_SERVICE);
+            if (wm == null) return;
+            android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+            wm.getDefaultDisplay().getRealMetrics(dm);
+            Rect r = new Rect(); node.getBoundsInScreen(r);
+            JSONArray n = new JSONArray();
+            n.put((double) r.left / Math.max(1, dm.widthPixels));
+            n.put((double) r.top / Math.max(1, dm.heightPixels));
+            n.put((double) r.right / Math.max(1, dm.widthPixels));
+            n.put((double) r.bottom / Math.max(1, dm.heightPixels));
+            obj.put("bounds_normalized", n);
+            obj.put("center_normalized", new JSONArray().put((r.left + r.right) / (2.0 * Math.max(1, dm.widthPixels))).put((r.top + r.bottom) / (2.0 * Math.max(1, dm.heightPixels))));
+        } catch (Throwable ignored) {}
     }
 
     private static JSONObject nodeJson(AccessibilityNodeInfo node, int depth, int[] count) {
@@ -111,34 +213,23 @@ public class TvAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) children.put(nodeJson(child, depth + 1, count));
         }
-        if (children.length() > 0) {
-            try { obj.put("children", children); } catch (Throwable ignored) {}
-        }
+        if (children.length() > 0) try { obj.put("children", children); } catch (Throwable ignored) {}
         return obj;
     }
 
     private static void putText(JSONObject obj, String key, CharSequence value) {
         if (value == null) return;
         String s = value.toString();
-        if (!s.isEmpty()) {
-            try { obj.put(key, s); } catch (Throwable ignored) {}
-        }
+        if (!s.isEmpty()) try { obj.put(key, s); } catch (Throwable ignored) {}
     }
 
-    public static boolean goBack() {
-        return instance != null && instance.performGlobalAction(GLOBAL_ACTION_BACK);
-    }
-
-    public static boolean goHome() {
-        return instance != null && instance.performGlobalAction(GLOBAL_ACTION_HOME);
-    }
+    public static boolean goBack() { return instance != null && instance.performGlobalAction(GLOBAL_ACTION_BACK); }
+    public static boolean goHome() { return instance != null && instance.performGlobalAction(GLOBAL_ACTION_HOME); }
 
     public static boolean clickFocused() {
         TvAccessibilityService svc = instance;
         if (svc == null) return false;
-        AccessibilityNodeInfo node = svc.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
-        if (node == null) node = svc.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-        return clickNodeOrParent(node);
+        return clickNodeOrParent(bestFocusedNode(svc, svc.getRootInActiveWindow()));
     }
 
     public static boolean clickText(String text) {
@@ -148,18 +239,14 @@ public class TvAccessibilityService extends AccessibilityService {
         if (root == null) return false;
         List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByText(text);
         if (matches == null) return false;
-        for (AccessibilityNodeInfo node : matches) {
-            if (clickNodeOrParent(node)) return true;
-        }
+        for (AccessibilityNodeInfo node : matches) if (clickNodeOrParent(node)) return true;
         return false;
     }
 
     private static boolean clickNodeOrParent(AccessibilityNodeInfo node) {
         AccessibilityNodeInfo current = node;
         for (int i = 0; current != null && i < 6; i++) {
-            if (current.isClickable() && current.isEnabled()) {
-                return current.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-            }
+            if (current.isClickable() && current.isEnabled()) return current.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             current = current.getParent();
         }
         return false;
@@ -169,9 +256,7 @@ public class TvAccessibilityService extends AccessibilityService {
         TvAccessibilityService svc = instance;
         if (svc == null) return false;
         AccessibilityNodeInfo node = svc.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-        if (node == null || !node.isEditable()) {
-            node = findEditable(svc.getRootInActiveWindow(), 0);
-        }
+        if (node == null || !node.isEditable()) node = findEditable(svc.getRootInActiveWindow(), 0);
         if (node == null) return false;
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text == null ? "" : text);
@@ -196,13 +281,9 @@ public class TvAccessibilityService extends AccessibilityService {
         Display display = wm.getDefaultDisplay();
         android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
         display.getRealMetrics(dm);
-        float px = x * dm.widthPixels;
-        float py = y * dm.heightPixels;
-        Path path = new Path();
-        path.moveTo(px, py);
-        GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 80);
+        Path path = new Path(); path.moveTo(x * dm.widthPixels, y * dm.heightPixels);
         GestureDescription.Builder builder = new GestureDescription.Builder();
-        builder.addStroke(stroke);
+        builder.addStroke(new GestureDescription.StrokeDescription(path, 0, 80));
         return svc.dispatchGesture(builder.build(), null, null);
     }
 
@@ -215,8 +296,7 @@ public class TvAccessibilityService extends AccessibilityService {
             case "down": return svc.performGlobalAction(GLOBAL_ACTION_DPAD_DOWN);
             case "left": return svc.performGlobalAction(GLOBAL_ACTION_DPAD_LEFT);
             case "right": return svc.performGlobalAction(GLOBAL_ACTION_DPAD_RIGHT);
-            case "center":
-            case "ok": return svc.performGlobalAction(GLOBAL_ACTION_DPAD_CENTER);
+            case "center": case "ok": return svc.performGlobalAction(GLOBAL_ACTION_DPAD_CENTER);
             default: return false;
         }
     }
@@ -225,21 +305,13 @@ public class TvAccessibilityService extends AccessibilityService {
         if (context == null || query == null || query.trim().isEmpty()) return false;
         PackageManager pm = context.getPackageManager();
         String q = query.trim();
-
         Intent direct = pm.getLeanbackLaunchIntentForPackage(q);
         if (direct == null) direct = pm.getLaunchIntentForPackage(q);
-        if (direct != null) {
-            direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(direct);
-            return true;
-        }
+        if (direct != null) { direct.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); context.startActivity(direct); return true; }
 
         List<ResolveInfo> all = new ArrayList<>();
-        Intent leanback = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
-        all.addAll(pm.queryIntentActivities(leanback, 0));
-        Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-        all.addAll(pm.queryIntentActivities(launcher, 0));
-
+        all.addAll(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0));
+        all.addAll(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0));
         String needle = q.toLowerCase(Locale.US);
         ResolveInfo best = null;
         for (ResolveInfo info : all) {
@@ -247,19 +319,13 @@ public class TvAccessibilityService extends AccessibilityService {
             CharSequence labelCs = info.loadLabel(pm);
             String label = labelCs == null ? "" : labelCs.toString();
             String haystack = (label + " " + pkg).toLowerCase(Locale.US);
-            if (haystack.equals(needle) || label.equalsIgnoreCase(q) || pkg.equalsIgnoreCase(q)) {
-                best = info;
-                break;
-            }
+            if (haystack.equals(needle) || label.equalsIgnoreCase(q) || pkg.equalsIgnoreCase(q)) { best = info; break; }
             if (best == null && haystack.contains(needle)) best = info;
         }
         if (best == null) return false;
-
         Intent intent = pm.getLeanbackLaunchIntentForPackage(best.activityInfo.packageName);
         if (intent == null) intent = pm.getLaunchIntentForPackage(best.activityInfo.packageName);
         if (intent == null) return false;
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        context.startActivity(intent);
-        return true;
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); context.startActivity(intent); return true;
     }
 }
