@@ -1,9 +1,7 @@
 package com.bwa3d.codextv;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Build;
-import android.util.Base64;
 
 import org.json.JSONObject;
 
@@ -19,7 +17,6 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -28,8 +25,6 @@ import java.util.concurrent.Executors;
 
 public final class LocalHttpServer {
     private static final int PORT = 8765;
-    private static final String PREFS = "codex_tv_satellite";
-    private static final String TOKEN_KEY = "api_token";
     private static volatile LocalHttpServer instance;
 
     private final Context context;
@@ -63,17 +58,6 @@ public final class LocalHttpServer {
         }, "CodexTvHttp");
         acceptThread.setDaemon(true);
         acceptThread.start();
-    }
-
-    public static String getToken(Context context) {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        String existing = prefs.getString(TOKEN_KEY, null);
-        if (existing != null && !existing.isEmpty()) return existing;
-        byte[] bytes = new byte[24];
-        new SecureRandom().nextBytes(bytes);
-        String token = Base64.encodeToString(bytes, Base64.URL_SAFE | Base64.NO_PADDING | Base64.NO_WRAP);
-        prefs.edit().putString(TOKEN_KEY, token).apply();
-        return token;
     }
 
     public static String getLocalIpAddress() {
@@ -124,17 +108,12 @@ public final class LocalHttpServer {
                 JSONObject health = new JSONObject();
                 health.put("ok", true);
                 health.put("name", "Codex TV Satellite");
-                health.put("version", "0.1.0");
+                health.put("version", "0.1.3");
                 health.put("android_api", Build.VERSION.SDK_INT);
                 health.put("accessibility", TvAccessibilityService.isConnected());
                 health.put("screenshot", CaptureService.hasFrame());
+                health.put("authentication", "none");
                 sendJson(out, 200, health);
-                return;
-            }
-
-            String supplied = headers.get("x-codex-token");
-            if (supplied == null || !constantTimeEquals(supplied, getToken(context))) {
-                sendJson(out, 401, json(false, "unauthorized"));
                 return;
             }
 
@@ -289,26 +268,12 @@ public final class LocalHttpServer {
         return shorter;
     }
 
-    private static boolean constantTimeEquals(String a, String b) {
-        if (a == null || b == null) return false;
-        byte[] aa = a.getBytes(StandardCharsets.UTF_8);
-        byte[] bb = b.getBytes(StandardCharsets.UTF_8);
-        int diff = aa.length ^ bb.length;
-        int max = Math.max(aa.length, bb.length);
-        for (int i = 0; i < max; i++) {
-            byte av = i < aa.length ? aa[i] : 0;
-            byte bv = i < bb.length ? bb[i] : 0;
-            diff |= av ^ bv;
-        }
-        return diff == 0;
-    }
-
     private static void sendJson(OutputStream out, int status, JSONObject obj) throws IOException {
         sendBytes(out, status, "application/json; charset=utf-8", obj.toString().getBytes(StandardCharsets.UTF_8));
     }
 
     private static void sendBytes(OutputStream out, int status, String contentType, byte[] body) throws IOException {
-        String reason = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 401 ? "Unauthorized" : status == 404 ? "Not Found" : status == 409 ? "Conflict" : "Service Unavailable";
+        String reason = status == 200 ? "OK" : status == 400 ? "Bad Request" : status == 404 ? "Not Found" : status == 409 ? "Conflict" : "Service Unavailable";
         String headers = "HTTP/1.1 " + status + " " + reason + "\r\n" +
                 "Content-Type: " + contentType + "\r\n" +
                 "Content-Length: " + body.length + "\r\n" +
