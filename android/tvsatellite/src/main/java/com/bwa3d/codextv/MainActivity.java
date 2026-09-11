@@ -10,17 +10,19 @@ import android.provider.Settings;
 import android.graphics.Color;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
     private static final int REQ_CAPTURE = 4102;
     private TextView status;
+    private CheckBox startOnBoot;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        LocalHttpServer.ensureStarted(getApplicationContext());
+        SatelliteService.ensureRunning(getApplicationContext());
         buildUi();
     }
 
@@ -44,7 +46,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Android 8+ · visión + accesibilidad + control local");
+        subtitle.setText("Android 8+ · visión bajo demanda + accesibilidad + control local");
         subtitle.setTextColor(Color.LTGRAY);
         subtitle.setTextSize(16f);
         subtitle.setPadding(0, 10, 0, 24);
@@ -56,11 +58,22 @@ public class MainActivity extends Activity {
         status.setPadding(0, 0, 0, 22);
         root.addView(status);
 
+        startOnBoot = new CheckBox(this);
+        startOnBoot.setText("Iniciar servidor al encender la TV");
+        startOnBoot.setTextColor(Color.WHITE);
+        startOnBoot.setChecked(SatellitePrefs.startOnBoot(this));
+        startOnBoot.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            SatellitePrefs.setStartOnBoot(this, isChecked);
+            if (isChecked) SatelliteService.ensureRunning(getApplicationContext());
+            refreshStatus();
+        });
+        root.addView(startOnBoot);
+
         Button accessibility = button("1. Habilitar control de accesibilidad");
         accessibility.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(accessibility);
 
-        Button capture = button("2. Habilitar captura de pantalla");
+        Button capture = button("2. Autorizar captura bajo demanda");
         capture.setOnClickListener(v -> requestCapture());
         root.addView(capture);
 
@@ -104,7 +117,7 @@ public class MainActivity extends Activity {
             } else {
                 startService(svc);
             }
-            refreshStatus();
+            status.postDelayed(this::refreshStatus, 350);
         }
     }
 
@@ -114,9 +127,14 @@ public class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         sb.append("API: http://").append(ip == null ? "TV_IP" : ip).append(":8765\n\n");
         sb.append("Accesibilidad: ").append(TvAccessibilityService.isConnected() ? "ACTIVA" : "DESACTIVADA").append("\n");
-        sb.append("Captura: ").append(CaptureService.hasFrame() ? "ACTIVA" : "SIN IMAGEN").append("\n");
+        sb.append("Captura: ").append(CaptureService.isReady() ? "AUTORIZADA · BAJO DEMANDA" : "SIN AUTORIZAR").append("\n");
+        sb.append("Inicio al encender: ").append(SatellitePrefs.startOnBoot(this) ? "ACTIVO" : "DESACTIVADO").append("\n");
         sb.append("Android API: ").append(Build.VERSION.SDK_INT).append("\n\n");
-        sb.append("Autenticación API: ninguna · red local");
+        sb.append("Autenticación API: ninguna · red local\n");
+        sb.append("La pantalla sólo se captura cuando SOL solicita /screenshot.");
         status.setText(sb.toString());
+        if (startOnBoot != null && startOnBoot.isChecked() != SatellitePrefs.startOnBoot(this)) {
+            startOnBoot.setChecked(SatellitePrefs.startOnBoot(this));
+        }
     }
 }
