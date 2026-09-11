@@ -79,7 +79,7 @@ public final class LocalHttpServer {
         try (Socket s = socket;
              InputStream rawIn = new BufferedInputStream(s.getInputStream());
              OutputStream out = new BufferedOutputStream(s.getOutputStream())) {
-            s.setSoTimeout(5000);
+            s.setSoTimeout(6000);
             String requestLine = readLine(rawIn);
             if (requestLine == null || requestLine.isEmpty()) return;
             String[] parts = requestLine.split(" ");
@@ -108,11 +108,13 @@ public final class LocalHttpServer {
                 JSONObject health = new JSONObject();
                 health.put("ok", true);
                 health.put("name", "Codex TV Satellite");
-                health.put("version", "0.1.3");
+                health.put("version", "0.1.4");
                 health.put("android_api", Build.VERSION.SDK_INT);
                 health.put("accessibility", TvAccessibilityService.isConnected());
-                health.put("screenshot", CaptureService.hasFrame());
+                health.put("screenshot", CaptureService.isReady());
+                health.put("capture_mode", "on_demand");
                 health.put("authentication", "none");
+                health.put("start_on_boot", SatellitePrefs.startOnBoot(context));
                 sendJson(out, 200, health);
                 return;
             }
@@ -120,10 +122,12 @@ public final class LocalHttpServer {
             if ("GET".equals(method) && "/observe".equals(path)) {
                 JSONObject snapshot = TvAccessibilityService.snapshot();
                 snapshot.put("ok", true);
-                snapshot.put("screenshot_available", CaptureService.hasFrame());
-                snapshot.put("screenshot_age_ms", CaptureService.getLastFrameAt() == 0L ? -1 : System.currentTimeMillis() - CaptureService.getLastFrameAt());
+                snapshot.put("screenshot_ready", CaptureService.isReady());
+                snapshot.put("capture_mode", "on_demand");
+                snapshot.put("last_screenshot_age_ms", CaptureService.getLastFrameAt() == 0L ? -1 : System.currentTimeMillis() - CaptureService.getLastFrameAt());
                 JSONObject caps = new JSONObject();
                 caps.put("screenshot", true);
+                caps.put("screenshot_on_demand", true);
                 caps.put("ui_tree", true);
                 caps.put("tap", Build.VERSION.SDK_INT >= 24);
                 caps.put("set_text", true);
@@ -136,9 +140,13 @@ public final class LocalHttpServer {
             }
 
             if ("GET".equals(method) && "/screenshot".equals(path)) {
-                byte[] jpeg = CaptureService.getLatestJpeg();
+                if (!CaptureService.isReady()) {
+                    sendJson(out, 503, json(false, "screen_capture_not_authorized"));
+                    return;
+                }
+                byte[] jpeg = CaptureService.captureOnce(2500);
                 if (jpeg == null) {
-                    sendJson(out, 503, json(false, "screenshot_not_ready"));
+                    sendJson(out, 503, json(false, "screenshot_timeout"));
                 } else {
                     sendBytes(out, 200, "image/jpeg", jpeg);
                 }
