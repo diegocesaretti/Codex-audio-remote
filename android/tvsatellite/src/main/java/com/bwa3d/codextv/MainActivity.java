@@ -9,7 +9,6 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.graphics.Color;
 import android.view.Gravity;
-import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -45,7 +44,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Android 7+ · visión + accesibilidad + control local");
+        subtitle.setText("Android 8+ · visión + accesibilidad + control local");
         subtitle.setTextColor(Color.LTGRAY);
         subtitle.setTextSize(16f);
         subtitle.setPadding(0, 10, 0, 24);
@@ -112,14 +111,12 @@ public class MainActivity extends Activity {
     private void refreshStatus() {
         if (status == null) return;
         String ip = LocalHttpServer.getLocalIpAddress();
-        String token = LocalHttpServer.getToken(getApplicationContext());
         StringBuilder sb = new StringBuilder();
-        sb.append("API: http://").append(ip == null ? "TV_IP" : ip).append(":8765\n");
-        sb.append("Token: ").append(token).append("\n\n");
+        sb.append("API: http://").append(ip == null ? "TV_IP" : ip).append(":8765\n\n");
         sb.append("Accesibilidad: ").append(TvAccessibilityService.isConnected() ? "ACTIVA" : "DESACTIVADA").append("\n");
         sb.append("Captura: ").append(CaptureService.hasFrame() ? "ACTIVA" : "SIN IMAGEN").append("\n");
         sb.append("Android API: ").append(Build.VERSION.SDK_INT).append("\n\n");
-        sb.append("Header de API: X-Codex-Token");
+        sb.append("Autenticación API: ninguna · red local");
         status.setText(sb.toString());
     }
 }
