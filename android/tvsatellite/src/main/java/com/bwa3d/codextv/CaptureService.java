@@ -15,12 +15,16 @@ import android.media.ImageReader;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.util.DisplayMetrics;
 import android.view.WindowManager;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class CaptureService extends Service {
@@ -31,102 +35,145 @@ public class CaptureService extends Service {
     private static final String CHANNEL_ID = "codex_tv_capture";
     private static final AtomicReference<byte[]> LAST_JPEG = new AtomicReference<>();
     private static volatile long lastFrameAt = 0L;
+    private static volatile CaptureService instance;
 
+    private final Object captureLock = new Object();
     private MediaProjection projection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader reader;
-    private long lastEncodeAt = 0L;
+    private HandlerThread captureThread;
+    private Handler captureHandler;
 
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
+        captureThread = new HandlerThread("CodexTvCapture");
+        captureThread.start();
+        captureHandler = new Handler(captureThread.getLooper());
         createNotificationChannel();
         startForeground(NOTIFICATION_ID, buildNotification());
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (intent == null || projection != null) return START_NOT_STICKY;
+        if (intent == null) return START_NOT_STICKY;
         int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
         Intent resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
-        if (resultData == null) {
-            stopSelf();
-            return START_NOT_STICKY;
-        }
+        if (resultData == null) return START_NOT_STICKY;
 
         MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        if (manager == null) {
-            stopSelf();
-            return START_NOT_STICKY;
+        if (manager == null) return START_NOT_STICKY;
+
+        MediaProjection next = manager.getMediaProjection(resultCode, resultData);
+        if (next == null) return START_NOT_STICKY;
+
+        synchronized (captureLock) {
+            if (projection != null) {
+                try { projection.stop(); } catch (Throwable ignored) {}
+            }
+            projection = next;
+            projection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    synchronized (captureLock) {
+                        projection = null;
+                        LAST_JPEG.set(null);
+                        lastFrameAt = 0L;
+                    }
+                }
+            }, captureHandler);
         }
-        projection = manager.getMediaProjection(resultCode, resultData);
-        if (projection == null) {
-            stopSelf();
-            return START_NOT_STICKY;
-        }
-        startCapture();
         return START_NOT_STICKY;
     }
 
-    private void startCapture() {
-        WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        if (wm == null) return;
-        DisplayMetrics metrics = new DisplayMetrics();
-        wm.getDefaultDisplay().getRealMetrics(metrics);
+    public static boolean isReady() {
+        CaptureService service = instance;
+        return service != null && service.projection != null;
+    }
 
-        final int width = metrics.widthPixels;
-        final int height = metrics.heightPixels;
-        final int density = metrics.densityDpi;
+    public static byte[] captureOnce(long timeoutMs) {
+        CaptureService service = instance;
+        if (service == null) return null;
+        return service.captureOnceInternal(timeoutMs);
+    }
 
-        reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
-        reader.setOnImageAvailableListener(r -> {
-            long now = System.currentTimeMillis();
-            Image image = null;
-            try {
-                image = r.acquireLatestImage();
-                if (image == null || now - lastEncodeAt < 450) return;
-                lastEncodeAt = now;
+    private byte[] captureOnceInternal(long timeoutMs) {
+        synchronized (captureLock) {
+            if (projection == null) return null;
 
-                Image.Plane plane = image.getPlanes()[0];
-                ByteBuffer buffer = plane.getBuffer();
-                int pixelStride = plane.getPixelStride();
-                int rowStride = plane.getRowStride();
-                int rowPadding = rowStride - pixelStride * width;
-                int paddedWidth = width + rowPadding / pixelStride;
+            WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            if (wm == null) return null;
+            DisplayMetrics metrics = new DisplayMetrics();
+            wm.getDefaultDisplay().getRealMetrics(metrics);
 
-                Bitmap padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888);
-                padded.copyPixelsFromBuffer(buffer);
-                Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, width, height);
-                padded.recycle();
+            final int width = metrics.widthPixels;
+            final int height = metrics.heightPixels;
+            final int density = metrics.densityDpi;
+            final CountDownLatch latch = new CountDownLatch(1);
+            final AtomicReference<byte[]> result = new AtomicReference<>();
+            final ImageReader reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2);
 
-                Bitmap output = cropped;
-                if (cropped.getWidth() > 960) {
-                    int scaledHeight = Math.max(1, Math.round(cropped.getHeight() * (960f / cropped.getWidth())));
-                    output = Bitmap.createScaledBitmap(cropped, 960, scaledHeight, true);
+            reader.setOnImageAvailableListener(r -> {
+                Image image = null;
+                try {
+                    image = r.acquireLatestImage();
+                    if (image == null || result.get() != null) return;
+
+                    Image.Plane plane = image.getPlanes()[0];
+                    ByteBuffer buffer = plane.getBuffer();
+                    int pixelStride = plane.getPixelStride();
+                    int rowStride = plane.getRowStride();
+                    int rowPadding = rowStride - pixelStride * width;
+                    int paddedWidth = width + rowPadding / pixelStride;
+
+                    Bitmap padded = Bitmap.createBitmap(paddedWidth, height, Bitmap.Config.ARGB_8888);
+                    padded.copyPixelsFromBuffer(buffer);
+                    Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, width, height);
+                    padded.recycle();
+
+                    Bitmap output = cropped;
+                    if (cropped.getWidth() > 960) {
+                        int scaledHeight = Math.max(1, Math.round(cropped.getHeight() * (960f / cropped.getWidth())));
+                        output = Bitmap.createScaledBitmap(cropped, 960, scaledHeight, true);
+                    }
+
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                    output.compress(Bitmap.CompressFormat.JPEG, 68, baos);
+                    byte[] jpeg = baos.toByteArray();
+                    result.set(jpeg);
+                    LAST_JPEG.set(jpeg);
+                    lastFrameAt = System.currentTimeMillis();
+
+                    if (output != cropped) output.recycle();
+                    cropped.recycle();
+                } catch (Throwable ignored) {
+                } finally {
+                    if (image != null) image.close();
+                    if (result.get() != null) latch.countDown();
                 }
+            }, captureHandler);
 
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                output.compress(Bitmap.CompressFormat.JPEG, 68, baos);
-                LAST_JPEG.set(baos.toByteArray());
-                lastFrameAt = now;
-
-                if (output != cropped) output.recycle();
-                cropped.recycle();
+            VirtualDisplay display = null;
+            try {
+                display = projection.createVirtualDisplay(
+                        "CodexTvSatelliteOnce",
+                        width,
+                        height,
+                        density,
+                        DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        reader.getSurface(),
+                        null,
+                        captureHandler);
+                latch.await(Math.max(250L, Math.min(4000L, timeoutMs)), TimeUnit.MILLISECONDS);
+                return result.get();
             } catch (Throwable ignored) {
+                return null;
             } finally {
-                if (image != null) image.close();
+                if (display != null) {
+                    try { display.release(); } catch (Throwable ignored) {}
+                }
+                try { reader.close(); } catch (Throwable ignored) {}
             }
-        }, null);
-
-        virtualDisplay = projection.createVirtualDisplay(
-                "CodexTvSatellite",
-                width,
-                height,
-                density,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.getSurface(),
-                null,
-                null);
+        }
     }
 
     public static byte[] getLatestJpeg() {
@@ -163,7 +210,7 @@ public class CaptureService extends Service {
         }
         return builder
                 .setContentTitle("Codex TV Satellite")
-                .setContentText("Captura de pantalla activa")
+                .setContentText("Captura bajo demanda preparada")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setOngoing(true)
                 .build();
@@ -171,13 +218,18 @@ public class CaptureService extends Service {
 
     @Override
     public void onDestroy() {
-        if (virtualDisplay != null) virtualDisplay.release();
-        if (reader != null) reader.close();
-        if (projection != null) projection.stop();
-        virtualDisplay = null;
-        reader = null;
-        projection = null;
+        synchronized (captureLock) {
+            if (projection != null) {
+                try { projection.stop(); } catch (Throwable ignored) {}
+            }
+            projection = null;
+        }
         LAST_JPEG.set(null);
+        lastFrameAt = 0L;
+        if (captureThread != null) captureThread.quitSafely();
+        captureHandler = null;
+        captureThread = null;
+        instance = null;
         super.onDestroy();
     }
 
