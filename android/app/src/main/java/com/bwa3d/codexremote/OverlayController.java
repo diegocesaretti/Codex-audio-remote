@@ -165,6 +165,16 @@ public class OverlayController {
         fallbackVisible = false;
     }
 
+    /** Android 6-safe lifecycle cleanup used by RemoteService.onDestroy(). */
+    public void destroy() {
+        if (!onMainThread()) {
+            mainHandler.post(this::destroy);
+            return;
+        }
+        hide();
+        mainHandler.removeCallbacksAndMessages(null);
+    }
+
     private int dp(int value) { return Math.round(value * context.getResources().getDisplayMetrics().density); }
 
     private static class OverlayView extends View {
