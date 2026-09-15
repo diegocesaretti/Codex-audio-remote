@@ -23,9 +23,9 @@ $contextBlock = @'
         var voiceStyleInstructions = SolPluginHost.Enabled ? SolVoiceStyle.Instructions : string.Empty;
         var haInstructions = string.IsNullOrWhiteSpace(haContext)
             ? string.Empty
-            : "HOME ASSISTANT FAST PATH. The following state snapshot is already current. " +
-              "For simple home-control requests, use these exact entity ids/states and call the existing Home Assistant tool directly. " +
-              "Do not rediscover/list HA state unless the requested entity is absent or this snapshot is stale.\n\n" + haContext;
+            : "HOME ASSISTANT STARTUP MAP. This snapshot is only an entity-name/id and initial-state hint captured when this voice session began. " +
+              "Never assume its state remains current. For any question about current Home Assistant state, verify with the live home_assistant_get_state or home_assistant_search_states SOL tool before answering. " +
+              "For requested control actions, use the exact entity id when known and invoke the Home Assistant action tool directly; do not rediscover the entity unless it is absent or ambiguous.\n\n" + haContext;
         var realtimeInstructions = string.Join("\n\n", new[] { voiceStyleInstructions, haInstructions }
             .Where(value => !string.IsNullOrWhiteSpace(value)));
         Console.WriteLine($"Realtime context · HA={!string.IsNullOrWhiteSpace(haContext)} · voiceStyle={!string.IsNullOrWhiteSpace(voiceStyleInstructions)} · chars={realtimeInstructions.Length}");
@@ -57,6 +57,7 @@ if ($source -notmatch 'realtimeStartInstructions') { throw 'Realtime instruction
 if ($source -notmatch 'SolVoiceStyle\.Instructions') { throw 'Native voice style instructions missing.' }
 if ($source -match 'HomeAssistantWebSocketCache') { throw 'Direct HA cache leaked into native bridge.' }
 if ($source -match 'threadParams\["ephemeral"\]') { throw 'Context build must not alter thread lifecycle with ephemeral.' }
+if ($source -notmatch 'verify with the live home_assistant_get_state') { throw 'Live Home Assistant state verification instruction missing.' }
 
 Set-Content -LiteralPath $path -Value $source -Encoding utf8 -NoNewline
-Write-Host 'SOL HA context + native voice style layered onto V3; no direct HA cache or legacy audio path.'
+Write-Host 'SOL HA startup map + live-state verification + native voice style layered onto V3.'
