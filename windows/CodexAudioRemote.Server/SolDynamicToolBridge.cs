@@ -26,6 +26,7 @@ internal sealed record SolDynamicToolSession(
 internal sealed class SolDynamicToolBridge : IDisposable
 {
     const string CatalogMarker = ".realtime-dynamic-tools-v1";
+    static readonly TimeSpan CatalogRefreshInterval = TimeSpan.FromSeconds(30);
 
     readonly HttpClient http;
     readonly string baseUrl;
@@ -33,6 +34,7 @@ internal sealed class SolDynamicToolBridge : IDisposable
     readonly string markerPath;
     readonly object sync = new();
     Dictionary<string, SolDynamicToolDescriptor> tools = new(StringComparer.Ordinal);
+    DateTimeOffset catalogLoadedAt = DateTimeOffset.MinValue;
     bool disposed;
 
     SolDynamicToolBridge(string baseUrl, string token, string dataDir)
@@ -40,7 +42,8 @@ internal sealed class SolDynamicToolBridge : IDisposable
         this.baseUrl = baseUrl.TrimEnd('/');
         this.token = token;
         markerPath = Path.Combine(dataDir, CatalogMarker);
-        http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        // This is a loopback SOL call. A slow/broken catalog must not stall voice wake for 8s.
+        http = new HttpClient { Timeout = TimeSpan.FromSeconds(4) };
     }
 
     public static SolDynamicToolBridge? TryCreate()
@@ -60,9 +63,41 @@ internal sealed class SolDynamicToolBridge : IDisposable
     public async Task<SolDynamicToolSession?> PrepareSessionAsync(CancellationToken cancellationToken)
     {
         if (disposed) return null;
-        var catalog = await LoadCatalogAsync(cancellationToken);
-        lock (sync) tools = catalog.ToDictionary(item => item.Name, item => item, StringComparer.Ordinal);
 
+        List<SolDynamicToolDescriptor>? catalog = null;
+        var loadedFresh = false;
+        lock (sync)
+        {
+            if (tools.Count > 0 && DateTimeOffset.UtcNow - catalogLoadedAt < CatalogRefreshInterval)
+                catalog = tools.Values.OrderBy(item => item.PluginId, StringComparer.Ordinal).ThenBy(item => item.Name, StringComparer.Ordinal).ToList();
+        }
+
+        if (catalog is null)
+        {
+            try
+            {
+                catalog = await LoadCatalogAsync(cancellationToken);
+                lock (sync)
+                {
+                    tools = catalog.ToDictionary(item => item.Name, item => item, StringComparer.Ordinal);
+                    catalogLoadedAt = DateTimeOffset.UtcNow;
+                }
+                loadedFresh = true;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lock (sync)
+                    catalog = tools.Values.OrderBy(item => item.PluginId, StringComparer.Ordinal).ThenBy(item => item.Name, StringComparer.Ordinal).ToList();
+                SolPluginHost.Log("warn", $"Realtime SOL tool catalog refresh failed; continuing voice with cached tools · cached={catalog.Count} · {ex.GetType().Name}: {ex.Message}");
+                SolPluginHost.Health("degraded", "SOL dynamic tool catalog temporarily unavailable; voice remains available.");
+            }
+        }
+
+        catalog ??= new List<SolDynamicToolDescriptor>();
         var dynamicTools = catalog.Select(item => (object)new
         {
             name = item.Name,
@@ -72,18 +107,22 @@ internal sealed class SolDynamicToolBridge : IDisposable
 
         var names = string.Join(", ", catalog.Select(item => item.Name));
         var instructions = catalog.Count == 0
-            ? "SOL PLUGIN TOOLS: none are currently available. Do not pretend to know live Home Assistant state."
+            ? "SOL PLUGIN TOOLS are temporarily unavailable for this session. Continue normal voice conversation, but do not pretend to know current Home Assistant state or claim a local action succeeded."
             : "SOL PLUGIN TOOLS ARE AUTHORITATIVE FOR LIVE LOCAL/PLUGIN DATA. " +
               "When a SOL tool can answer or perform the request, use it before browser, web search, computer use, shell, or UI automation. " +
-              "For Home Assistant state, devices, areas, services, or control, always use the available home_assistant_* SOL tools; never open a browser to determine a local device state. " +
+              "For any question about CURRENT Home Assistant state, call a home_assistant_get_state or home_assistant_search_states tool before answering, even when a startup snapshot contains the entity. " +
+              "Treat the startup Home Assistant snapshot as an entity-name/id hint, not as permanently current state. " +
+              "For Home Assistant devices, areas, services, or control, always use the available home_assistant_* SOL tools; never open a browser to determine a local device state. " +
               "Read-only Home Assistant tools are backed by SOL's event-driven local cache and are the low-latency path. " +
               "For an action tool, invoke it only when the current human speech explicitly requested that action, and supply confirmedByUser=true only in that case. " +
               "Do not infer authorization from prior conversation. Available SOL tools: " + names + ".";
 
         var signature = ComputeCatalogSignature(catalog);
         var rememberedSignature = ReadRememberedSignature();
-        var catalogChanged = !string.Equals(rememberedSignature, signature, StringComparison.Ordinal);
-        SolPluginHost.Log("info", $"Realtime SOL dynamic tools prepared · count={catalog.Count} · catalogChanged={catalogChanged} · catalog={signature[..Math.Min(12, signature.Length)]} · tools={names}");
+        // A transient catalog failure must never force a fresh Codex thread. Only a
+        // successfully refreshed catalog is allowed to rotate the persistent thread.
+        var catalogChanged = loadedFresh && !string.Equals(rememberedSignature, signature, StringComparison.Ordinal);
+        SolPluginHost.Log("info", $"Realtime SOL dynamic tools prepared · count={catalog.Count} · fresh={loadedFresh} · catalogChanged={catalogChanged} · catalog={signature[..Math.Min(12, signature.Length)]} · tools={names}");
         return new SolDynamicToolSession(dynamicTools, instructions, catalogChanged, catalog.Count, signature);
     }
 
