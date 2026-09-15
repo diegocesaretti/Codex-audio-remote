@@ -111,7 +111,6 @@ jobs:
           if ($server -notmatch 'ScheduleTransportLossGrace') { throw 'Transport reconnect grace missing' }
           if ($server -notmatch 'transport_lost_timeout') { throw 'Transport reconnect timeout transition missing' }
           if ($server -match 'await EndSessionAsync\("transport_lost"\)') { throw 'REGRESSION: immediate transport-lost shutdown reintroduced' }
-          if ($server -notmatch 'SOL Realtime background task failed') { throw 'Background task exception telemetry missing' }
           if ($server -match 'lifecycleGate\.Dispose\(\)|activationGate\.Dispose\(\)|sendGate\.Dispose\(\)') { throw 'Shutdown SemaphoreSlim dispose race survived' }
           if ($solRuntime -match 'HttpListener(Context|Request|Response)') { throw 'SOL MCP callback still uses HttpListener types' }
           if ($solRuntime -match '_ = SetInputStatusAsync\("disconnected"\)') { throw 'Disposed SemaphoreSlim race survived' }
@@ -160,7 +159,7 @@ jobs:
           if ($entry -notmatch 'UnhandledException') { throw 'Top-level unhandled exception telemetry missing' }
           if ($entry -notmatch 'UnobservedTaskException') { throw 'Unobserved task telemetry missing' }
 
-          Write-Host 'Verified: native V3/WebRTC + resilient live HA state + fail-open SOL tools + crash telemetry + background task hardening; no URLACL, cable, loopback, Bluetooth or mirror runtime.'
+          Write-Host 'Verified: native V3/WebRTC + resilient live HA state + fail-open SOL tools + crash telemetry + shutdown hardening; no URLACL, cable, loopback, Bluetooth or mirror runtime.'
 
       - name: Publish minimal SOL plugin runtime
         shell: pwsh
@@ -209,7 +208,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title 'Codex Audio Remote · SOL Plugin' --notes 'Stable install endpoint for SOL Plugin Manager. Built from the isolated native plugin branch.' --prerelease
           }
-          gh release edit $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes 'Stable native SOL plugin 1.5.3: domain-aware Home Assistant startup map, mandatory live-state verification, fail-open cached SOL dynamic tools, crash telemetry and background-task shutdown hardening; preserves V3/WebRTC high-fidelity audio, reconnect grace and transcript lifecycle.'
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --notes 'Stable native SOL plugin 1.5.3: domain-aware Home Assistant startup map, mandatory live-state verification, fail-open cached SOL dynamic tools, crash telemetry and shutdown hardening; preserves V3/WebRTC high-fidelity audio, reconnect grace and transcript lifecycle.'
           gh release upload $tag dist/CodexAudioRemote.solplugin --repo $env:GITHUB_REPOSITORY --clobber
 
       - name: Upload SOL plugin artifact
