@@ -49,3 +49,4 @@ Write-Host 'SOL native MCP callback routing finalized; Audio MCP prefix aligned 
 
 & (Join-Path $PSScriptRoot 'add-sol-dynamic-tools.ps1')
 & (Join-Path $PSScriptRoot 'add-sol-audio-quality-stability.ps1')
+& (Join-Path $PSScriptRoot 'harden-sol-background-tasks.ps1')
