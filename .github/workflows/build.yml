@@ -33,7 +33,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
       - name: Install Android platform
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - uses: gradle/actions/setup-gradle@v4
@@ -51,3 +51,89 @@ jobs:
         with:
           name: CodexAudioRemote-Android-v2
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+
+  kinect-satellite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install satellite Python dependencies
+        run: pip install -r codex-kinect-satellite/requirements.txt
+      - name: Compile satellite
+        run: python -m py_compile codex-kinect-satellite/satellite.py codex-kinect-satellite/diagnostic_ui.py
+      - name: Validate satellite startup script
+        run: bash -n codex-kinect-satellite/run.sh
+      - name: Kinect runtime migration guard
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          import json, tempfile
+          from pathlib import Path
+          import satellite
+          p=Path(tempfile.mkstemp()[1])
+          p.write_text(json.dumps({"pulse_input":"auto_null.monitor","pulse_output":"auto"}))
+          satellite.RUNTIME_PATH=p
+          sat=satellite.Satellite({"server_url":"ws://127.0.0.1:8765/ws/","vosk_model":"/tmp/none","wake_word":"hola sol","channels":4,"pulse_input":"auto","pulse_output":"auto","half_duplex":True})
+          assert sat.input_setting == "auto"
+          print("Kinect runtime migration guard passed")
+          PY
+      - name: Kinect null-source fallback guard
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          import satellite
+          original = satellite.list_pulse
+          satellite.list_pulse = lambda kind: [('auto_null.monitor','0\tauto_null.monitor\tmodule-null-sink.c\ts16le 2ch 48000Hz\tIDLE')] if kind == 'source' else []
+          assert satellite.resolve_pulse_device('auto','source',True) == ''
+          print('Kinect null-source fallback guard passed')
+          satellite.list_pulse = original
+          PY
+      - name: Home Assistant output smoke test
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import satellite
+          satellite.RUNTIME_PATH = Path('/tmp/kinect-runtime-test.json')
+          sat = satellite.Satellite({
+              'server_url':'ws://127.0.0.1:8765/ws/',
+              'vosk_model':'/tmp/none',
+              'wake_word':'hola sol',
+              'channels':4,
+              'pulse_input':'auto',
+              'pulse_output':'auto',
+              'half_duplex':True,
+          })
+          sat.set_output('ha:media_player.test_speaker')
+          assert sat.output_setting == 'ha:media_player.test_speaker'
+          assert sat.playback is None
+          pcm = sat._test_tone_pcm()
+          assert len(pcm) > 1000 and len(pcm) % 2 == 0
+          print('Home Assistant output smoke test passed')
+          PY
+      - name: Synthetic GCC-PHAT delay check
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import numpy as np
+          spec=importlib.util.spec_from_file_location("sat","codex-kinect-satellite/satellite.py")
+          sat=importlib.util.module_from_spec(spec); spec.loader.exec_module(sat)
+          rng=np.random.default_rng(4)
+          x=rng.normal(0,1,8192)
+          X=np.fft.rfft(x); f=np.fft.rfftfreq(len(x),1/sat.RATE)
+          X[(f<300)|(f>4000)]=0; x=np.fft.irfft(X)
+          for delay in (-8,-3,4,9):
+              d,sharp=sat.gcc_phat(np.roll(x,delay),x)
+              assert abs(d-delay)<0.6, (delay,d,sharp)
+          print("GCC-PHAT synthetic delay test passed")
+          PY
+      - name: Build Home Assistant app container
+        run: docker build -t codex-kinect-satellite:test codex-kinect-satellite

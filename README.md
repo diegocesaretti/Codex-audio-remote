@@ -213,3 +213,26 @@ On a fresh API23 install the conversation capture default is Android `DEFAULT`, 
 The existing `HomeAssistantApiServer`, `ExternalConversationHub` and context-injection sources are still present while the v2 core is being stabilized, but **the v2 entrypoint does not currently start that adapter**. It will be reattached through the same authoritative state machine rather than being allowed to own a parallel session lifecycle.
 
 That separation is intentional: external integrations must request transitions from the v2 state owner; they must never create a second source of session truth.
+
+
+## Raspberry Pi Kinect satellite (experimental)
+
+The branch `feat/rpi-kinect-satellite` adds a Home Assistant OS app/add-on for a Raspberry Pi 5 with an Xbox 360 Kinect microphone array.
+
+It keeps the same Protocol v2 authority model:
+
+```text
+Kinect 4ch -> GCC-PHAT beamforming -> Vosk wake -> Protocol v2 -> Windows Companion
+                                                   <- PCM16 16 kHz downlink <-
+```
+
+The first validation build:
+
+- captures the Kinect array at 16 kHz / four channels;
+- beamforms to mono locally;
+- uses local Vosk with the same default `hola sol` wake phrase;
+- streams PCM16 mono 16 kHz only while Windows says `LISTENING`;
+- plays the existing 16 kHz downlink through Home Assistant audio;
+- defaults to half-duplex to avoid speaker echo until AEC is added.
+
+The Kinect UAC firmware and Vosk model are fetched locally on first run and are not committed to this repository. See `codex-kinect-satellite/DOCS.md`.
