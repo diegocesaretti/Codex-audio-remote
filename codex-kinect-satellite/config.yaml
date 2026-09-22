@@ -1,0 +1,47 @@
+name: "Codex Kinect Satellite"
+version: "0.1.0"
+slug: "codex_kinect_satellite"
+description: "Kinect 360 far-field audio satellite for Codex Audio Remote"
+url: "https://github.com/diegocesaretti/Codex-audio-remote"
+arch:
+  - aarch64
+startup: application
+boot: auto
+init: false
+host_network: true
+audio: true
+usb: true
+udev: true
+options:
+  server_ip: "192.168.1.100"
+  server_port: 8765
+  wake_word: "hola sol"
+  wake_sensitivity: 60
+  end_phrases:
+    - "gracias sol"
+    - "chau sol"
+    - "adios sol"
+    - "listo sol"
+  channels: 4
+  pulse_input: "auto"
+  pulse_output: "auto"
+  half_duplex: true
+  speaker_hangover_ms: 220
+  mic_gain: 1.0
+  beam_min_rms: 120
+  auto_fetch_firmware: true
+schema:
+  server_ip: str
+  server_port: port
+  wake_word: str
+  wake_sensitivity: "int(0,100)"
+  end_phrases:
+    - str
+  channels: "int(1,4)"
+  pulse_input: str
+  pulse_output: str
+  half_duplex: bool
+  speaker_hangover_ms: "int(0,1000)"
+  mic_gain: float
+  beam_min_rms: int
+  auto_fetch_firmware: bool
