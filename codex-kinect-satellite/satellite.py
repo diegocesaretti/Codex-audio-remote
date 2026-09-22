@@ -18,6 +18,8 @@ import numpy as np
 import websockets
 from vosk import KaldiRecognizer, Model, SetLogLevel
 
+from diagnostic_ui import DiagnosticServer, RUNTIME_PATH, dbfs, rms
+
 RATE = 16000
 BLOCK = 512  # 32 ms
 MAX_LAG = 12
@@ -158,19 +160,24 @@ class PulseCapture:
         while len(data) < need:
             chunk = self.proc.stdout.read(need - len(data))
             if not chunk:
+                rc = self.proc.poll()
                 err = self.proc.stderr.read().decode("utf-8", "replace") if self.proc.stderr else ""
-                raise RuntimeError("Pulse capture ended: " + err[-1000:])
+                raise RuntimeError(f"Pulse capture ended rc={rc}: " + err[-1000:])
             data.extend(chunk)
         return np.frombuffer(data, dtype="<i2").reshape(-1, self.channels)
 
     def stop(self) -> None:
-        if self.proc:
-            self.proc.terminate()
+        proc = self.proc
+        self.proc = None
+        if proc:
             try:
-                self.proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-            self.proc = None
+                proc.terminate()
+                proc.wait(timeout=1)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 class PulsePlayback:
@@ -245,31 +252,80 @@ def resolve_pulse_device(configured: str, kind: str, prefer_kinect: bool) -> str
 class Satellite:
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self.started_at = time.time()
         self.state = "disconnected"
         self.session_id = ""
         self.revision = -1
         self.ws = None
+        self.ws_connected = False
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.tx_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
         self.stop_event = threading.Event()
         self.capture_thread: Optional[threading.Thread] = None
         self.capture: Optional[PulseCapture] = None
         self.playback: Optional[PulsePlayback] = None
+        self.capture_lock = threading.RLock()
+        self.playback_lock = threading.RLock()
+        self.diagnostic: Optional[DiagnosticServer] = None
+
+        runtime = self._load_runtime()
+        self.input_setting = str(runtime.get("pulse_input", cfg.get("pulse_input", "auto")))
+        self.output_setting = str(runtime.get("pulse_output", cfg.get("pulse_output", "auto")))
+        self.source_name = ""
+        self.sink_name = ""
+
         self.last_downlink = 0.0
+        self.last_downlink_at = 0.0
+        self.downlink_packets = 0
+        self.uplink_blocks = 0
+        self.last_capture_at = 0.0
+        self.capture_alive = False
+        self.capture_restarts = 0
+        self.last_capture_error = ""
+        self.capture_restart_requested = False
+
+        channels = int(cfg.get("channels", 4))
+        self.channel_rms = [0.0] * channels
+        self.channel_dbfs = [-90.0] * channels
+        self.mono_rms = 0.0
+        self.mono_dbfs = -90.0
+
         self.wake_last = 0.0
+        self.last_wake_at = 0.0
+        self.last_wake_text = ""
+        self.last_wake_heard = ""
         self.first_word = ""
         self.first_word_at = 0.0
         self.audio_config_session = ""
         self.beam: Optional[RealtimeBeamformer] = None
         self.model: Optional[Model] = None
+        self.vosk_loaded = False
         self.wake_rec: Optional[KaldiRecognizer] = None
         self.end_rec: Optional[KaldiRecognizer] = None
+
+    def log(self, message: str) -> None:
+        log(message)
+
+    def _load_runtime(self) -> dict:
+        try:
+            if RUNTIME_PATH.exists():
+                return json.loads(RUNTIME_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log(f"runtime config read warning: {exc}")
+        return {}
+
+    def _save_runtime(self) -> None:
+        payload = {"pulse_input": self.input_setting, "pulse_output": self.output_setting}
+        tmp = RUNTIME_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(RUNTIME_PATH)
 
     def load_model(self) -> None:
         SetLogLevel(-1)
         model_path = self.cfg["vosk_model"]
         log(f"loading Vosk model: {model_path}")
         self.model = Model(model_path)
+        self.vosk_loaded = True
         self._reset_wake_recognizer()
         self._reset_end_recognizer()
 
@@ -296,16 +352,14 @@ class Satellite:
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
-        self.load_model()
-        source = resolve_pulse_device(self.cfg.get("pulse_input", "auto"), "source", True)
-        sink = resolve_pulse_device(self.cfg.get("pulse_output", "auto"), "sink", False)
+        self.diagnostic = DiagnosticServer(self)
+        await self.diagnostic.start()
+        await asyncio.to_thread(self.load_model)
+        self._start_playback()
+
         channels = int(self.cfg.get("channels", 4))
-        self.capture = PulseCapture(source, channels)
-        self.playback = PulsePlayback(sink)
-        self.playback.start()
-        self.capture.start()
         self.beam = RealtimeBeamformer(channels, min_rms=float(self.cfg.get("beam_min_rms", 120)))
-        self.capture_thread = threading.Thread(target=self._capture_loop, name="KinectCapture", daemon=True)
+        self.capture_thread = threading.Thread(target=self._capture_supervisor_loop, name="KinectCapture", daemon=True)
         self.capture_thread.start()
 
         while not self.stop_event.is_set():
@@ -315,16 +369,19 @@ class Satellite:
                 raise
             except Exception as exc:
                 log(f"transport error: {type(exc).__name__}: {exc}")
+            self.ws_connected = False
             self.state = "disconnected"
             self.session_id = ""
             self.audio_config_session = ""
-            await asyncio.sleep(float(self.cfg.get("reconnect_seconds", 2.0)))
+            if not self.stop_event.is_set():
+                await asyncio.sleep(float(self.cfg.get("reconnect_seconds", 2.0)))
 
     async def _connect_once(self) -> None:
         url = self.cfg["server_url"]
         log(f"connecting {url}")
         async with websockets.connect(url, max_size=None, ping_interval=20, ping_timeout=20) as ws:
             self.ws = ws
+            self.ws_connected = True
             await ws.send(json.dumps({"type": "hello", "protocol": 2, "name": "Raspberry Pi Kinect satellite"}))
             await ws.send(json.dumps({"type": "sync"}))
             log("connected to Codex Audio Remote")
@@ -333,8 +390,11 @@ class Satellite:
                 async for msg in ws:
                     if isinstance(msg, bytes):
                         self.last_downlink = time.monotonic()
-                        if self.playback:
-                            self.playback.write(msg)
+                        self.last_downlink_at = time.time()
+                        self.downlink_packets += 1
+                        with self.playback_lock:
+                            if self.playback:
+                                self.playback.write(msg)
                     else:
                         await self._handle_control(msg)
             finally:
@@ -344,6 +404,7 @@ class Satellite:
                 except asyncio.CancelledError:
                     pass
                 self.ws = None
+                self.ws_connected = False
 
     async def _sender(self, ws) -> None:
         while True:
@@ -394,29 +455,80 @@ class Satellite:
             "capture": "kinect_beamformer",
         })
 
-    def _capture_loop(self) -> None:
-        assert self.capture and self.beam and self.loop
-        try:
-            while not self.stop_event.is_set():
-                multi = self.capture.read_block()
-                mono = self.beam.process(multi)
-                gain = float(self.cfg.get("mic_gain", 1.0))
-                if gain != 1.0:
-                    mono = np.clip(mono.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
-                pcm = mono.astype("<i2", copy=False).tobytes()
-                state = self.state
-                if state == "idle":
-                    self._process_wake(pcm)
-                elif state == "listening":
-                    half_duplex = bool(self.cfg.get("half_duplex", True))
-                    hang = float(self.cfg.get("speaker_hangover_ms", 220)) / 1000.0
-                    speaker_active = time.monotonic() - self.last_downlink < hang
-                    if not (half_duplex and speaker_active):
-                        self._process_end_phrase(pcm)
-                        self._enqueue_binary_threadsafe(pcm)
-        except Exception as exc:
-            log(f"capture loop stopped: {type(exc).__name__}: {exc}")
-            self.stop_event.set()
+    def _start_playback(self) -> None:
+        with self.playback_lock:
+            if self.playback:
+                self.playback.stop()
+            sink = resolve_pulse_device(self.output_setting, "sink", False)
+            self.sink_name = sink
+            self.playback = PulsePlayback(sink)
+            self.playback.start()
+
+    def _capture_supervisor_loop(self) -> None:
+        assert self.beam and self.loop
+        channels = int(self.cfg.get("channels", 4))
+        first_start = True
+
+        while not self.stop_event.is_set():
+            source = resolve_pulse_device(self.input_setting, "source", True)
+            self.source_name = source
+            capture = PulseCapture(source, channels)
+            with self.capture_lock:
+                self.capture = capture
+
+            try:
+                capture.start()
+                self.capture_alive = True
+                if not first_start:
+                    self.capture_restarts += 1
+                    log(f"capture recovered · restart_count={self.capture_restarts}")
+                first_start = False
+                if not self.capture_restart_requested:
+                    self.last_capture_error = ""
+                self.capture_restart_requested = False
+
+                while not self.stop_event.is_set():
+                    multi = capture.read_block()
+                    self.last_capture_at = time.time()
+                    self.channel_rms = [rms(multi[:, i]) for i in range(multi.shape[1])]
+                    self.channel_dbfs = [dbfs(v) for v in self.channel_rms]
+
+                    mono = self.beam.process(multi)
+                    gain = float(self.cfg.get("mic_gain", 1.0))
+                    if gain != 1.0:
+                        mono = np.clip(mono.astype(np.float32) * gain, -32768, 32767).astype(np.int16)
+                    self.mono_rms = rms(mono)
+                    self.mono_dbfs = dbfs(self.mono_rms)
+                    pcm = mono.astype("<i2", copy=False).tobytes()
+
+                    state = self.state
+                    if state == "idle":
+                        self._process_wake(pcm)
+                    elif state == "listening":
+                        half_duplex = bool(self.cfg.get("half_duplex", True))
+                        hang = float(self.cfg.get("speaker_hangover_ms", 220)) / 1000.0
+                        speaker_active = time.monotonic() - self.last_downlink < hang
+                        if not (half_duplex and speaker_active):
+                            self._process_end_phrase(pcm)
+                            self._enqueue_binary_threadsafe(pcm)
+                            self.uplink_blocks += 1
+
+            except Exception as exc:
+                if not self.stop_event.is_set() and not self.capture_restart_requested:
+                    self.last_capture_error = f"{type(exc).__name__}: {exc}"
+                    log(f"capture error; restarting in 1s: {self.last_capture_error}")
+                elif self.capture_restart_requested:
+                    log("capture restart requested")
+
+            finally:
+                self.capture_alive = False
+                capture.stop()
+                with self.capture_lock:
+                    if self.capture is capture:
+                        self.capture = None
+
+            if not self.stop_event.is_set():
+                time.sleep(1.0)
 
     def _process_wake(self, pcm: bytes) -> None:
         if not self.wake_rec:
@@ -430,6 +542,7 @@ class Satellite:
             return
         if not text:
             return
+        self.last_wake_heard = text
         target = normalize(self.cfg["wake_word"])
         sensitivity = int(self.cfg.get("wake_sensitivity", 60))
         match = wake_matches(text, target, sensitivity)
@@ -442,6 +555,8 @@ class Satellite:
                 match = True
         if match and now - self.wake_last > 2.5:
             self.wake_last = now
+            self.last_wake_at = time.time()
+            self.last_wake_text = text
             log(f"wake detected: {text!r}")
             self._enqueue_json_threadsafe({"type": "event", "event": "wake", "source": "kinect_vosk"})
 
@@ -467,6 +582,9 @@ class Satellite:
     async def _enqueue_json(self, payload: dict) -> None:
         await self.tx_queue.put(("json", payload))
 
+    async def enqueue_json(self, payload: dict) -> None:
+        await self._enqueue_json(payload)
+
     def _enqueue_json_threadsafe(self, payload: dict) -> None:
         if not self.loop or self.stop_event.is_set():
             return
@@ -488,12 +606,51 @@ class Satellite:
         except asyncio.QueueFull:
             pass
 
+    def request_capture_restart(self) -> None:
+        self.capture_restart_requested = True
+        with self.capture_lock:
+            if self.capture:
+                self.capture.stop()
+
+    def set_input(self, source: str) -> None:
+        source = source.strip() or "auto"
+        valid = {name for name, _ in list_pulse("source")}
+        if source != "auto" and source not in valid:
+            raise ValueError("Unknown PulseAudio source")
+        self.input_setting = source
+        self._save_runtime()
+        self.request_capture_restart()
+
+    def set_output(self, sink: str) -> None:
+        sink = sink.strip() or "auto"
+        valid = {name for name, _ in list_pulse("sink")}
+        if sink != "auto" and sink not in valid:
+            raise ValueError("Unknown PulseAudio sink")
+        self.output_setting = sink
+        self._save_runtime()
+        self._start_playback()
+
+    def test_speaker(self) -> None:
+        seconds = 0.65
+        t = np.arange(int(RATE * seconds), dtype=np.float64) / RATE
+        envelope = np.minimum(1.0, np.minimum(t / 0.03, (seconds - t) / 0.05))
+        envelope = np.clip(envelope, 0.0, 1.0)
+        tone = (np.sin(2.0 * np.pi * 660.0 * t) * envelope * 6500.0).astype("<i2")
+        with self.playback_lock:
+            if not self.playback:
+                raise RuntimeError("Playback is not running")
+            self.playback.write(tone.tobytes())
+        self.last_downlink = time.monotonic()
+        self.last_downlink_at = time.time()
+
     def stop(self) -> None:
         self.stop_event.set()
-        if self.capture:
-            self.capture.stop()
-        if self.playback:
-            self.playback.stop()
+        with self.capture_lock:
+            if self.capture:
+                self.capture.stop()
+        with self.playback_lock:
+            if self.playback:
+                self.playback.stop()
 
 
 def load_config(path: str) -> dict:
@@ -534,6 +691,8 @@ async def async_main(args) -> int:
         await sat.run()
     finally:
         sat.stop()
+        if sat.diagnostic:
+            await sat.diagnostic.close()
     return 0
 
 
