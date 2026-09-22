@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+- Migrate stale persisted `auto_null.monitor` input selections back to `auto`.
+- Distinguish Kinect USB missing, pre-firmware, partial-enumeration and PulseAudio-waiting states.
+- Auto-detect `045e:02ad` after a hot reconnect and re-upload UAC firmware without restarting the app.
+- Resume waiting for the 4-channel PulseAudio source after firmware recovery.
+- Surface explicit USB/power guidance in the diagnostic UI.
+
+
 ## 0.3.1
 
 - Prevent Kinect auto input from falling back to `auto_null.monitor` when the USB PulseAudio source temporarily disappears.
