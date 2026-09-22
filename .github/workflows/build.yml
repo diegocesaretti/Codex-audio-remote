@@ -63,7 +63,7 @@ jobs:
       - name: Install satellite Python dependencies
         run: pip install -r codex-kinect-satellite/requirements.txt
       - name: Compile satellite
-        run: python -m py_compile codex-kinect-satellite/satellite.py
+        run: python -m py_compile codex-kinect-satellite/satellite.py codex-kinect-satellite/diagnostic_ui.py
       - name: Validate satellite startup script
         run: bash -n codex-kinect-satellite/run.sh
       - name: Synthetic GCC-PHAT delay check
