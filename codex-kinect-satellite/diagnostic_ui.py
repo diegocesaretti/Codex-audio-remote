@@ -199,11 +199,13 @@ class DiagnosticServer:
         output_is_ha = sat.output_setting.startswith("ha:")
 
         return {
-            "version": "0.3.1",
+            "version": "0.3.2",
             "uptime_s": int(time.time() - sat.started_at),
             "kinect": {
                 "ready": bool(usb["audio"] and kinect_source and four_channel and sat.capture_alive),
                 "firmware_present": Path("/data/kinect-firmware/UACFirmware").exists(),
+                "usb_state": sat.kinect_usb_state,
+                "usb_detail": sat.kinect_usb_detail,
                 "usb": usb,
                 "source_is_kinect": kinect_source,
                 "four_channel_16k": four_channel,
@@ -435,6 +437,9 @@ let alerts=[];if(s.audio.only_null_sink&&!s.audio.output_is_ha)alerts.push('<div
 if(s.audio.output_is_ha)alerts.push('<div class="alert">ℹ️ Salida Home Assistant activa: la respuesta se bufferiza y se reproduce vía <b>media_player.play_media</b>. Tiene más latencia que una salida local.</div>');
 if(!s.audio.ha_api_ok)alerts.push('<div class="alert error">Home Assistant API: '+String(s.audio.ha_api_error||'error').replace(/</g,'&lt;')+'</div>');
 if(s.audio.ha_last_error)alerts.push('<div class="alert error">Último error de salida HA: '+String(s.audio.ha_last_error).replace(/</g,'&lt;')+'</div>');
+if(s.kinect.usb_state==='missing')alerts.push('<div class="alert error">Kinect USB no detectado: revisá alimentación y cable USB. El add-on reintentará automáticamente.</div>');
+if(s.kinect.usb_state==='pre_firmware')alerts.push('<div class="alert">Kinect detectado en modo pre-firmware; intentando recuperar USB Audio automáticamente.</div>');
+if(s.kinect.usb_state==='partial')alerts.push('<div class="alert">Kinect parcialmente enumerado; esperando que aparezca USB Audio.</div>');
 if(!s.kinect.four_channel_16k)alerts.push('<div class="alert error">Kinect no está expuesto como 4ch / 16 kHz.</div>');
 if(s.capture.last_error)alerts.push('<div class="alert error">Último error de captura: '+String(s.capture.last_error).replace(/</g,'&lt;')+'</div>');
 document.getElementById('alerts').innerHTML=alerts.join('');
