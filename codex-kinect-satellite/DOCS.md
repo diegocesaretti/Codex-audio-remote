@@ -72,3 +72,25 @@ Useful log lines:
 - `server audio_error` — virtual CABLE input on Windows was not opened.
 
 If PulseAudio only exposes a mono Kinect source, beamforming cannot work correctly. Do not silently continue with mono for the final design; inspect the HA audio source/channel exposure first.
+
+
+## Diagnostic Web UI
+
+Version 0.2.0 adds an authenticated Home Assistant Ingress dashboard available through **OPEN WEB UI**.
+
+It shows:
+
+- Kinect USB/firmware/audio readiness;
+- the actual PulseAudio input format and four-channel availability;
+- live RMS/dBFS meters for all four Kinect microphones plus beamformed mono;
+- GCC-PHAT beam delays and estimate count;
+- wake-word activity;
+- WebSocket and authoritative Codex session state;
+- capture health, restart count, last capture error and audio heartbeat;
+- available PulseAudio inputs and outputs.
+
+The panel can switch input/output devices at runtime, persist the selection under `/data`, play a short speaker test tone, restart capture, send a synthetic wake event and end the current session.
+
+If the only output is `auto_null`, Home Assistant Audio currently exposes no physical sink to the app. The panel flags this explicitly; configure a real audio output in Home Assistant before expecting Codex response audio from the Pi.
+
+Capture is supervised in 0.2.0. If `pacat` exits, the satellite records the error, increments a restart counter and reopens the Kinect source instead of terminating the whole satellite.
