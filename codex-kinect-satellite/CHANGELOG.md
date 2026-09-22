@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1
+
+- Prevent Kinect auto input from falling back to `auto_null.monitor` when the USB PulseAudio source temporarily disappears.
+- Keep the last known-good Kinect source sticky across capture recovery.
+- Wait for the Kinect PulseAudio source to return instead of opening a default/null source.
+- Hide monitor/null sources from the input selector.
+- Skip manual capture restarts while the live Kinect stream is healthy.
+- Avoid restarting capture when the selected input did not actually change.
+
+
 ## 0.3.0
 
 - Add Home Assistant `media_player.*` entities to the audio output selector.
