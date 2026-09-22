@@ -2,6 +2,7 @@ name: "Codex Kinect Satellite"
 version: "0.1.0"
 slug: "codex_kinect_satellite"
 description: "Kinect 360 far-field audio satellite for Codex Audio Remote"
+stage: experimental
 url: "https://github.com/diegocesaretti/Codex-audio-remote"
 arch:
   - aarch64
