@@ -66,6 +66,21 @@ jobs:
         run: python -m py_compile codex-kinect-satellite/satellite.py codex-kinect-satellite/diagnostic_ui.py
       - name: Validate satellite startup script
         run: bash -n codex-kinect-satellite/run.sh
+      - name: Kinect runtime migration guard
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          import json, tempfile
+          from pathlib import Path
+          import satellite
+          p=Path(tempfile.mkstemp()[1])
+          p.write_text(json.dumps({"pulse_input":"auto_null.monitor","pulse_output":"auto"}))
+          satellite.RUNTIME_PATH=p
+          sat=satellite.Satellite({"server_url":"ws://127.0.0.1:8765/ws/","vosk_model":"/tmp/none","wake_word":"hola sol","channels":4,"pulse_input":"auto","pulse_output":"auto","half_duplex":True})
+          assert sat.input_setting == "auto"
+          print("Kinect runtime migration guard passed")
+          PY
       - name: Kinect null-source fallback guard
         env:
           PYTHONPATH: codex-kinect-satellite
