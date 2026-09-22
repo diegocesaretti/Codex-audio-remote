@@ -94,3 +94,25 @@ The panel can switch input/output devices at runtime, persist the selection unde
 If the only output is `auto_null`, Home Assistant Audio currently exposes no physical sink to the app. The panel flags this explicitly; configure a real audio output in Home Assistant before expecting Codex response audio from the Pi.
 
 Capture is supervised in 0.2.0. If `pacat` exits, the satellite records the error, increments a restart counter and reopens the Kinect source instead of terminating the whole satellite.
+
+
+## Home Assistant media-player outputs
+
+Version 0.3.0 adds every available `media_player.*` entity from Home Assistant to the **Salida / parlante** selector in the diagnostic Web UI.
+
+The selector now has two groups:
+
+- **Local · PulseAudio** for HDMI, USB audio, Bluetooth sinks and other local outputs exposed by Home Assistant Audio.
+- **Home Assistant · media_player** for entities such as Google Cast speakers/displays, TVs and other integrations exposing `media_player`.
+
+The app uses the internal Home Assistant API proxy with `homeassistant_api: true` and the runtime `SUPERVISOR_TOKEN`; no user access token is stored in app options.
+
+Remote Home Assistant outputs are intentionally **buffered** in this version. Codex downlink PCM16 mono 16 kHz is collected until the response pauses, written as a temporary WAV under `/media/codex_kinect_satellite`, and sent to the selected entity with `media_player.play_media` using a `media-source://media_source/local/... ` identifier.
+
+This is not as low-latency as a local PulseAudio sink. It is intended to make existing Home Assistant speakers easy to test and use without additional Linux audio configuration. Compatibility still depends on the selected media-player integration being able to play local WAV media.
+
+The **Probar parlante** button follows the selected output type. If a Home Assistant media player is selected, the test tone is also delivered through `media_player.play_media`.
+
+Temporary WAV files are automatically cleaned up. The app keeps only a small recent set and removes older files.
+
+While a buffered Home Assistant response is playing, Kinect wake/listening processing is suppressed for the estimated playback duration plus a safety margin to reduce self-triggering.
