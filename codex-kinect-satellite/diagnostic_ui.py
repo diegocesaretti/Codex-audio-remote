@@ -199,7 +199,7 @@ class DiagnosticServer:
         output_is_ha = sat.output_setting.startswith("ha:")
 
         return {
-            "version": "0.3.0",
+            "version": "0.3.1",
             "uptime_s": int(time.time() - sat.started_at),
             "kinect": {
                 "ready": bool(usb["audio"] and kinect_source and four_channel and sat.capture_alive),
@@ -217,7 +217,7 @@ class DiagnosticServer:
                 "sink_name": sat.sink_name,
                 "sink_format": sink["format"] if sink else "",
                 "only_null_sink": only_null,
-                "sources": dev["sources"],
+                "sources": [x for x in dev["sources"] if ".monitor" not in x["name"].lower() and "auto_null" not in x["name"].lower()],
                 "sinks": dev["sinks"],
                 "ha_api_ok": not bool(self._ha_error),
                 "ha_api_error": self._ha_error,
@@ -231,6 +231,7 @@ class DiagnosticServer:
                 "restarts": sat.capture_restarts,
                 "last_error": sat.last_capture_error,
                 "last_audio_at": sat.last_capture_at,
+                "waiting_for_source": sat.capture_waiting_for_source,
                 "channel_rms": [round(v, 1) for v in sat.channel_rms],
                 "channel_dbfs": [round(v, 1) for v in sat.channel_dbfs],
                 "mono_rms": round(sat.mono_rms, 1),
@@ -413,7 +414,7 @@ document.getElementById('ws').innerHTML=led(s.transport.connected,'Conectado','D
 document.getElementById('state').textContent=s.transport.state;
 document.getElementById('session').textContent=s.transport.session_id||'—';
 document.getElementById('packets').textContent=s.transport.uplink_blocks+' / '+s.transport.downlink_packets;
-document.getElementById('capAlive').innerHTML=led(s.capture.alive,'Activo','Caído');
+document.getElementById('capAlive').innerHTML=led(s.capture.alive,'Activo',s.capture.waiting_for_source?'Esperando Kinect':'Caído');
 document.getElementById('restarts').textContent=s.capture.restarts;
 document.getElementById('lastAudio').textContent=ago(s.capture.last_audio_at);
 let ce=document.getElementById('capError');ce.textContent=s.capture.last_error||'Sin errores';ce.className='small '+(s.capture.last_error?'error':'muted');
