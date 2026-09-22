@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Fix Vosk on Raspberry Pi/aarch64 by adding the required libatomic runtime.
+- Replace the stale Debian Kinect SDK MD5 gate with pinned SHA-256 verification of the current Microsoft-hosted SDK and extracted UAC firmware.
+- Add USB, PulseAudio card/source/sink, and Vosk import diagnostics for first-hardware validation.
+
+
 ## 0.1.0
 
 - Initial Raspberry Pi 5 / Home Assistant OS Kinect 360 satellite.
