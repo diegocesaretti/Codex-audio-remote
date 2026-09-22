@@ -67,6 +67,8 @@ jobs:
       - name: Validate satellite startup script
         run: bash -n codex-kinect-satellite/run.sh
       - name: Synthetic GCC-PHAT delay check
+        env:
+          PYTHONPATH: codex-kinect-satellite
         run: |
           python - <<'PY'
           import importlib.util
