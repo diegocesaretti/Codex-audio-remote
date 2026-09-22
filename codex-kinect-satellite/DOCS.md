@@ -23,7 +23,7 @@ The Kinect UAC firmware is not bundled. `kinect-audio-setup` downloads the firmw
 
 ## Install
 
-1. In Home Assistant, add `https://github.com/diegocesaretti/Codex-audio-remote` as an app/add-on repository.
+1. In Home Assistant, add the beta branch as an app repository: `https://github.com/diegocesaretti/Codex-audio-remote#feat/rpi-kinect-satellite`. Home Assistant supports selecting a repository branch with the `#branch` suffix, so this can be tested without merging the experiment into `main`.
 2. Install **Codex Kinect Satellite**.
 3. Set `server_ip` to the Windows PC running Codex Audio Remote. Port `8765` matches the current v2 default.
 4. Connect and power the Kinect, then start the add-on.
