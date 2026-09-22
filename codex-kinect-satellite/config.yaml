@@ -1,5 +1,5 @@
 name: "Codex Kinect Satellite"
-version: "0.1.0"
+version: "0.1.1"
 slug: "codex_kinect_satellite"
 description: "Kinect 360 far-field audio satellite for Codex Audio Remote"
 stage: experimental
