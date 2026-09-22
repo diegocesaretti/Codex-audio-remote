@@ -23,7 +23,7 @@ RUN sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc
  && cp /tmp/kinectpkg/usr/sbin/kinect_fetch_fw /usr/local/sbin/ \
  && cp /tmp/kinectpkg/usr/sbin/kinect_upload_fw /usr/local/sbin/ \
  && rm -rf /var/lib/apt/lists/* /tmp/kinect* \
- && pip install --no-cache-dir numpy==2.1.3 vosk==0.3.45 websockets==15.0.1
+ && pip install --no-cache-dir numpy==2.1.3 vosk==0.3.45 websockets==15.0.1 aiohttp==3.12.15
 
 WORKDIR /app
 COPY satellite.py /app/satellite.py
