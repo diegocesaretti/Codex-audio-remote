@@ -27,6 +27,7 @@ RUN sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc
 
 WORKDIR /app
 COPY satellite.py /app/satellite.py
+COPY diagnostic_ui.py /app/diagnostic_ui.py
 COPY run.sh /app/run.sh
 RUN chmod +x /app/run.sh /app/satellite.py
 
