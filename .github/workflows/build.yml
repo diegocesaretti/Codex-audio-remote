@@ -66,6 +66,18 @@ jobs:
         run: python -m py_compile codex-kinect-satellite/satellite.py codex-kinect-satellite/diagnostic_ui.py
       - name: Validate satellite startup script
         run: bash -n codex-kinect-satellite/run.sh
+      - name: Kinect null-source fallback guard
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          import satellite
+          original = satellite.list_pulse
+          satellite.list_pulse = lambda kind: [('auto_null.monitor','0\tauto_null.monitor\tmodule-null-sink.c\ts16le 2ch 48000Hz\tIDLE')] if kind == 'source' else []
+          assert satellite.resolve_pulse_device('auto','source',True) == ''
+          print('Kinect null-source fallback guard passed')
+          satellite.list_pulse = original
+          PY
       - name: Home Assistant output smoke test
         env:
           PYTHONPATH: codex-kinect-satellite
