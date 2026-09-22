@@ -278,6 +278,14 @@ class Satellite:
         self.last_downlink_at = 0.0
         self.downlink_packets = 0
         self.uplink_blocks = 0
+
+        self.ha_output_buffer = bytearray()
+        self.ha_output_entity = ""
+        self.ha_output_last_packet = 0.0
+        self.ha_output_last_error = ""
+        self.ha_output_last_play_at = 0.0
+        self.ha_output_play_count = 0
+        self.external_playback_until = 0.0
         self.last_capture_at = 0.0
         self.capture_alive = False
         self.capture_restarts = 0
@@ -361,20 +369,28 @@ class Satellite:
         self.beam = RealtimeBeamformer(channels, min_rms=float(self.cfg.get("beam_min_rms", 120)))
         self.capture_thread = threading.Thread(target=self._capture_supervisor_loop, name="KinectCapture", daemon=True)
         self.capture_thread.start()
+        ha_flush_task = asyncio.create_task(self._ha_output_flush_loop())
 
-        while not self.stop_event.is_set():
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    await self._connect_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log(f"transport error: {type(exc).__name__}: {exc}")
+                self.ws_connected = False
+                self.state = "disconnected"
+                self.session_id = ""
+                self.audio_config_session = ""
+                if not self.stop_event.is_set():
+                    await asyncio.sleep(float(self.cfg.get("reconnect_seconds", 2.0)))
+        finally:
+            ha_flush_task.cancel()
             try:
-                await self._connect_once()
+                await ha_flush_task
             except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log(f"transport error: {type(exc).__name__}: {exc}")
-            self.ws_connected = False
-            self.state = "disconnected"
-            self.session_id = ""
-            self.audio_config_session = ""
-            if not self.stop_event.is_set():
-                await asyncio.sleep(float(self.cfg.get("reconnect_seconds", 2.0)))
+                pass
 
     async def _connect_once(self) -> None:
         url = self.cfg["server_url"]
@@ -392,9 +408,15 @@ class Satellite:
                         self.last_downlink = time.monotonic()
                         self.last_downlink_at = time.time()
                         self.downlink_packets += 1
-                        with self.playback_lock:
-                            if self.playback:
-                                self.playback.write(msg)
+                        if self.output_setting.startswith("ha:"):
+                            if not self.ha_output_buffer:
+                                self.ha_output_entity = self.output_setting[3:]
+                            self.ha_output_buffer.extend(msg)
+                            self.ha_output_last_packet = time.monotonic()
+                        else:
+                            with self.playback_lock:
+                                if self.playback:
+                                    self.playback.write(msg)
                     else:
                         await self._handle_control(msg)
             finally:
@@ -459,10 +481,41 @@ class Satellite:
         with self.playback_lock:
             if self.playback:
                 self.playback.stop()
+                self.playback = None
+            if self.output_setting.startswith("ha:"):
+                self.sink_name = ""
+                return
             sink = resolve_pulse_device(self.output_setting, "sink", False)
             self.sink_name = sink
             self.playback = PulsePlayback(sink)
             self.playback.start()
+
+    async def _ha_output_flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(0.1)
+            if not self.ha_output_buffer or not self.ha_output_entity:
+                continue
+            flush_after = float(self.cfg.get("ha_media_flush_ms", 900)) / 1000.0
+            if time.monotonic() - self.ha_output_last_packet < flush_after:
+                continue
+
+            pcm = bytes(self.ha_output_buffer)
+            entity_id = self.ha_output_entity
+            self.ha_output_buffer.clear()
+            self.ha_output_entity = ""
+            duration = len(pcm) / 2.0 / RATE
+
+            try:
+                await self.diagnostic.play_pcm_on_ha(entity_id, pcm, title="Sol")
+                self.ha_output_last_error = ""
+                self.ha_output_last_play_at = time.time()
+                self.ha_output_play_count += 1
+                # Network media players usually start a little after the service call.
+                self.external_playback_until = time.monotonic() + duration + 2.5
+                log(f"HA output -> {entity_id} · {duration:.2f}s")
+            except Exception as exc:
+                self.ha_output_last_error = f"{type(exc).__name__}: {exc}"
+                log(f"HA output error: {self.ha_output_last_error}")
 
     def _capture_supervisor_loop(self) -> None:
         assert self.beam and self.loop
@@ -502,12 +555,16 @@ class Satellite:
                     pcm = mono.astype("<i2", copy=False).tobytes()
 
                     state = self.state
+                    half_duplex = bool(self.cfg.get("half_duplex", True))
+                    hang = float(self.cfg.get("speaker_hangover_ms", 220)) / 1000.0
+                    speaker_active = (
+                        time.monotonic() - self.last_downlink < hang
+                        or time.monotonic() < self.external_playback_until
+                    )
                     if state == "idle":
-                        self._process_wake(pcm)
+                        if not (half_duplex and speaker_active):
+                            self._process_wake(pcm)
                     elif state == "listening":
-                        half_duplex = bool(self.cfg.get("half_duplex", True))
-                        hang = float(self.cfg.get("speaker_hangover_ms", 220)) / 1000.0
-                        speaker_active = time.monotonic() - self.last_downlink < hang
                         if not (half_duplex and speaker_active):
                             self._process_end_phrase(pcm)
                             self._enqueue_binary_threadsafe(pcm)
@@ -623,25 +680,48 @@ class Satellite:
 
     def set_output(self, sink: str) -> None:
         sink = sink.strip() or "auto"
-        valid = {name for name, _ in list_pulse("sink")}
-        if sink != "auto" and sink not in valid:
-            raise ValueError("Unknown PulseAudio sink")
+        if sink.startswith("ha:"):
+            entity_id = sink[3:]
+            if not entity_id.startswith("media_player."):
+                raise ValueError("Invalid Home Assistant media_player entity")
+        else:
+            valid = {name for name, _ in list_pulse("sink")}
+            if sink != "auto" and sink not in valid:
+                raise ValueError("Unknown PulseAudio sink")
+
+        self.ha_output_buffer.clear()
+        self.ha_output_entity = ""
         self.output_setting = sink
         self._save_runtime()
         self._start_playback()
 
-    def test_speaker(self) -> None:
+    def _test_tone_pcm(self) -> bytes:
         seconds = 0.65
         t = np.arange(int(RATE * seconds), dtype=np.float64) / RATE
         envelope = np.minimum(1.0, np.minimum(t / 0.03, (seconds - t) / 0.05))
         envelope = np.clip(envelope, 0.0, 1.0)
-        tone = (np.sin(2.0 * np.pi * 660.0 * t) * envelope * 6500.0).astype("<i2")
+        return (np.sin(2.0 * np.pi * 660.0 * t) * envelope * 6500.0).astype("<i2").tobytes()
+
+    def test_speaker(self) -> None:
+        pcm = self._test_tone_pcm()
         with self.playback_lock:
             if not self.playback:
                 raise RuntimeError("Playback is not running")
-            self.playback.write(tone.tobytes())
+            self.playback.write(pcm)
         self.last_downlink = time.monotonic()
         self.last_downlink_at = time.time()
+
+    async def test_output(self) -> None:
+        pcm = self._test_tone_pcm()
+        if self.output_setting.startswith("ha:"):
+            entity_id = self.output_setting[3:]
+            await self.diagnostic.play_pcm_on_ha(entity_id, pcm, title="Sol · prueba de audio")
+            self.ha_output_last_error = ""
+            self.ha_output_last_play_at = time.time()
+            self.ha_output_play_count += 1
+            self.external_playback_until = time.monotonic() + 3.5
+            return
+        await asyncio.to_thread(self.test_speaker)
 
     def stop(self) -> None:
         self.stop_event.set()
