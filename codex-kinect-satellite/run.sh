@@ -97,7 +97,7 @@ import vosk
 print("[vosk] import OK:", vosk.__file__)
 PY
 
-echo "[audio] PULSE_SERVER=\${PULSE_SERVER:-<unset>}"
+echo "[audio] PULSE_SERVER=${PULSE_SERVER:-<unset>}"
 echo "[audio] PulseAudio server:"
 pactl info || true
 echo "[audio] PulseAudio cards:"
