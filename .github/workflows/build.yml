@@ -66,6 +66,30 @@ jobs:
         run: python -m py_compile codex-kinect-satellite/satellite.py codex-kinect-satellite/diagnostic_ui.py
       - name: Validate satellite startup script
         run: bash -n codex-kinect-satellite/run.sh
+      - name: Home Assistant output smoke test
+        env:
+          PYTHONPATH: codex-kinect-satellite
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import satellite
+          satellite.RUNTIME_PATH = Path('/tmp/kinect-runtime-test.json')
+          sat = satellite.Satellite({
+              'server_url':'ws://127.0.0.1:8765/ws/',
+              'vosk_model':'/tmp/none',
+              'wake_word':'hola sol',
+              'channels':4,
+              'pulse_input':'auto',
+              'pulse_output':'auto',
+              'half_duplex':True,
+          })
+          sat.set_output('ha:media_player.test_speaker')
+          assert sat.output_setting == 'ha:media_player.test_speaker'
+          assert sat.playback is None
+          pcm = sat._test_tone_pcm()
+          assert len(pcm) > 1000 and len(pcm) % 2 == 0
+          print('Home Assistant output smoke test passed')
+          PY
       - name: Synthetic GCC-PHAT delay check
         env:
           PYTHONPATH: codex-kinect-satellite
