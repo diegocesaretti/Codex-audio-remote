@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Add Home Assistant `media_player.*` entities to the audio output selector.
+- Use the internal Home Assistant API through `SUPERVISOR_TOKEN` with `homeassistant_api: true`.
+- Buffer Codex PCM responses into temporary 16 kHz mono WAV files under the Home Assistant `/media` directory.
+- Play buffered responses through `media_player.play_media` using `media-source://` URLs.
+- Add Home Assistant entity refresh, state labels, playback count and playback error diagnostics.
+- Make the existing speaker-test button work with selected Home Assistant media players.
+- Extend half-duplex suppression across remote media-player playback to reduce Kinect self-triggering.
+
+
 ## 0.2.0
 
 - Add Home Assistant Ingress diagnostic dashboard.
