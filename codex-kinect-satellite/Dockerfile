@@ -15,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN sed -i 's/Components: main/Components: main contrib non-free-firmware/' /etc/apt/sources.list.d/debian.sources \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates wget unzip p7zip-full libusb-1.0-0 libasound2 libasound2-plugins libatomic1 pulseaudio-utils \
+      ca-certificates wget unzip p7zip-full libusb-1.0-0 libasound2 libasound2-plugins libatomic1 libgomp1 pulseaudio-utils usbutils \
  && cd /tmp \
  && apt-get download kinect-audio-setup \
  && mkdir /tmp/kinectpkg \
