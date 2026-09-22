@@ -69,9 +69,13 @@ fi
 
 if [[ -f "$FW_DIR/UACFirmware" ]]; then
   if echo "$FW_SHA256  $FW_DIR/UACFirmware" | sha256sum -c -; then
-    echo "[kinect] Uploading temporary audio firmware if a pre-firmware Kinect is present..."
-    kinect_upload_fw "$FW_DIR/UACFirmware" || true
-    sleep 4
+    if lsusb | grep -qi "045e:02bb"; then
+      echo "[kinect] Kinect USB Audio is already running; firmware upload skipped."
+    else
+      echo "[kinect] Uploading temporary audio firmware..."
+      kinect_upload_fw "$FW_DIR/UACFirmware" || true
+      sleep 4
+    fi
   else
     echo "[kinect] WARNING: stored UACFirmware failed verification; removing it for a clean retry."
     rm -f "$FW_DIR/UACFirmware"
