@@ -285,6 +285,9 @@ class Satellite:
 
         runtime = self._load_runtime()
         self.input_setting = str(runtime.get("pulse_input", cfg.get("pulse_input", "auto")))
+        if self.input_setting.lower().endswith(".monitor") or "auto_null" in self.input_setting.lower():
+            log(f"migrating invalid persisted input {self.input_setting!r} -> 'auto'")
+            self.input_setting = "auto"
         self.output_setting = str(runtime.get("pulse_output", cfg.get("pulse_output", "auto")))
         self.source_name = ""
         self.sink_name = ""
@@ -308,6 +311,9 @@ class Satellite:
         self.capture_restart_requested = False
         self.capture_waiting_for_source = False
         self.last_good_kinect_source = ""
+        self.kinect_usb_state = "unknown"
+        self.kinect_usb_detail = ""
+        self.last_usb_recovery_attempt = 0.0
 
         channels = int(cfg.get("channels", 4))
         self.channel_rms = [0.0] * channels
@@ -344,6 +350,59 @@ class Satellite:
         tmp = RUNTIME_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(RUNTIME_PATH)
+
+    def _lsusb_text(self) -> str:
+        try:
+            return subprocess.check_output(["lsusb"], text=True, stderr=subprocess.STDOUT, timeout=3)
+        except Exception as exc:
+            self.kinect_usb_detail = f"lsusb failed: {exc}"
+            return ""
+
+    def _usb_recovery_step(self) -> None:
+        now = time.monotonic()
+        if now - self.last_usb_recovery_attempt < 3.0:
+            return
+        self.last_usb_recovery_attempt = now
+
+        text = self._lsusb_text()
+        low = text.lower()
+        if "045e:02bb" in low:
+            self.kinect_usb_state = "audio"
+            self.kinect_usb_detail = "Microsoft Kinect USB Audio (02bb)"
+            return
+
+        if "045e:02ad" in low:
+            self.kinect_usb_state = "pre_firmware"
+            self.kinect_usb_detail = "Xbox Kinect Audio (02ad) waiting for UAC firmware"
+            fw = Path("/data/kinect-firmware/UACFirmware")
+            if not fw.exists():
+                self.last_capture_error = "Kinect detected but UACFirmware is missing"
+                return
+            log("Kinect pre-firmware USB device detected; uploading UAC firmware for recovery")
+            try:
+                proc = subprocess.run(
+                    ["kinect_upload_fw", str(fw)],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=15,
+                    check=False,
+                )
+                if proc.stdout.strip():
+                    log("firmware recovery: " + proc.stdout.strip().replace("\n", " | ")[:1200])
+                time.sleep(4.0)
+            except Exception as exc:
+                self.last_capture_error = f"Kinect firmware recovery failed: {exc}"
+            return
+
+        # Motor/camera without audio still means the Kinect is physically present.
+        if "045e:02b0" in low or "045e:02ae" in low:
+            self.kinect_usb_state = "partial"
+            self.kinect_usb_detail = "Kinect partially enumerated; audio interface missing"
+            return
+
+        self.kinect_usb_state = "missing"
+        self.kinect_usb_detail = "No Microsoft Kinect USB device detected"
 
     def load_model(self) -> None:
         SetLogLevel(-1)
@@ -552,9 +611,17 @@ class Satellite:
                 if not source:
                     self.capture_alive = False
                     self.capture_waiting_for_source = True
-                    self.last_capture_error = "Kinect PulseAudio source temporarily unavailable; waiting"
+                    self._usb_recovery_step()
+                    if self.kinect_usb_state == "missing":
+                        self.last_capture_error = "Kinect USB not detected; check power/USB connection"
+                    elif self.kinect_usb_state == "pre_firmware":
+                        self.last_capture_error = "Kinect detected; recovering audio firmware"
+                    elif self.kinect_usb_state == "partial":
+                        self.last_capture_error = "Kinect partially detected; waiting for USB Audio"
+                    else:
+                        self.last_capture_error = "Kinect USB Audio present; waiting for PulseAudio source"
                     if self.source_name:
-                        log("Kinect source disappeared; waiting for PulseAudio to expose it again")
+                        log("Kinect source disappeared; waiting for recovery")
                     self.source_name = ""
                     time.sleep(1.0)
                     continue
@@ -591,6 +658,8 @@ class Satellite:
                 if not self.capture_restart_requested:
                     self.last_capture_error = ""
                 self.last_good_kinect_source = source if self.input_setting == "auto" else self.last_good_kinect_source
+                self.kinect_usb_state = "audio"
+                self.kinect_usb_detail = "Microsoft Kinect USB Audio active"
                 self.capture_restart_requested = False
 
                 while not self.stop_event.is_set():
