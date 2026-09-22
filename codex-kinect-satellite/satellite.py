@@ -716,7 +716,20 @@ class Satellite:
         except asyncio.QueueFull:
             pass
 
-    def request_capture_restart(self) -> None:
+    def request_capture_restart(self, force: bool = False) -> None:
+        # A healthy Kinect stream should not be torn down just for diagnostics:
+        # HA Audio may remove/recreate the USB Pulse source when the last client
+        # closes it. Only force this path when changing the configured input.
+        fresh_audio = self.last_capture_at and (time.time() - self.last_capture_at < 2.0)
+        healthy_kinect = (
+            self.capture_alive
+            and fresh_audio
+            and self.source_name
+            and "kinect" in self.source_name.lower()
+        )
+        if healthy_kinect and not force:
+            log("capture healthy; manual restart skipped")
+            return
         self.capture_restart_requested = True
         with self.capture_lock:
             if self.capture:
@@ -735,7 +748,7 @@ class Satellite:
             return
         self.input_setting = source
         self._save_runtime()
-        self.request_capture_restart()
+        self.request_capture_restart(force=True)
 
     def set_output(self, sink: str) -> None:
         sink = sink.strip() or "auto"
