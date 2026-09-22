@@ -234,15 +234,30 @@ def list_pulse(kind: str) -> list[tuple[str, str]]:
     return out
 
 
+def find_kinect_source() -> str:
+    for name, line in list_pulse("source"):
+        low = line.lower()
+        if ("kinect" in low or "xbox nui" in low) and ".monitor" not in name.lower():
+            return name
+    return ""
+
+
+def pulse_source_exists(name: str) -> bool:
+    return any(item_name == name for item_name, _ in list_pulse("source"))
+
+
 def resolve_pulse_device(configured: str, kind: str, prefer_kinect: bool) -> str:
     if configured and configured.lower() != "auto":
         return configured
     items = list_pulse(kind)
     if prefer_kinect:
         for name, line in items:
-            if "kinect" in line.lower() or "xbox nui" in line.lower():
+            low = line.lower()
+            if ("kinect" in low or "xbox nui" in low) and ".monitor" not in name.lower():
                 log(f"auto-selected Kinect {kind}: {name}")
                 return name
+        # Never degrade a Kinect capture to the null monitor/default source.
+        return ""
     log(f"using default PulseAudio {kind}; available={len(items)}")
     for _, line in items:
         log("  " + line)
@@ -291,6 +306,8 @@ class Satellite:
         self.capture_restarts = 0
         self.last_capture_error = ""
         self.capture_restart_requested = False
+        self.capture_waiting_for_source = False
+        self.last_good_kinect_source = ""
 
         channels = int(cfg.get("channels", 4))
         self.channel_rms = [0.0] * channels
@@ -523,7 +540,42 @@ class Satellite:
         first_start = True
 
         while not self.stop_event.is_set():
-            source = resolve_pulse_device(self.input_setting, "source", True)
+            source = ""
+            if self.input_setting == "auto":
+                # Prefer the source that already proved itself. If PulseAudio
+                # temporarily drops the USB card, wait for it to come back
+                # instead of silently capturing auto_null.monitor.
+                if self.last_good_kinect_source and pulse_source_exists(self.last_good_kinect_source):
+                    source = self.last_good_kinect_source
+                else:
+                    source = find_kinect_source()
+                if not source:
+                    self.capture_alive = False
+                    self.capture_waiting_for_source = True
+                    self.last_capture_error = "Kinect PulseAudio source temporarily unavailable; waiting"
+                    if self.source_name:
+                        log("Kinect source disappeared; waiting for PulseAudio to expose it again")
+                    self.source_name = ""
+                    time.sleep(1.0)
+                    continue
+                self.last_good_kinect_source = source
+            else:
+                source = self.input_setting
+                if source.lower().endswith(".monitor") or "auto_null" in source.lower():
+                    self.capture_alive = False
+                    self.capture_waiting_for_source = False
+                    self.last_capture_error = "Refusing null/monitor source for Kinect capture"
+                    log(f"refusing invalid Kinect capture source: {source}")
+                    time.sleep(1.0)
+                    continue
+                if not pulse_source_exists(source):
+                    self.capture_alive = False
+                    self.capture_waiting_for_source = True
+                    self.last_capture_error = f"Configured PulseAudio source unavailable: {source}"
+                    time.sleep(1.0)
+                    continue
+
+            self.capture_waiting_for_source = False
             self.source_name = source
             capture = PulseCapture(source, channels)
             with self.capture_lock:
@@ -538,6 +590,7 @@ class Satellite:
                 first_start = False
                 if not self.capture_restart_requested:
                     self.last_capture_error = ""
+                self.last_good_kinect_source = source if self.input_setting == "auto" else self.last_good_kinect_source
                 self.capture_restart_requested = False
 
                 while not self.stop_event.is_set():
@@ -671,9 +724,15 @@ class Satellite:
 
     def set_input(self, source: str) -> None:
         source = source.strip() or "auto"
-        valid = {name for name, _ in list_pulse("source")}
-        if source != "auto" and source not in valid:
-            raise ValueError("Unknown PulseAudio source")
+        if source != "auto":
+            if source.lower().endswith(".monitor") or "auto_null" in source.lower():
+                raise ValueError("Monitor/null sources cannot be used for Kinect capture")
+            valid = {name for name, _ in list_pulse("source")}
+            if source not in valid:
+                raise ValueError("Unknown PulseAudio source")
+        if source == self.input_setting:
+            log(f"input unchanged ({source}); capture restart skipped")
+            return
         self.input_setting = source
         self._save_runtime()
         self.request_capture_restart()
