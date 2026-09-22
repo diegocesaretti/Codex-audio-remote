@@ -1,5 +1,5 @@
 name: "Codex Kinect Satellite"
-version: "0.1.1"
+version: "0.2.0"
 slug: "codex_kinect_satellite"
 description: "Kinect 360 far-field audio satellite for Codex Audio Remote"
 stage: experimental
@@ -10,6 +10,11 @@ startup: application
 boot: auto
 init: false
 host_network: true
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:microphone-settings
+panel_title: Kinect Satellite
+panel_admin: true
 audio: true
 usb: true
 udev: true
