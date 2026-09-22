@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- Add Home Assistant Ingress diagnostic dashboard.
+- Add live four-channel Kinect mic meters, beamforming status and wake/session state.
+- Add runtime input/output selectors and speaker test.
+- Add manual wake/end test controls.
+- Add supervised PulseAudio capture with automatic restart and error counters.
+- Skip redundant firmware uploads when Kinect USB Audio is already enumerated.
+
+
 ## 0.1.1
 
 - Fix Vosk on Raspberry Pi/aarch64 by adding the required libatomic runtime.
