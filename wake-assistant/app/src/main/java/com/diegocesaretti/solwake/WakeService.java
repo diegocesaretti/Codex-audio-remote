@@ -55,6 +55,8 @@ public class WakeService extends Service {
     private Thread audioThread;
     private volatile boolean listening = false;
     private long lastTrigger = 0L;
+    private long lastAudioDebugMs = 0L;
+    private String lastDebugPartial = "";
     private PowerManager.WakeLock cpuLock;
 
     private final BroadcastReceiver conditionsReceiver = new BroadcastReceiver() {
@@ -76,6 +78,8 @@ public class WakeService extends Service {
         super.onCreate();
         running = true;
         prefs = Prefs.get(this);
+        DebugLog.add("SERVICE onCreate sdk=" + Build.VERSION.SDK_INT
+                + " phrase=\"" + Prefs.phrase(prefs) + "\"");
         createChannel();
         startForegroundCompat(buildNotification("iniciando modelo..."));
 
@@ -109,8 +113,11 @@ public class WakeService extends Service {
 
         if (ACTION_RELOAD.equals(action)) {
             prefs = Prefs.get(this);
+            DebugLog.add("CONFIG reload phrase=\"" + Prefs.phrase(prefs)
+                    + "\" sens=" + prefs.getInt(Prefs.SENSITIVITY, 65)
+                    + " source=" + prefs.getInt(Prefs.AUDIO_SOURCE, 0));
             stopListening();
-            evaluateListeningState();
+            main.postDelayed(this::evaluateListeningState, 250L);
             return START_STICKY;
         }
 
@@ -121,32 +128,46 @@ public class WakeService extends Service {
 
     private void loadModel() {
         setStatus("preparando modelo Vosk...");
+        DebugLog.add("MODEL unpack start");
         StorageService.unpack(
                 this,
                 "model",
                 "model",
                 loaded -> {
                     model = loaded;
+                    DebugLog.add("MODEL ready");
                     setStatus("modelo listo");
                     evaluateListeningState();
                 },
                 error -> {
+                    DebugLog.add("MODEL error " + shortMessage(error));
                     setStatus("error de modelo: " + shortMessage(error));
                 }
         );
     }
 
     private synchronized void evaluateListeningState() {
-        if (model == null) return;
+        if (model == null) {
+            DebugLog.add("STATE espera: modelo null");
+            return;
+        }
+
+        if (!listening && audioThread != null && audioThread.isAlive()) {
+            setStatus("reiniciando micrófono...");
+            main.postDelayed(this::evaluateListeningState, 180L);
+            return;
+        }
 
         if (prefs.getBoolean(Prefs.SCREEN_ONLY, true) && !isScreenInteractive()) {
             stopListening();
+            DebugLog.add("STATE bloqueado por pantalla apagada");
             setStatus("en espera: pantalla apagada");
             return;
         }
 
         if (prefs.getBoolean(Prefs.CHARGING_ONLY, false) && !isCharging()) {
             stopListening();
+            DebugLog.add("STATE bloqueado: no está cargando");
             setStatus("en espera: no está cargando");
             return;
         }
@@ -156,10 +177,19 @@ public class WakeService extends Service {
 
     private synchronized void startListening() {
         if (listening || model == null) return;
+        if (audioThread != null && audioThread.isAlive()) {
+            main.postDelayed(this::evaluateListeningState, 180L);
+            return;
+        }
 
         listening = true;
+        lastDebugPartial = "";
         acquireCpuLock();
         String phrase = Prefs.phrase(prefs);
+        DebugLog.add("LISTEN start phrase=\"" + phrase
+                + "\" grammar=\"" + grammarPhrase(phrase)
+                + "\" sens=" + prefs.getInt(Prefs.SENSITIVITY, 65)
+                + " source=" + audioSourceName(prefs.getInt(Prefs.AUDIO_SOURCE, 0)));
         setStatus("escuchando: \"" + phrase + "\"");
 
         audioThread = new Thread(() -> audioLoop(phrase), "SolWake-Audio");
@@ -171,15 +201,21 @@ public class WakeService extends Service {
         Recognizer localRecognizer = null;
 
         try {
+            String grammar = grammarPhrase(phrase);
             JSONArray grammarArray = new JSONArray();
-            grammarArray.put(phrase);
+            grammarArray.put(grammar);
+            String accentless = normalize(grammar);
+            if (!accentless.isEmpty() && !accentless.equals(grammar)) grammarArray.put(accentless);
             grammarArray.put("[unk]");
+            DebugLog.add("VOSK create grammar=" + grammarArray.toString());
             localRecognizer = new Recognizer(model, 16000.0f, grammarArray.toString());
             localRecognizer.setWords(true);
             localRecognizer.setPartialWords(true);
             recognizer = localRecognizer;
 
             int source = chooseAudioSource();
+            DebugLog.add("AUDIO source requested=" + audioSourceName(prefs.getInt(Prefs.AUDIO_SOURCE, 0))
+                    + " androidSource=" + source);
             int min = AudioRecord.getMinBufferSize(
                     16000,
                     AudioFormat.CHANNEL_IN_MONO,
@@ -196,7 +232,9 @@ public class WakeService extends Service {
 
             if (localRecorder.getState() != AudioRecord.STATE_INITIALIZED
                     && source != MediaRecorder.AudioSource.MIC) {
+                DebugLog.add("AUDIO source init falló; fallback a MIC");
                 try { localRecorder.release(); } catch (Throwable ignored) {}
+                source = MediaRecorder.AudioSource.MIC;
                 localRecorder = new AudioRecord(
                         MediaRecorder.AudioSource.MIC,
                         16000,
@@ -211,11 +249,22 @@ public class WakeService extends Service {
 
             recorder = localRecorder;
             localRecorder.startRecording();
+            DebugLog.add("AUDIO recording START state=" + localRecorder.getRecordingState()
+                    + " minBuffer=" + min + " buffer=" + bufferSize + " source=" + source);
             byte[] buffer = new byte[Math.max(4096, min)];
 
             while (listening && !Thread.currentThread().isInterrupted()) {
                 int n = localRecorder.read(buffer, 0, buffer.length);
-                if (n <= 0) continue;
+                if (n <= 0) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastAudioDebugMs > 1000L) {
+                        lastAudioDebugMs = now;
+                        DebugLog.add("AUDIO read error n=" + n);
+                    }
+                    continue;
+                }
+
+                logAudioLevel(buffer, n, source);
 
                 boolean utteranceDone = localRecognizer.acceptWaveForm(buffer, n);
                 if (utteranceDone) {
@@ -225,6 +274,7 @@ public class WakeService extends Service {
                 }
             }
         } catch (Throwable t) {
+            DebugLog.add("ERROR audio/Vosk " + shortMessage(t));
             if (listening) setStatus("error de micrófono/Vosk: " + shortMessage(t));
         } finally {
             try {
@@ -239,6 +289,7 @@ public class WakeService extends Service {
             recorder = null;
             recognizer = null;
             if (Thread.currentThread() == audioThread) audioThread = null;
+            DebugLog.add("AUDIO thread END");
             releaseCpuLock();
         }
     }
@@ -251,30 +302,71 @@ public class WakeService extends Service {
         try {
             JSONObject obj = new JSONObject(json);
             String text = obj.optString(partial ? "partial" : "text", "");
-            if (text == null || text.trim().isEmpty()) return;
+            if (text == null) text = "";
+            text = text.trim();
+
+            if (partial) {
+                if (!text.isEmpty() && !text.equals(lastDebugPartial)) {
+                    lastDebugPartial = text;
+                    DebugLog.add("PARTIAL \"" + text + "\"");
+                }
+            } else {
+                DebugLog.add("FINAL \"" + text + "\"");
+                lastDebugPartial = "";
+            }
+
+            if (text.isEmpty()) return;
 
             int sensitivity = prefs.getInt(Prefs.SENSITIVITY, 65);
-            if (partial && sensitivity < 60) return;
-
             String expected = normalize(wakePhrase);
             String heard = normalize(text);
-            if (heard.length() < Math.max(2, (int) Math.ceil(expected.length() * 0.70))) return;
-
             double confidence = extractConfidence(obj, partial);
             double similarity = similarity(expected, heard);
             double score = similarity * 0.78 + confidence * 0.22;
             double threshold = 0.93 - (Math.max(0, Math.min(100, sensitivity)) * 0.0038);
 
-            if (score >= threshold) {
+            boolean longEnough = heard.length()
+                    >= Math.max(2, (int) Math.ceil(expected.length() * 0.70));
+            boolean partialAllowed = !partial || sensitivity >= 45;
+
+            DebugLog.add(String.format(
+                    Locale.US,
+                    "MATCH %s heard=\"%s\" target=\"%s\" sim=%.3f conf=%.3f score=%.3f threshold=%.3f long=%s partialOK=%s",
+                    partial ? "P" : "F",
+                    heard,
+                    expected,
+                    similarity,
+                    confidence,
+                    score,
+                    threshold,
+                    longEnough,
+                    partialAllowed));
+
+            if (!longEnough || !partialAllowed) return;
+
+            boolean exactOrContains = heard.equals(expected)
+                    || heard.contains(expected)
+                    || expected.contains(heard) && similarity >= 0.86;
+            boolean matched = exactOrContains || score >= threshold;
+
+            if (matched) {
                 long now = System.currentTimeMillis();
                 int cooldownSeconds = prefs.getInt(Prefs.COOLDOWN, 2);
-                if (now - lastTrigger < cooldownSeconds * 1000L) return;
+                if (now - lastTrigger < cooldownSeconds * 1000L) {
+                    DebugLog.add("TRIGGER ignorado por cooldown");
+                    return;
+                }
 
                 lastTrigger = now;
+                DebugLog.add(String.format(Locale.US,
+                        "TRIGGER YES text=\"%s\" score=%.3f", text, score));
                 try { localRecognizer.reset(); } catch (Throwable ignored) {}
-                onWakeDetected(text, score);
+                onWakeDetected(text, Math.max(score, exactOrContains ? 0.99 : score));
+            } else {
+                DebugLog.add("TRIGGER no: score/parecido insuficiente");
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable t) {
+            DebugLog.add("ERROR inspectResult " + shortMessage(t) + " json=" + json);
         }
     }
 
@@ -360,6 +452,43 @@ public class WakeService extends Service {
         }, 1000L);
     }
 
+    private void logAudioLevel(byte[] data, int length, int source) {
+        long now = System.currentTimeMillis();
+        if (now - lastAudioDebugMs < 1000L) return;
+        lastAudioDebugMs = now;
+
+        long sumSquares = 0L;
+        int peak = 0;
+        int samples = 0;
+        for (int i = 0; i + 1 < length; i += 2) {
+            int sample = (short) ((data[i] & 0xff) | (data[i + 1] << 8));
+            int abs = Math.abs(sample);
+            if (abs > peak) peak = abs;
+            sumSquares += (long) sample * (long) sample;
+            samples++;
+        }
+
+        double rms = samples == 0 ? 0.0 : Math.sqrt((double) sumSquares / samples);
+        DebugLog.add(String.format(Locale.US,
+                "AUDIO n=%d rms=%.0f peak=%d source=%d",
+                length, rms, peak, source));
+    }
+
+    private static String grammarPhrase(String value) {
+        String s = value == null ? "" : value.toLowerCase(Locale.ROOT).trim();
+        s = Normalizer.normalize(s, Normalizer.Form.NFC);
+        s = s.replaceAll("[^\\p{L}\\p{N} ]", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return s.isEmpty() ? "hola sol" : s;
+    }
+
+    private static String audioSourceName(int selected) {
+        if (selected == 1) return "MIC";
+        if (selected == 2) return "UNPROCESSED";
+        return "VOICE_RECOGNITION";
+    }
+
     private int chooseAudioSource() {
         int selected = prefs.getInt(Prefs.AUDIO_SOURCE, 0);
         if (selected == 1) return MediaRecorder.AudioSource.MIC;
@@ -391,6 +520,7 @@ public class WakeService extends Service {
     }
 
     private synchronized void stopListening() {
+        if (listening) DebugLog.add("LISTEN stop requested");
         listening = false;
         try {
             if (recorder != null && recorder.getRecordingState()
@@ -555,6 +685,7 @@ public class WakeService extends Service {
         try { if (model != null) model.close(); } catch (Throwable ignored) {}
         model = null;
         running = false;
+        DebugLog.add("SERVICE destroyed");
         status = "detenido";
         try { stopForeground(true); } catch (Throwable ignored) {}
         super.onDestroy();
