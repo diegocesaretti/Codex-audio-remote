@@ -1,0 +1,64 @@
+name: Build Sol Wake APK
+
+on:
+  push:
+    branches:
+      - sol-wake-assistant-v1
+    paths:
+      - 'wake-assistant/**'
+      - '.github/workflows/build-sol-wake.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Bundle Spanish Vosk model
+        run: |
+          cd wake-assistant/app/src/main
+          rm -rf assets/model
+          mkdir -p assets
+          curl -L --fail --retry 3 \
+            -o /tmp/vosk-model.zip \
+            https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+          unzip -q /tmp/vosk-model.zip -d /tmp/vosk-model
+          mv /tmp/vosk-model/vosk-model-small-es-0.42 assets/model
+
+      - name: Build debug APK
+        working-directory: wake-assistant
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p out
+          cp wake-assistant/app/build/outputs/apk/debug/app-debug.apk out/SolWake-1.0.apk
+          sha256sum out/SolWake-1.0.apk | tee out/SolWake-1.0.sha256
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SolWake-1.0
+          path: out/*
+          if-no-files-found: error
+          compression-level: 0
