@@ -308,12 +308,56 @@ public class WakeService extends Service {
                 } catch (Throwable ignored) {}
             }
 
-            boolean launched = AssistantLauncher.launch(this, prefs);
-            if (!launched) setStatus("frase detectada, pero no se pudo abrir el asistente");
+            // ChatGPT also needs the microphone. Release Vosk/AudioRecord before launch.
+            stopListening();
 
-            int cooldown = prefs.getInt(Prefs.COOLDOWN, 2);
-            main.postDelayed(this::evaluateListeningState, Math.max(1, cooldown) * 1000L);
+            main.postDelayed(() -> {
+                boolean launched = AssistantLauncher.launch(this, prefs);
+                String detail = AssistantLauncher.getLastDetail();
+
+                if (!launched) {
+                    setStatus("no se pudo abrir ChatGPT: " + detail);
+                    main.postDelayed(this::evaluateListeningState, 1200L);
+                    return;
+                }
+
+                setStatus("ChatGPT abierto; micrófono liberado");
+                scheduleResumeAfterAssistant();
+            }, 350L);
         });
+    }
+
+    private void scheduleResumeAfterAssistant() {
+        // Give ChatGPT time to acquire the mic, then wait while another recording
+        // or communication mode is active. A hard cap avoids getting stuck forever.
+        main.postDelayed(new Runnable() {
+            int checks = 0;
+
+            @Override public void run() {
+                checks++;
+                boolean assistantBusy = false;
+
+                try {
+                    AudioManager audioManager =
+                            (AudioManager) getSystemService(AUDIO_SERVICE);
+                    if (audioManager != null) {
+                        assistantBusy = audioManager.getMode() != AudioManager.MODE_NORMAL;
+                        if (Build.VERSION.SDK_INT >= 24) {
+                            assistantBusy = assistantBusy
+                                    || !audioManager.getActiveRecordingConfigurations().isEmpty();
+                        }
+                    }
+                } catch (Throwable ignored) {}
+
+                if ((checks < 5 || assistantBusy) && checks < 120) {
+                    if (assistantBusy) setStatus("ChatGPT en voz; Sol Wake pausado");
+                    main.postDelayed(this, 1000L);
+                    return;
+                }
+
+                evaluateListeningState();
+            }
+        }, 1000L);
     }
 
     private int chooseAudioSource() {
