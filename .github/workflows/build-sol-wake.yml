@@ -24,12 +24,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Android SDK 36
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          SDKMANAGER="$(find /usr/local/lib/android/sdk/cmdline-tools -type f -name sdkmanager | sort -V | tail -n 1)"
+          echo "Using $SDKMANAGER"
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Gradle
         uses: gradle/actions/setup-gradle@v4
