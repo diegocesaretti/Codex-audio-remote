@@ -54,14 +54,14 @@ jobs:
       - name: Prepare artifact
         run: |
           mkdir -p out
-          cp wake-assistant/app/build/outputs/apk/debug/app-debug.apk out/SolWake-1.0.apk
-          sha256sum out/SolWake-1.0.apk | tee out/SolWake-1.0.sha256
-          unzip -t out/SolWake-1.0.apk >/dev/null
+          cp wake-assistant/app/build/outputs/apk/debug/app-debug.apk out/SolWake-1.1.apk
+          sha256sum out/SolWake-1.1.apk | tee out/SolWake-1.1.sha256
+          unzip -t out/SolWake-1.1.apk >/dev/null
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SolWake-1.0
+          name: SolWake-1.1
           path: out/*
           if-no-files-found: error
           compression-level: 0
