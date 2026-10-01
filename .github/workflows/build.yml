@@ -25,6 +25,101 @@ jobs:
           name: CodexAudioRemote-Windows-x64-v2
           path: dist/windows
 
+  oauth-realtime-windows:
+    if: github.ref == 'refs/heads/fix/oauth-webrtc' || github.head_ref == 'fix/oauth-webrtc'
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout Codex Audio Remote
+        uses: actions/checkout@v4
+
+      - name: Checkout OpenAI Codex
+        uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: 343074d4207d572809bd8cea15f4be1d09d98e0b
+          path: upstream-codex
+
+      - name: Apply ChatGPT OAuth WebRTC compatibility edits
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $callPath = 'upstream-codex/codex-rs/codex-api/src/endpoint/realtime_call.rs'
+          $call = (Get-Content -LiteralPath $callPath -Raw).Replace("`r`n", "`n")
+          $callNeedle = '            session.remove("id");'
+          if (-not $call.Contains($callNeedle)) {
+            throw 'Could not locate realtime_call.rs session.id removal point'
+          }
+          $callReplacement = @'
+            session.remove("id");
+            let removed_model = session.remove("model").is_some();
+            tracing::info!(
+                removed_model,
+                "Codex Audio Remote OAuth patch: sanitized realtime call session"
+            );
+'@
+          $call = $call.Replace($callNeedle, $callReplacement.TrimEnd())
+          [System.IO.File]::WriteAllText((Resolve-Path $callPath), $call, [System.Text.UTF8Encoding]::new($false))
+
+          $commonPath = 'upstream-codex/codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs'
+          $common = (Get-Content -LiteralPath $commonPath -Raw).Replace("`r`n", "`n")
+          $commonNeedle = "        RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(`n            config.model,"
+          if (-not $common.Contains($commonNeedle)) {
+            throw 'Could not locate Frameless session.model serialization point'
+          }
+          $commonReplacement = "        RealtimeWireAdapter::FramelessBidi => Ok(frameless_session_json(`n            None,"
+          $common = $common.Replace($commonNeedle, $commonReplacement)
+          [System.IO.File]::WriteAllText((Resolve-Path $commonPath), $common, [System.Text.UTF8Encoding]::new($false))
+
+          if ((Get-Content -LiteralPath $callPath -Raw) -notmatch 'removed_model = session\.remove\("model"\)') {
+            throw 'realtime_call.rs model sanitizer verification failed'
+          }
+          if ((Get-Content -LiteralPath $commonPath -Raw) -match 'FramelessBidi => Ok\(frameless_session_json\(\s*config\.model') {
+            throw 'methods_common.rs still serializes config.model for Frameless V3'
+          }
+
+          git -C upstream-codex diff --check
+          git -C upstream-codex diff -- codex-rs/codex-api/src/endpoint/realtime_call.rs codex-rs/codex-api/src/endpoint/realtime_websocket/methods_common.rs
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: upstream-codex/codex-rs
+
+      - name: Build patched Codex CLI
+        working-directory: upstream-codex/codex-rs
+        run: cargo build --release -p codex-cli --bin codex
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish Windows companion
+        run: dotnet publish windows/CodexAudioRemote.Server/CodexAudioRemote.Server.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+
+      - name: Bundle patched Codex CLI
+        shell: pwsh
+        run: Copy-Item -LiteralPath upstream-codex/codex-rs/target/release/codex.exe -Destination dist/windows/codex.exe
+
+      - name: Verify OAuth realtime bundle
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/windows/CodexAudioRemote.Server.exe)) { throw 'CodexAudioRemote.Server.exe missing' }
+          if (-not (Test-Path dist/windows/codex.exe)) { throw 'patched codex.exe missing' }
+          Get-Item dist/windows/CodexAudioRemote.Server.exe, dist/windows/codex.exe | Format-Table Name, Length
+
+      - name: Upload Windows OAuth Realtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexAudioRemote-Windows-OAuthRealtime
+          path: dist/windows
+          if-no-files-found: error
+
   android:
     runs-on: ubuntu-latest
     steps:
