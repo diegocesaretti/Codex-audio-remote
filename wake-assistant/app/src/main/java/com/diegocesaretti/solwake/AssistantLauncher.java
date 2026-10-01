@@ -7,6 +7,8 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 
 public final class AssistantLauncher {
+    private static final String ACTION_VOICE_ASSIST = "android.intent.action.VOICE_ASSIST";
+
     private AssistantLauncher() {}
 
     public static boolean launch(Context context, SharedPreferences prefs) {
@@ -35,13 +37,13 @@ public final class AssistantLauncher {
                 return true;
             }
 
-            Intent intent = new Intent(mode == 1 ? Intent.ACTION_ASSIST : Intent.ACTION_VOICE_ASSIST);
+            Intent intent = new Intent(mode == 1 ? Intent.ACTION_ASSIST : ACTION_VOICE_ASSIST);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             context.startActivity(intent);
             return true;
         } catch (Throwable first) {
             try {
-                Intent fallback = new Intent(Intent.ACTION_VOICE_ASSIST);
+                Intent fallback = new Intent(ACTION_VOICE_ASSIST);
                 fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                 context.startActivity(fallback);
                 return true;
