@@ -45,6 +45,7 @@ jobs:
             https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
           unzip -q /tmp/vosk-model.zip -d /tmp/vosk-model
           mv /tmp/vosk-model/vosk-model-small-es-0.42 assets/model
+          printf 'vosk-model-small-es-0.42-solwake-v1\n' > assets/model/uuid
 
       - name: Build debug APK
         working-directory: wake-assistant
@@ -55,6 +56,7 @@ jobs:
           mkdir -p out
           cp wake-assistant/app/build/outputs/apk/debug/app-debug.apk out/SolWake-1.0.apk
           sha256sum out/SolWake-1.0.apk | tee out/SolWake-1.0.sha256
+          unzip -t out/SolWake-1.0.apk >/dev/null
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
