@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -43,6 +44,7 @@ public class MainActivity extends Activity {
     private TextView status;
 
     private boolean startAfterPermission = false;
+    private boolean startAfterOverlay = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -168,9 +170,14 @@ public class MainActivity extends Activity {
         test.setOnClickListener(v -> {
             savePrefs();
             boolean ok = AssistantLauncher.launch(this, Prefs.get(this));
-            toast(ok ? "Intent enviado" : "No se pudo abrir el asistente");
+            String detail = AssistantLauncher.getLastDetail();
+            toast(ok ? detail : "Error: " + detail);
         });
         root.addView(test, matchWrap());
+
+        Button overlay = button("Permitir mostrar sobre otras apps");
+        overlay.setOnClickListener(v -> openOverlaySettings(false));
+        root.addView(overlay, matchWrap());
 
         Button battery = button("Abrir ajustes de optimización de batería");
         battery.setOnClickListener(v -> {
@@ -183,7 +190,7 @@ public class MainActivity extends Activity {
         root.addView(battery, matchWrap());
 
         TextView note = label(
-                "Nota: Vosk hace reconocimiento offline limitado a tu frase. En Android 14/15/16 el inicio automático del micrófono desde el arranque puede estar restringido por el sistema; si pasa, abrí Sol Wake y tocá Iniciar escucha una vez.",
+                "Nota: en Android 14/15/16 activá “Mostrar sobre otras apps” para que Sol Wake pueda abrir ChatGPT desde segundo plano. Al detectar la frase se libera el micrófono antes de abrir ChatGPT.",
                 13, false);
         note.setPadding(0, dp(14), 0, 0);
         root.addView(note);
@@ -242,7 +249,7 @@ public class MainActivity extends Activity {
                 != PackageManager.PERMISSION_GRANTED;
 
         if (!micMissing && !notifMissing) {
-            if (thenStart) startWakeService();
+            if (thenStart) startWithOverlayCheck();
             return;
         }
 
@@ -262,12 +269,42 @@ public class MainActivity extends Activity {
         if (requestCode == 40 && startAfterPermission) {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                     == PackageManager.PERMISSION_GRANTED) {
-                startWakeService();
+                startWithOverlayCheck();
             } else {
                 toast("Necesito permiso de micrófono para escuchar la frase");
             }
         }
         startAfterPermission = false;
+    }
+
+    private void startWithOverlayCheck() {
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+            startAfterOverlay = true;
+            openOverlaySettings(true);
+            return;
+        }
+        startAfterOverlay = false;
+        startWakeService();
+    }
+
+    private void openOverlaySettings(boolean explain) {
+        if (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this)) {
+            toast("“Mostrar sobre otras apps” ya está habilitado");
+            if (explain) startWakeService();
+            return;
+        }
+
+        try {
+            Intent i = new Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            startActivity(i);
+            if (explain) {
+                toast("Habilitá “Mostrar sobre otras apps” y volvé a Sol Wake");
+            }
+        } catch (Throwable t) {
+            startActivity(new Intent(Settings.ACTION_SETTINGS));
+        }
     }
 
     private void startWakeService() {
@@ -294,6 +331,11 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (startAfterOverlay
+                && (Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(this))) {
+            startAfterOverlay = false;
+            startWakeService();
+        }
         handler.post(statusTicker);
     }
 
