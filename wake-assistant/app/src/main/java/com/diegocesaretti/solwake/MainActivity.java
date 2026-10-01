@@ -166,6 +166,10 @@ public class MainActivity extends Activity {
         stop.setOnClickListener(v -> sendService(WakeService.ACTION_STOP));
         root.addView(stop, matchWrap());
 
+        Button debug = button("Abrir Debug Vosk");
+        debug.setOnClickListener(v -> startActivity(new Intent(this, DebugActivity.class)));
+        root.addView(debug, matchWrap());
+
         Button test = button("Probar apertura del asistente");
         test.setOnClickListener(v -> {
             savePrefs();
